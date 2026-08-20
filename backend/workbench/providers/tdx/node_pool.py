@@ -3,9 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 import math
+import re
+import threading
 import time
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, NoReturn, TypeVar, cast
+
+from easy_tdx import TdxConnectionError
 
 from workbench.providers.tdx.clients import (
     AsyncClientFactory,
@@ -23,6 +28,26 @@ ItemT = TypeVar("ItemT")
 ShardResultT = TypeVar("ShardResultT")
 Clock = Callable[[], float]
 NodeProbe = Callable[["NodeTarget", float], float]
+RetryableExceptionClassifier = Callable[[Exception], bool]
+
+_MAX_ERROR_LENGTH = 160
+_CREDENTIAL_PATTERN = re.compile(
+    r"\b(?:password|passwd|token|secret|api[-_]?key|credentials?)\b"
+    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_URL_CREDENTIAL_PATTERN = re.compile(
+    r"\b([a-z][a-z0-9+.-]*://)[^/@\s]+@",
+    re.IGNORECASE,
+)
+_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/])[^\s,;]+", re.IGNORECASE)
+_UNIX_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s,;]+)")
+
+
+class PoolLifecycle(str, Enum):
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +84,13 @@ class TdxNodePoolError(RuntimeError):
         super().__init__(f"all {pool} TDX nodes are unavailable")
 
 
+def default_retryable_exception_classifier(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (TdxConnectionError, OSError, ConnectionError, TimeoutError),
+    )
+
+
 class _BaseNodePool(Generic[SyncClientT]):
     def __init__(
         self,
@@ -71,11 +103,11 @@ class _BaseNodePool(Generic[SyncClientT]):
         clock: Clock,
         probe: NodeProbe | None,
         client_factory: Callable[[str, int, float], SyncClientT],
+        retryable_exception_classifier: RetryableExceptionClassifier,
     ) -> None:
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
-        if isinstance(failure_threshold, bool) or failure_threshold < 1:
-            raise ValueError("failure_threshold must be at least one")
+        _validate_positive_integer("failure_threshold", failure_threshold)
         if not math.isfinite(cooldown_seconds) or cooldown_seconds <= 0:
             raise ValueError("cooldown_seconds must be finite and positive")
 
@@ -92,63 +124,84 @@ class _BaseNodePool(Generic[SyncClientT]):
         self._states = [NodeState(target=target) for target in target_list]
         self._positions = {state.target: position for position, state in enumerate(self._states)}
         self._client_factory = client_factory
+        self._retryable_exception_classifier = retryable_exception_classifier
+
+        self._state_lock = threading.RLock()
+        self._sync_operation_lock = threading.RLock()
+        self._lifecycle = PoolLifecycle.OPEN
         self._clients: dict[NodeTarget, SyncClientT] = {}
-        self._created_clients: list[SyncClientT] = []
-        self._closed_client_ids: set[int] = set()
-        self._closed = False
+        self._owned_clients: dict[int, SyncClientT] = {}
+
+    @property
+    def lifecycle(self) -> PoolLifecycle:
+        with self._state_lock:
+            return self._lifecycle
 
     def probe_all(self) -> list[NodeTarget]:
-        self._ensure_open()
-        if self._probe is None:
-            raise RuntimeError("no node probe was configured")
+        with self._sync_operation_lock:
+            self._ensure_open()
+            if self._probe is None:
+                raise RuntimeError("no node probe was configured")
 
-        for state in self._states:
-            try:
-                latency_ms = float(self._probe(state.target, self._timeout_seconds))
-                if not math.isfinite(latency_ms) or latency_ms < 0:
-                    raise ValueError("probe latency must be finite and non-negative")
-            except Exception as exc:
-                self._record_failure(state, exc)
-            else:
-                self._record_success(state, latency_ms=latency_ms)
-        return self.ordered_targets()
+            for state in self._states:
+                try:
+                    latency_ms = float(self._probe(state.target, self._timeout_seconds))
+                    if not math.isfinite(latency_ms) or latency_ms < 0:
+                        raise ValueError("probe latency must be finite and non-negative")
+                except Exception as exc:
+                    if not self._is_retryable(exc):
+                        raise
+                    self._record_failure(state, exc)
+                else:
+                    self._record_success(state, latency_ms=latency_ms)
+            return self.ordered_targets()
 
     def ordered_targets(self) -> list[NodeTarget]:
         return [state.target for state in self._eligible_states()]
 
     def execute(self, operation: Callable[[SyncClientT], ResultT]) -> ResultT:
-        self._ensure_open()
-        candidates = self._eligible_states()
-        if not candidates:
-            raise self._unavailable_error()
+        with self._sync_operation_lock:
+            self._ensure_open()
+            candidates = self._eligible_states()
+            if not candidates:
+                self._raise_unavailable(None)
 
-        for state in candidates:
-            if not self._is_eligible(state):
-                continue
-            try:
-                client = self._client_for(state.target)
-                result = operation(client)
-            except Exception as exc:
-                self._record_failure(state, exc)
-                self._discard_client(state.target)
-            else:
-                self._record_success(state)
-                return result
-        raise self._unavailable_error()
+            last_retryable: Exception | None = None
+            for state in candidates:
+                if not self._is_eligible(state):
+                    continue
+                try:
+                    client = self._client_for(state.target)
+                    result = operation(client)
+                except Exception as exc:
+                    if not self._is_retryable(exc):
+                        raise
+                    last_retryable = exc
+                    self._record_failure(state, exc)
+                    self._discard_client(state.target)
+                else:
+                    self._record_success(state)
+                    return result
+            self._raise_unavailable(last_retryable)
 
     def health_snapshot(self) -> dict[str, Any]:
-        return {
-            "pool": self._pool_name,
-            "nodes": [self._node_diagnostic(state) for state in self._states],
-        }
+        now = self._clock()
+        with self._state_lock:
+            return {
+                "pool": self._pool_name,
+                "lifecycle": self._lifecycle.value,
+                "nodes": [self._node_diagnostic(state, now) for state in self._states],
+            }
 
     def close(self) -> None:
-        if self._closed:
-            return
-        first_error = self._close_all_sync_clients()
-        self._closed = True
-        if first_error is not None:
-            raise RuntimeError("one or more TDX clients could not be closed") from None
+        with self._sync_operation_lock:
+            if self.lifecycle is PoolLifecycle.CLOSED:
+                return
+            self._begin_closing()
+            first_error = self._close_all_sync_clients()
+            if first_error is not None:
+                raise RuntimeError("one or more TDX clients could not be closed") from first_error
+            self._mark_closed()
 
     def __enter__(self) -> _BaseNodePool[SyncClientT]:
         self._ensure_open()
@@ -157,48 +210,72 @@ class _BaseNodePool(Generic[SyncClientT]):
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
 
+    def _begin_closing(self) -> None:
+        with self._state_lock:
+            if self._lifecycle is PoolLifecycle.OPEN:
+                self._lifecycle = PoolLifecycle.CLOSING
+
+    def _mark_closed(self) -> None:
+        with self._state_lock:
+            self._lifecycle = PoolLifecycle.CLOSED
+
     def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("TDX node pool is closed")
+        with self._state_lock:
+            if self._lifecycle is not PoolLifecycle.OPEN:
+                raise RuntimeError(f"TDX node pool is {self._lifecycle.value}")
 
     def _eligible_states(self) -> list[NodeState]:
-        eligible = [state for state in self._states if self._is_eligible(state)]
-        return sorted(
-            eligible,
-            key=lambda state: (
-                state.latency_ms is None,
-                state.latency_ms if state.latency_ms is not None else 0.0,
-                self._positions[state.target],
-            ),
-        )
+        now = self._clock()
+        with self._state_lock:
+            eligible = [state for state in self._states if self._is_eligible_at(state, now)]
+            return sorted(
+                eligible,
+                key=lambda state: (
+                    state.latency_ms is None,
+                    state.latency_ms if state.latency_ms is not None else 0.0,
+                    self._positions[state.target],
+                ),
+            )
 
     def _is_eligible(self, state: NodeState) -> bool:
-        return state.circuit_open_until is None or self._clock() >= state.circuit_open_until
+        with self._state_lock:
+            return self._is_eligible_at(state, self._clock())
+
+    @staticmethod
+    def _is_eligible_at(state: NodeState, now: float) -> bool:
+        return state.circuit_open_until is None or now >= state.circuit_open_until
 
     def _record_success(self, state: NodeState, *, latency_ms: float | None = None) -> None:
-        if latency_ms is not None:
-            state.latency_ms = latency_ms
-        state.consecutive_failures = 0
-        state.circuit_open_until = None
-        state.last_error = None
+        with self._state_lock:
+            if latency_ms is not None:
+                state.latency_ms = latency_ms
+            state.consecutive_failures = 0
+            state.circuit_open_until = None
+            state.last_error = None
 
     def _record_failure(self, state: NodeState, exc: Exception) -> None:
-        state.consecutive_failures += 1
-        state.last_error = _sanitized_error(exc)
-        if state.consecutive_failures >= self._failure_threshold:
-            state.circuit_open_until = self._clock() + self._cooldown_seconds
+        with self._state_lock:
+            state.consecutive_failures += 1
+            state.last_error = _sanitized_error(exc)
+            if state.consecutive_failures >= self._failure_threshold:
+                state.circuit_open_until = self._clock() + self._cooldown_seconds
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        return bool(self._retryable_exception_classifier(exc))
 
     def _client_for(self, target: NodeTarget) -> SyncClientT:
         existing = self._clients.get(target)
         if existing is not None:
             return existing
 
+        self._ensure_open()
         client = self._client_factory(target.address, target.port, self._timeout_seconds)
-        self._created_clients.append(client)
+        with self._state_lock:
+            self._owned_clients[id(client)] = client
         try:
             client.connect()
-        except Exception:
-            self._close_sync_client_once(client)
+        except BaseException:
+            self._try_close_sync_client(client)
             raise
         self._clients[target] = client
         return client
@@ -206,41 +283,58 @@ class _BaseNodePool(Generic[SyncClientT]):
     def _discard_client(self, target: NodeTarget) -> None:
         client = self._clients.pop(target, None)
         if client is not None:
-            self._close_sync_client_once(client)
+            self._try_close_sync_client(client)
 
-    def _close_sync_client_once(self, client: SyncClientT) -> Exception | None:
-        client_id = id(client)
-        if client_id in self._closed_client_ids:
-            return None
-        self._closed_client_ids.add(client_id)
+    def _try_close_sync_client(self, client: SyncClientT) -> Exception | None:
         try:
             client.close()
         except Exception as exc:
             return exc
+        self._release_sync_client(client)
         return None
 
+    def _release_sync_client(self, client: SyncClientT) -> None:
+        with self._state_lock:
+            self._owned_clients.pop(id(client), None)
+            for target, active in list(self._clients.items()):
+                if active is client:
+                    self._clients.pop(target, None)
+
     def _close_all_sync_clients(self) -> Exception | None:
+        with self._state_lock:
+            clients = list(self._owned_clients.values())
         first_error: Exception | None = None
-        for client in self._created_clients:
-            error = self._close_sync_client_once(client)
+        for client in clients:
+            error = self._try_close_sync_client(client)
             if first_error is None and error is not None:
                 first_error = error
-        self._clients.clear()
         return first_error
 
-    def _node_diagnostic(self, state: NodeState) -> dict[str, object]:
+    def _node_diagnostic(self, state: NodeState, now: float) -> dict[str, object]:
+        remaining = (
+            max(0.0, state.circuit_open_until - now)
+            if state.circuit_open_until is not None
+            else 0.0
+        )
         return {
             "address": state.target.address,
             "port": state.target.port,
             "latency_ms": state.latency_ms,
             "consecutive_failures": state.consecutive_failures,
-            "circuit_open_until": state.circuit_open_until,
+            "circuit_open": remaining > 0.0,
+            "cooldown_remaining_seconds": remaining,
             "last_error": state.last_error,
         }
 
     def _unavailable_error(self) -> TdxNodePoolError:
         nodes = cast(list[dict[str, object]], self.health_snapshot()["nodes"])
         return TdxNodePoolError(self._pool_name, nodes)
+
+    def _raise_unavailable(self, cause: Exception | None) -> NoReturn:
+        error = self._unavailable_error()
+        if cause is None:
+            raise error
+        raise error from cause
 
 
 class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
@@ -256,9 +350,11 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
         probe: NodeProbe | None = None,
         client_factory: Callable[[str, int, float], SyncClientT] | None = None,
         async_client_factory: AsyncClientFactory | None = None,
+        retryable_exception_classifier: RetryableExceptionClassifier = (
+            default_retryable_exception_classifier
+        ),
     ) -> None:
-        if isinstance(max_concurrency, bool) or max_concurrency < 1:
-            raise ValueError("max_concurrency must be at least one")
+        _validate_positive_integer("max_concurrency", max_concurrency)
         super().__init__(
             targets,
             pool_name="normal",
@@ -270,64 +366,78 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
             client_factory=client_factory
             if client_factory is not None
             else cast(Callable[[str, int, float], SyncClientT], create_tdx_client),
+            retryable_exception_classifier=retryable_exception_classifier,
         )
         self._async_client_factory = async_client_factory or create_async_tdx_client
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._async_close_lock = asyncio.Lock()
         self._async_clients: dict[NodeTarget, AsyncTdxClientProtocol] = {}
-        self._created_async_clients: list[AsyncTdxClientProtocol] = []
-        self._closed_async_client_ids: set[int] = set()
+        self._owned_async_clients: dict[int, AsyncTdxClientProtocol] = {}
         self._node_locks = {state.target: asyncio.Lock() for state in self._states}
+        self._batch_tasks: set[asyncio.Task[Any]] = set()
+        self._shard_tasks: set[asyncio.Task[Any]] = set()
 
     async def execute_sharded(
         self,
         items: Iterable[ItemT],
         operation: Callable[[Any, ItemT], Awaitable[ShardResultT]],
     ) -> list[ShardResultT]:
-        self._ensure_open()
-        item_list = list(items)
-        if not item_list:
-            return []
+        batch_task = asyncio.current_task()
+        if batch_task is None:
+            raise RuntimeError("async shard execution requires an asyncio task")
+        self._register_batch_task(batch_task)
+        shard_tasks: list[asyncio.Task[ShardResultT]] = []
+        try:
+            item_list = list(items)
+            if not item_list:
+                return []
 
-        candidates = self._eligible_states()
-        if not candidates:
-            raise self._unavailable_error()
+            candidates = self._eligible_states()
+            if not candidates:
+                self._raise_unavailable(None)
 
-        async def execute_one(position: int, item: ItemT) -> ShardResultT:
-            offset = position % len(candidates)
-            ordered = candidates[offset:] + candidates[:offset]
-            return await self._execute_async_on_nodes(ordered, item, operation)
+            for position, item in enumerate(item_list):
+                offset = position % len(candidates)
+                ordered = candidates[offset:] + candidates[:offset]
+                shard_tasks.append(
+                    asyncio.create_task(self._execute_async_on_nodes(ordered, item, operation))
+                )
+            self._register_shard_tasks(shard_tasks)
 
-        return list(
-            await asyncio.gather(
-                *(execute_one(position, item) for position, item in enumerate(item_list))
-            )
-        )
+            try:
+                return list(await asyncio.gather(*shard_tasks))
+            except BaseException:
+                await _cancel_and_drain(shard_tasks)
+                raise
+            finally:
+                self._unregister_shard_tasks(shard_tasks)
+        finally:
+            self._unregister_batch_task(batch_task)
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
+        async with self._async_close_lock:
+            if self.lifecycle is PoolLifecycle.CLOSED:
+                return
 
-        first_error: Exception | None = None
-        for client in self._created_async_clients:
-            error = await self._close_async_client_once(client)
-            if first_error is None and error is not None:
-                first_error = error
-        self._async_clients.clear()
+            with self._sync_operation_lock:
+                self._begin_closing()
+            await self._cancel_and_await_inflight_work()
 
-        sync_error = self._close_all_sync_clients()
-        if first_error is None:
-            first_error = sync_error
-        self._closed = True
-        if first_error is not None:
-            raise RuntimeError("one or more TDX clients could not be closed") from None
+            first_error = await self._close_all_async_clients()
+            with self._sync_operation_lock:
+                sync_error = self._close_all_sync_clients()
+            if first_error is None:
+                first_error = sync_error
+            if first_error is not None:
+                raise RuntimeError("one or more TDX clients could not be closed") from first_error
+            self._mark_closed()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        has_open_async_clients = any(
-            id(client) not in self._closed_async_client_ids for client in self._created_async_clients
-        )
-        if not has_open_async_clients:
+        with self._state_lock:
+            has_async_resources = bool(
+                self._owned_async_clients or self._batch_tasks or self._shard_tasks
+            )
+        if not has_async_resources:
             super().close()
             return
         try:
@@ -344,62 +454,124 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
     async def __aexit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         await self.aclose()
 
+    def _register_batch_task(self, task: asyncio.Task[Any]) -> None:
+        with self._state_lock:
+            if self._lifecycle is not PoolLifecycle.OPEN:
+                raise RuntimeError(f"TDX node pool is {self._lifecycle.value}")
+            self._batch_tasks.add(task)
+
+    def _unregister_batch_task(self, task: asyncio.Task[Any]) -> None:
+        with self._state_lock:
+            self._batch_tasks.discard(task)
+
+    def _register_shard_tasks(self, tasks: Iterable[asyncio.Task[Any]]) -> None:
+        with self._state_lock:
+            self._shard_tasks.update(tasks)
+
+    def _unregister_shard_tasks(self, tasks: Iterable[asyncio.Task[Any]]) -> None:
+        with self._state_lock:
+            self._shard_tasks.difference_update(tasks)
+
+    async def _cancel_and_await_inflight_work(self) -> None:
+        current = asyncio.current_task()
+        with self._state_lock:
+            tasks = list((self._batch_tasks | self._shard_tasks) - {current})
+        await _cancel_and_drain(tasks)
+        with self._state_lock:
+            self._batch_tasks.difference_update(task for task in tasks if task.done())
+            self._shard_tasks.difference_update(task for task in tasks if task.done())
+
     async def _execute_async_on_nodes(
         self,
         candidates: Sequence[NodeState],
         item: ItemT,
         operation: Callable[[Any, ItemT], Awaitable[ShardResultT]],
     ) -> ShardResultT:
+        last_retryable: Exception | None = None
         for state in candidates:
+            self._ensure_open()
             if not self._is_eligible(state):
                 continue
             async with self._node_locks[state.target]:
+                self._ensure_open()
                 if not self._is_eligible(state):
                     continue
                 try:
                     async with self._semaphore:
+                        self._ensure_open()
                         client = await self._async_client_for(state.target)
                         result = await operation(client, item)
+                        self._ensure_open()
                 except Exception as exc:
+                    if not self._is_retryable(exc):
+                        raise
+                    last_retryable = exc
                     self._record_failure(state, exc)
                     await self._discard_async_client(state.target)
                 else:
                     self._record_success(state)
                     return result
-        raise self._unavailable_error()
+        self._raise_unavailable(last_retryable)
 
     async def _async_client_for(self, target: NodeTarget) -> AsyncTdxClientProtocol:
+        self._ensure_open()
         existing = self._async_clients.get(target)
         if existing is not None:
             return existing
 
-        client = self._async_client_factory(target.address, target.port, self._timeout_seconds)
-        self._created_async_clients.append(client)
+        with self._state_lock:
+            if self._lifecycle is not PoolLifecycle.OPEN:
+                raise RuntimeError(f"TDX node pool is {self._lifecycle.value}")
+            client = self._async_client_factory(
+                target.address,
+                target.port,
+                self._timeout_seconds,
+            )
+            self._owned_async_clients[id(client)] = client
         try:
             await client.connect()
-        except Exception:
-            await self._close_async_client_once(client)
+        except asyncio.CancelledError:
             raise
+        except Exception:
+            await self._try_close_async_client(client)
+            raise
+        self._ensure_open()
         self._async_clients[target] = client
         return client
 
     async def _discard_async_client(self, target: NodeTarget) -> None:
         client = self._async_clients.pop(target, None)
         if client is not None:
-            await self._close_async_client_once(client)
+            await self._try_close_async_client(client)
 
-    async def _close_async_client_once(
+    async def _try_close_async_client(
         self, client: AsyncTdxClientProtocol
     ) -> Exception | None:
-        client_id = id(client)
-        if client_id in self._closed_async_client_ids:
-            return None
-        self._closed_async_client_ids.add(client_id)
         try:
             await client.close()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             return exc
+        self._release_async_client(client)
         return None
+
+    def _release_async_client(self, client: AsyncTdxClientProtocol) -> None:
+        with self._state_lock:
+            self._owned_async_clients.pop(id(client), None)
+            for target, active in list(self._async_clients.items()):
+                if active is client:
+                    self._async_clients.pop(target, None)
+
+    async def _close_all_async_clients(self) -> Exception | None:
+        with self._state_lock:
+            clients = list(self._owned_async_clients.values())
+        first_error: Exception | None = None
+        for client in clients:
+            error = await self._try_close_async_client(client)
+            if first_error is None and error is not None:
+                first_error = error
+        return first_error
 
 
 class MacNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
@@ -413,6 +585,9 @@ class MacNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
         clock: Clock = time.monotonic,
         probe: NodeProbe | None = None,
         client_factory: Callable[[str, int, float], SyncClientT] | None = None,
+        retryable_exception_classifier: RetryableExceptionClassifier = (
+            default_retryable_exception_classifier
+        ),
     ) -> None:
         super().__init__(
             targets,
@@ -425,11 +600,38 @@ class MacNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
             client_factory=client_factory
             if client_factory is not None
             else cast(Callable[[str, int, float], SyncClientT], create_mac_client),
+            retryable_exception_classifier=retryable_exception_classifier,
         )
 
 
+async def _cancel_and_drain(tasks: Iterable[asyncio.Task[Any]]) -> None:
+    task_list = list(tasks)
+    for task in task_list:
+        if not task.done():
+            task.cancel()
+    if task_list:
+        await asyncio.gather(*task_list, return_exceptions=True)
+
+
+def _validate_positive_integer(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+
+
 def _sanitized_error(exc: Exception) -> str:
-    name = type(exc).__name__
-    if not name.isidentifier():
-        return "ProviderError"
-    return name
+    class_name = type(exc).__name__ if type(exc).__name__.isidentifier() else "ProviderError"
+    try:
+        message = str(exc)
+    except Exception:
+        message = "error details unavailable"
+    message = _URL_CREDENTIAL_PATTERN.sub(r"\1<redacted>@", message)
+    message = _CREDENTIAL_PATTERN.sub("<redacted>", message)
+    message = _WINDOWS_PATH_PATTERN.sub("<path>", message)
+    message = _UNIX_PATH_PATTERN.sub("<path>", message)
+    message = " ".join(message.split())
+    summary = f"{class_name}: {message}" if message else class_name
+    if len(summary) <= _MAX_ERROR_LENGTH:
+        return summary
+    return f"{summary[: _MAX_ERROR_LENGTH - 3]}..."
