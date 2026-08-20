@@ -169,3 +169,40 @@ def test_partial_and_uncommitted_rows_are_never_visible_after_later_complete_min
     assert stock.json()["latest_complete_minute"] == sector.json()["latest_complete_minute"] == "09:32"
     assert [point["minute"] for point in stock.json()["points"]] == ["09:32"]
     assert [point["minute"] for point in sector.json()["points"]] == ["09:32"]
+
+
+def test_persisted_partial_batch_is_hidden_after_a_later_complete_minute(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    class PartialFirstMinuteProvider(FakeMarketProvider):
+        def minute_batch(self, trade_date: date, minute: str):  # type: ignore[no-untyped-def]
+            batch = super().minute_batch(trade_date, minute)
+            if minute == "09:31":
+                return batch.model_copy(update={"stocks": batch.stocks[:-1]})
+            return batch
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = PartialFirstMinuteProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    collector = MinuteCollector(provider, meta, hot)
+    partial_result = collector.collect(TRADE_DATE, "09:31")
+    collector.collect(TRADE_DATE, "09:32")
+    client = TestClient(create_app(settings))
+
+    stock = client.get("/api/v1/stocks/SH600000/fund-flow?date=2026-08-20")
+    sector = client.get("/api/v1/sectors/880000/minutes?date=2026-08-20")
+    with hot._session(readonly=True) as connection:
+        persisted_status = connection.execute(
+            "SELECT status FROM collection_status WHERE trade_date=? AND minute=?",
+            ("2026-08-20", "09:31"),
+        ).fetchone()[0]
+
+    assert partial_result["status"] == persisted_status == "partial"
+    assert stock.status_code == sector.status_code == 200
+    assert stock.json()["latest_complete_minute"] == sector.json()["latest_complete_minute"] == "09:32"
+    assert [point["minute"] for point in stock.json()["points"]] == ["09:32"]
+    assert [point["minute"] for point in sector.json()["points"]] == ["09:32"]
