@@ -1,0 +1,89 @@
+:root {
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --border: #dbe2ef;
+  --text: #0f172a;
+  --muted: #64748b;
+  --up: #ef4444;
+  --down: #22c55e;
+  --accent: #2563eb;
+  --glow: rgba(37, 99, 235, 0.08);
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 16px rgba(15, 23, 42, 0.04);
+}
+
+html.dark {
+  --bg: #0a0e17;
+  --panel: rgba(18, 26, 43, 0.92);
+  --border: #243049;
+  --text: #e8eefc;
+  --muted: #8fa0bf;
+  --up: #ef4444;
+  --down: #22c55e;
+  --accent: #3b82f6;
+  --glow: rgba(59, 130, 246, 0.12);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: 'DM Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background:
+    radial-gradient(900px 500px at 8% -8%, var(--glow), transparent 60%),
+    var(--bg);
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.font-mono,
+.num {
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.n-data-table .n-data-table-tr.active-row td {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+}
+
+.n-button.n-button--default-type {
+  color: var(--text);
+}
+
+.n-button.n-button--primary-type {
+  --n-color: var(--accent) !important;
+  --n-color-hover: color-mix(in srgb, var(--accent) 88%, white) !important;
+  --n-color-pressed: color-mix(in srgb, var(--accent) 78%, black) !important;
+  --n-color-focus: var(--accent) !important;
+  --n-text-color: #ffffff !important;
+  --n-text-color-hover: #ffffff !important;
+  --n-text-color-pressed: #ffffff !important;
+  --n-text-color-focus: #ffffff !important;
+  --n-border: none !important;
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+}
+
+.n-button.n-button--primary-type .n-button__icon,
+.n-button.n-button--primary-type .n-button__content {
+  color: #ffffff !important;
+}
+
+.n-drawer .n-drawer-footer {
+  border-top: 1px solid var(--border);
+}

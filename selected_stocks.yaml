@@ -1,0 +1,9 @@
+stocks:
+- symbol: SZ300750
+  name: 宁德时代
+- symbol: SZ002792
+  name: 通宇通讯
+- symbol: SZ002149
+  name: 西部材料
+- symbol: SZ002156
+  name: 通富微电

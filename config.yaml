@@ -1,0 +1,46 @@
+tdx_root: "C:\\new_tdx64"
+refresh_seconds: 6
+host: "127.0.0.1"
+port: 8765
+
+# 未自选时按类型自动取主力前 N；自选后优先用 selected_boards.yaml
+board_type: "HY"
+board_count: 12
+
+# 首次使用默认自选（保存自选后会写入 selected_boards.yaml 覆盖）
+default_selected_boards:
+  - id: "881338"
+    name: "通信设备"
+  - id: "881359"
+    name: "云计算"
+  - id: "881082"
+    name: "稀有金属"
+  - id: "881094"
+    name: "软件开发"
+  - id: "881326"
+    name: "消费电子"
+  - id: "881476"
+    name: "军工电子"
+
+# 首次使用默认自选个股（保存后会写入 selected_stocks.yaml 覆盖）
+default_selected_stocks:
+  - symbol: SH600519
+    name: 贵州茅台
+  - symbol: SZ300750
+    name: 宁德时代
+  - symbol: SZ000001
+    name: 平安银行
+  - symbol: BJ920083
+    name: 金龙新材
+  - symbol: SH999999
+    name: 上证指数
+
+merge_fallback: true
+
+order_thresholds:
+  super: 1000000
+  large: 200000
+  medium: 40000
+
+# 个股 MAC 官方主力采样保留最近 N 个交易日（SQLite: data/intraday.db）
+intraday_retention_days: 15
