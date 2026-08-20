@@ -5,6 +5,8 @@ from datetime import date, datetime
 import json
 from pathlib import Path
 import re
+import sqlite3
+import sys
 from typing import Sequence
 
 from workbench.collector.catalog_sync import CatalogSyncService
@@ -58,7 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--date", type=iso_date, required=True)
     parser.add_argument("--minute", type=clock_minute, required=True)
-    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("../data"),
+        help="data directory (default: ../data)",
+    )
     parser.add_argument("--stocks", type=positive_integer, default=100)
     parser.add_argument("--sectors", type=lambda value: nonnegative_integer(value, "sectors"), default=4)
     parser.add_argument(
@@ -97,14 +104,18 @@ def collect_once(
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_arguments(argv)
-    result = collect_once(
-        trade_date=arguments.date,
-        minute=arguments.minute,
-        data_dir=arguments.data_dir,
-        stocks=arguments.stocks,
-        sectors=arguments.sectors,
-        members_per_sector=arguments.members_per_sector,
-    )
+    try:
+        result = collect_once(
+            trade_date=arguments.date,
+            minute=arguments.minute,
+            data_dir=arguments.data_dir,
+            stocks=arguments.stocks,
+            sectors=arguments.sectors,
+            members_per_sector=arguments.members_per_sector,
+        )
+    except (OSError, sqlite3.Error) as error:
+        print(f"collector setup failed: {error}", file=sys.stderr)
+        return 1
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 

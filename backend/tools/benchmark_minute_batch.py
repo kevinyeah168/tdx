@@ -33,7 +33,7 @@ def main() -> int:
         wall_seconds = time.perf_counter() - started_at
 
     payload = {
-        "status": status,
+        **status,
         "wall_seconds": wall_seconds,
         "budget_seconds": BUDGET_SECONDS,
     }

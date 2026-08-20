@@ -7,6 +7,8 @@ import sys
 
 import pytest
 
+from workbench.collector.main import build_parser, parse_arguments
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -64,6 +66,30 @@ def test_fake_once_is_idempotent_for_the_same_minute(tmp_path: Path) -> None:
     assert first_payload == second_payload
 
 
+def test_cli_uses_the_documented_default_data_directory() -> None:
+    arguments = parse_arguments(
+        ["--fake", "--once", "--date", "2026-08-20", "--minute", "09:31"]
+    )
+
+    assert arguments.data_dir == Path("../data")
+
+
+def test_cli_help_documents_the_default_data_directory() -> None:
+    assert "default: ../data" in build_parser().format_help()
+
+
+def test_cli_controls_existing_file_data_directory_failure(tmp_path: Path) -> None:
+    data_file = tmp_path / "not-a-directory"
+    data_file.write_text("not a directory", encoding="utf-8")
+
+    completed = run_collector(*collector_arguments(data_file))
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "collector setup failed:" in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
 def test_capacity_probe_emits_a_successful_json_report() -> None:
     completed = subprocess.run(
         [sys.executable, "tools/benchmark_minute_batch.py"],
@@ -77,9 +103,9 @@ def test_capacity_probe_emits_a_successful_json_report() -> None:
     payload = json.loads(completed.stdout)
     assert payload["budget_seconds"] == 45.0
     assert payload["wall_seconds"] <= payload["budget_seconds"]
-    assert payload["status"]["coverage_pct"] == 100.0
-    assert payload["status"]["collected_stocks"] == 5_500
-    assert payload["status"]["collected_sectors"] == 400
+    assert payload["coverage_pct"] == 100.0
+    assert payload["collected_stocks"] == 5_500
+    assert payload["collected_sectors"] == 400
 
 
 @pytest.mark.parametrize(
