@@ -1,0 +1,118 @@
+META_SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS security_master (
+    symbol TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    market TEXT NOT NULL,
+    active INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sector_master (
+    sector_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sector_type TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sector_membership (
+    sector_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    PRIMARY KEY (sector_id, symbol),
+    FOREIGN KEY (sector_id) REFERENCES sector_master(sector_id),
+    FOREIGN KEY (symbol) REFERENCES security_master(symbol)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS catalog_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    version TEXT NOT NULL
+);
+"""
+
+HOT_SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+
+CREATE TABLE IF NOT EXISTS stock_minute (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    close REAL NOT NULL,
+    change_pct REAL NOT NULL,
+    amount_delta REAL NOT NULL,
+    main_delta REAL NOT NULL,
+    main_cum REAL NOT NULL,
+    super_delta REAL NOT NULL,
+    super_cum REAL NOT NULL,
+    large_delta REAL NOT NULL,
+    large_cum REAL NOT NULL,
+    medium_delta REAL NOT NULL,
+    medium_cum REAL NOT NULL,
+    small_delta REAL NOT NULL,
+    small_cum REAL NOT NULL,
+    tier_meta_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_series
+ON stock_minute(trade_date, symbol, minute);
+
+CREATE TABLE IF NOT EXISTS sector_minute (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    sector_id TEXT NOT NULL,
+    change_pct REAL NOT NULL,
+    member_count INTEGER NOT NULL,
+    main_delta REAL NOT NULL,
+    main_cum REAL NOT NULL,
+    super_delta REAL NOT NULL,
+    super_cum REAL NOT NULL,
+    large_delta REAL NOT NULL,
+    large_cum REAL NOT NULL,
+    medium_delta REAL NOT NULL,
+    medium_cum REAL NOT NULL,
+    small_delta REAL NOT NULL,
+    small_cum REAL NOT NULL,
+    tier_meta_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute, sector_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sector_series
+ON sector_minute(trade_date, sector_id, minute);
+
+CREATE TABLE IF NOT EXISTS collection_status (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    expected_stocks INTEGER NOT NULL,
+    collected_stocks INTEGER NOT NULL,
+    expected_sectors INTEGER NOT NULL,
+    collected_sectors INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    coverage_pct REAL NOT NULL,
+    status TEXT NOT NULL,
+    error_summary TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute)
+);
+
+CREATE TABLE IF NOT EXISTS data_gap (
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (entity_type, entity_id, trade_date, minute)
+);
+"""
