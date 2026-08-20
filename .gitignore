@@ -5,3 +5,8 @@ node_modules/
 frontend/dist/
 .DS_Store
 data/
+
+# Real TDX capability probes may contain unsanitized protocol diagnostics.
+data/run/*tdx*capability*probe*
+backend/data/run/*tdx*capability*probe*
+backend/data/run/.*tdx*capability*probe*

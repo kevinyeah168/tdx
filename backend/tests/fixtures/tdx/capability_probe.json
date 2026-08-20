@@ -1,0 +1,104 @@
+{
+  "security_catalog": {
+    "available": true,
+    "source": "tdx.normal.security-list",
+    "latency_ms": 312.9999999946449,
+    "sample_fields": [
+      "market",
+      "code",
+      "name",
+      "volunit",
+      "decimal_point",
+      "pre_close",
+      "industry_tdx",
+      "industry_sw"
+    ],
+    "error": null
+  },
+  "board_list": {
+    "available": true,
+    "source": "tdx.enhanced.board-list",
+    "latency_ms": 219.0000000045984,
+    "sample_fields": [
+      "market",
+      "code",
+      "name",
+      "price",
+      "rise_speed",
+      "pre_close",
+      "symbol_market",
+      "symbol_code",
+      "symbol_name",
+      "symbol_price",
+      "symbol_rise_speed",
+      "symbol_pre_close"
+    ],
+    "error": null
+  },
+  "board_members": {
+    "available": true,
+    "source": "tdx.enhanced.board-members",
+    "latency_ms": 30.999999995401595,
+    "sample_fields": [
+      "market",
+      "code",
+      "name",
+      "pre_close",
+      "open",
+      "high",
+      "low",
+      "close",
+      "vol",
+      "vol_ratio",
+      "amount",
+      "total_shares"
+    ],
+    "error": null
+  },
+  "official_funds": {
+    "available": false,
+    "source": "tdx.enhanced.capital-flow",
+    "latency_ms": 31.000000002677552,
+    "sample_fields": [],
+    "error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+  },
+  "quotes": {
+    "available": false,
+    "source": "tdx.normal.quotes+tdx.enhanced.quotes",
+    "latency_ms": 3218.9999999973224,
+    "sample_fields": [],
+    "error": "CapabilityUnavailable: CapabilityUnavailable: protocol response was empty; OverflowError: int too big to convert"
+  },
+  "transactions": {
+    "available": false,
+    "source": "tdx.normal.transactions",
+    "latency_ms": 187.0000000053551,
+    "sample_fields": [],
+    "error": "CapabilityUnavailable: protocol response was empty"
+  },
+  "minute_data": {
+    "available": true,
+    "source": "tdx.normal.minute-data",
+    "latency_ms": 46.999999998661224,
+    "sample_fields": [
+      "datetime",
+      "price",
+      "vol"
+    ],
+    "error": null
+  },
+  "bars": {
+    "available": false,
+    "source": "tdx.normal.bars+tdx.enhanced.kline",
+    "latency_ms": 63.00000000192085,
+    "sample_fields": [],
+    "error": "CapabilityUnavailable: CapabilityUnavailable: protocol response was empty; CapabilityUnavailable: protocol response was empty"
+  },
+  "order_book": {
+    "available": false,
+    "source": "tdx.enhanced.order-book",
+    "latency_ms": 0.0,
+    "sample_fields": [],
+    "error": "OverflowError: int too big to convert"
+  }
+}
