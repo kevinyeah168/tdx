@@ -1,0 +1,11 @@
+{
+  "normal": [
+    {"address": "10.0.0.1", "port": 7709},
+    {"address": "10.0.0.2", "port": 7709},
+    {"address": "10.0.0.3", "port": 7709}
+  ],
+  "enhanced": [
+    {"address": "10.1.0.1", "port": 7727},
+    {"address": "10.1.0.2", "port": 7727}
+  ]
+}
