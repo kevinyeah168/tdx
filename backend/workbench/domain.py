@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Annotated, Literal
+import re
+from typing import Annotated, Generic, Literal, TypeVar
 
 from pydantic import (
     AfterValidator,
@@ -31,8 +32,15 @@ def validate_nonblank_text(value: str) -> str:
     return stripped_value
 
 
+def validate_market_symbol(value: str) -> str:
+    if re.fullmatch(r"(?:SH|SZ|BJ)\d{6}", value) is None:
+        raise ValueError("symbol must use an SH, SZ, or BJ market prefix and six digits")
+    return value
+
+
 Minute = Annotated[str, AfterValidator(validate_minute)]
 NonBlankText = Annotated[str, AfterValidator(validate_nonblank_text)]
+MarketSymbol = Annotated[NonBlankText, AfterValidator(validate_market_symbol)]
 
 
 class NormalizedModel(BaseModel):
@@ -46,6 +54,103 @@ class DataQuality(str, Enum):
     CALIBRATED = "calibrated"
     STALE = "stale"
     GAP = "gap"
+
+
+PayloadT = TypeVar("PayloadT")
+
+
+class DataEnvelope(NormalizedModel, Generic[PayloadT]):
+    data: PayloadT
+    source: NonBlankText
+    quality: DataQuality
+    observed_at: datetime
+    catalog_version: NonBlankText
+    gap_reason: NonBlankText | None = None
+
+
+class ProviderCapabilities(NormalizedModel):
+    catalog: bool
+    minute: bool
+    quote: bool
+    transaction: bool
+    bars: bool
+    order_book: bool
+
+
+class QuoteSnapshot(NormalizedModel):
+    symbol: MarketSymbol
+    trade_date: date
+    minute: Minute
+    price: FiniteFloat = Field(ge=0)
+    previous_close: FiniteFloat = Field(ge=0)
+    change_pct: FiniteFloat
+    volume: FiniteFloat = Field(ge=0)
+    amount: FiniteFloat = Field(ge=0)
+
+
+class OrderBookLevel(NormalizedModel):
+    price: FiniteFloat = Field(gt=0)
+    volume: FiniteFloat = Field(ge=0)
+
+
+class OrderBook(NormalizedModel):
+    symbol: MarketSymbol
+    trade_date: date
+    minute: Minute
+    bids: list[OrderBookLevel] = Field(min_length=5, max_length=5)
+    asks: list[OrderBookLevel] = Field(min_length=5, max_length=5)
+
+    @model_validator(mode="after")
+    def validate_level_order(self) -> "OrderBook":
+        bid_prices = [level.price for level in self.bids]
+        ask_prices = [level.price for level in self.asks]
+        if any(
+            current <= following
+            for current, following in zip(bid_prices, bid_prices[1:])
+        ):
+            raise ValueError("bid levels must be ordered from highest to lowest price")
+        if any(
+            current >= following
+            for current, following in zip(ask_prices, ask_prices[1:])
+        ):
+            raise ValueError("ask levels must be ordered from lowest to highest price")
+        return self
+
+
+class Bar(NormalizedModel):
+    symbol: MarketSymbol
+    period: NonBlankText
+    timestamp: datetime
+    open: FiniteFloat = Field(ge=0)
+    high: FiniteFloat = Field(ge=0)
+    low: FiniteFloat = Field(ge=0)
+    close: FiniteFloat = Field(ge=0)
+    volume: FiniteFloat = Field(ge=0)
+    amount: FiniteFloat = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> "Bar":
+        if self.high < max(self.open, self.low, self.close):
+            raise ValueError("high must be greater than or equal to open, low, and close")
+        if self.low > min(self.open, self.high, self.close):
+            raise ValueError("low must be less than or equal to open, high, and close")
+        return self
+
+
+class Transaction(NormalizedModel):
+    symbol: MarketSymbol
+    trade_date: date
+    timestamp: datetime
+    price: FiniteFloat = Field(ge=0)
+    volume: FiniteFloat = Field(ge=0)
+    amount: FiniteFloat = Field(ge=0)
+    side: Literal["buy", "sell", "neutral"]
+
+    @model_validator(mode="after")
+    def validate_trade_date(self) -> "Transaction":
+        if self.timestamp.date() != self.trade_date:
+            raise ValueError("timestamp must fall on trade_date")
+        return self
 
 
 class TierPoint(NormalizedModel):

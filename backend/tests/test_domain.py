@@ -6,17 +6,113 @@ import pytest
 from pydantic import ValidationError
 
 from workbench.domain import (
+    Bar,
     CollectionStatus,
+    DataEnvelope,
     DataQuality,
     FundFlow,
     Membership,
+    OrderBook,
+    OrderBookLevel,
+    ProviderCapabilities,
     ProviderMinuteBatch,
+    QuoteSnapshot,
     Security,
     Sector,
     SectorMinute,
     StockMinute,
     TierPoint,
+    Transaction,
 )
+
+
+def quote_snapshot(**overrides: object) -> QuoteSnapshot:
+    values: dict[str, object] = {
+        "symbol": "SH600000",
+        "trade_date": date(2026, 8, 20),
+        "minute": "09:31",
+        "price": 10.2,
+        "previous_close": 10.0,
+        "change_pct": 2.0,
+        "volume": 12_000.0,
+        "amount": 1_224_000.0,
+    }
+    values.update(overrides)
+    return QuoteSnapshot(**values)
+
+
+def order_book_levels(prices: list[float]) -> list[OrderBookLevel]:
+    return [
+        OrderBookLevel(price=price, volume=float(1_000 * (index + 1)))
+        for index, price in enumerate(prices)
+    ]
+
+
+def order_book(**overrides: object) -> OrderBook:
+    values: dict[str, object] = {
+        "symbol": "SH600000",
+        "trade_date": date(2026, 8, 20),
+        "minute": "09:31",
+        "bids": order_book_levels([10.00, 9.99, 9.98, 9.97, 9.96]),
+        "asks": order_book_levels([10.01, 10.02, 10.03, 10.04, 10.05]),
+    }
+    values.update(overrides)
+    return OrderBook(**values)
+
+
+def bar(**overrides: object) -> Bar:
+    values: dict[str, object] = {
+        "symbol": "SH600000",
+        "period": "1d",
+        "timestamp": datetime(2026, 8, 20, 15, 0),
+        "open": 10.0,
+        "high": 10.8,
+        "low": 9.8,
+        "close": 10.2,
+        "volume": 12_000.0,
+        "amount": 1_224_000.0,
+    }
+    values.update(overrides)
+    return Bar(**values)
+
+
+def transaction(**overrides: object) -> Transaction:
+    values: dict[str, object] = {
+        "symbol": "SH600000",
+        "trade_date": date(2026, 8, 20),
+        "timestamp": datetime(2026, 8, 20, 9, 31, 5),
+        "price": 10.2,
+        "volume": 1_000.0,
+        "amount": 10_200.0,
+        "side": "buy",
+    }
+    values.update(overrides)
+    return Transaction(**values)
+
+
+def provider_capabilities(**overrides: object) -> ProviderCapabilities:
+    values: dict[str, object] = {
+        "catalog": True,
+        "minute": True,
+        "quote": True,
+        "transaction": True,
+        "bars": True,
+        "order_book": True,
+    }
+    values.update(overrides)
+    return ProviderCapabilities(**values)
+
+
+def data_envelope(**overrides: object) -> DataEnvelope[dict[str, str]]:
+    values: dict[str, object] = {
+        "data": {"symbol": "SH600000"},
+        "source": "pytdx_quotes",
+        "quality": DataQuality.OFFICIAL,
+        "observed_at": datetime(2026, 8, 20, 9, 31, 5),
+        "catalog_version": "catalog-v1",
+    }
+    values.update(overrides)
+    return DataEnvelope[dict[str, str]](**values)
 
 
 def stock_minute(**overrides: object) -> StockMinute:
@@ -339,3 +435,158 @@ def test_required_identifier_fields_strip_surrounding_whitespace(
     factory: Callable[[str], str],
 ) -> None:
     assert factory("  identifier\t") == "identifier"
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: quote_snapshot(unknown=True),
+        lambda: order_book(unknown=True),
+        lambda: bar(unknown=True),
+        lambda: transaction(unknown=True),
+        lambda: provider_capabilities(unknown=True),
+        lambda: data_envelope(unknown=True),
+    ],
+)
+def test_real_provider_domain_models_forbid_unknown_fields(
+    factory: Callable[[], object],
+) -> None:
+    with pytest.raises(ValidationError):
+        factory()
+
+
+@pytest.mark.parametrize("symbol", ["600000", "XX600000", "SH60000", "sh600000"])
+@pytest.mark.parametrize(
+    "factory",
+    [quote_snapshot, order_book, bar, transaction],
+)
+def test_real_market_records_require_market_prefixed_symbols(
+    factory: Callable[..., object], symbol: str
+) -> None:
+    with pytest.raises(ValidationError):
+        factory(symbol=symbol)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [quote_snapshot, order_book],
+)
+def test_real_market_minutes_reject_invalid_clock_times(
+    factory: Callable[..., object],
+) -> None:
+    with pytest.raises(ValidationError):
+        factory(minute="24:00")
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: bar(timestamp="not-a-timestamp"),
+        lambda: transaction(timestamp="not-a-timestamp"),
+        lambda: data_envelope(observed_at="not-a-timestamp"),
+    ],
+)
+def test_real_market_timestamps_must_be_valid(factory: Callable[[], object]) -> None:
+    with pytest.raises(ValidationError):
+        factory()
+
+
+def test_transaction_timestamp_must_match_trade_date() -> None:
+    with pytest.raises(ValidationError):
+        transaction(timestamp=datetime(2026, 8, 19, 15, 0))
+
+
+@pytest.mark.parametrize("value", [nan, inf, -inf])
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda value: quote_snapshot(price=value),
+        lambda value: quote_snapshot(previous_close=value),
+        lambda value: quote_snapshot(change_pct=value),
+        lambda value: quote_snapshot(volume=value),
+        lambda value: quote_snapshot(amount=value),
+        lambda value: OrderBookLevel(price=value, volume=1.0),
+        lambda value: OrderBookLevel(price=1.0, volume=value),
+        lambda value: bar(open=value),
+        lambda value: bar(high=value),
+        lambda value: bar(low=value),
+        lambda value: bar(close=value),
+        lambda value: bar(volume=value),
+        lambda value: bar(amount=value),
+        lambda value: transaction(price=value),
+        lambda value: transaction(volume=value),
+        lambda value: transaction(amount=value),
+    ],
+)
+def test_real_market_numeric_fields_reject_nonfinite_values(
+    factory: Callable[[float], object], value: float
+) -> None:
+    with pytest.raises(ValidationError):
+        factory(value)
+
+
+@pytest.mark.parametrize(
+    "side",
+    ["buyer", "seller", "unknown"],
+)
+def test_transaction_rejects_unknown_trade_sides(side: str) -> None:
+    with pytest.raises(ValidationError):
+        transaction(side=side)
+
+
+@pytest.mark.parametrize("side", ["buy", "sell", "neutral"])
+def test_transaction_accepts_normalized_trade_sides(side: str) -> None:
+    assert transaction(side=side).side == side
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"bids": order_book_levels([10.00, 9.99, 9.98, 9.97])},
+        {"asks": order_book_levels([10.01, 10.02, 10.03, 10.04, 10.05, 10.06])},
+        {"bids": order_book_levels([10.00, 9.99, 10.01, 9.97, 9.96])},
+        {"asks": order_book_levels([10.01, 10.02, 10.00, 10.04, 10.05])},
+        {"bids": order_book_levels([10.00, 9.99, 9.99, 9.97, 9.96])},
+        {"asks": order_book_levels([10.01, 10.02, 10.02, 10.04, 10.05])},
+    ],
+)
+def test_order_book_requires_five_price_ordered_levels(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        order_book(**overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"high": 9.99},
+        {"high": 10.1, "close": 10.2},
+        {"low": 10.01},
+        {"low": 9.9, "close": 9.8},
+    ],
+)
+def test_bar_rejects_inconsistent_ohlc_relationships(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        bar(**overrides)
+
+
+def test_data_envelope_preserves_provenance_and_optional_gap_reason() -> None:
+    observed_at = datetime(2026, 8, 20, 9, 31, 5)
+    envelope = data_envelope(
+        source=" enhanced_quotes ",
+        quality=DataQuality.GAP,
+        observed_at=observed_at,
+        catalog_version=" catalog-v2 ",
+        gap_reason=" quote fields unavailable ",
+    )
+
+    assert envelope.data == {"symbol": "SH600000"}
+    assert envelope.source == "enhanced_quotes"
+    assert envelope.quality is DataQuality.GAP
+    assert envelope.observed_at == observed_at
+    assert envelope.catalog_version == "catalog-v2"
+    assert envelope.gap_reason == "quote fields unavailable"
+    assert data_envelope().gap_reason is None
