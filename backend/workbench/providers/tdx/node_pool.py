@@ -42,7 +42,7 @@ _URL_CREDENTIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ABSOLUTE_PATH_START_PATTERN = re.compile(
-    r'''(?ix)(?<![\w])["']?[a-z]:[\\/]|(?<![:/\w])["']?/'''
+    r'''(?ix)(?<!\w)["']?\\\\|(?<![\w])["']?[a-z]:[\\/]|(?<![:/\w])["']?/'''
 )
 
 

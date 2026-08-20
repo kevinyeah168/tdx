@@ -889,8 +889,21 @@ def test_filesystem_errors_do_not_fail_over_or_penalize_node(error: OSError) -> 
         r'failed at "C:\Users\Alice Smith\private\nodes.json" password=hunter2',
         "failed at /Users/Alice Smith/private/nodes.json token=abcd",
         "failed at '/Users/Alice Smith/private/nodes.json' token=abcd",
+        r"\\fileserver\Alice Smith\private\nodes.json password=hunter2",
+        r'failed at "\\fileserver\share with spaces\private\nodes.json" token=abcd',
+        r"\\?\C:\Users\Alice Smith\private\nodes.json password=hunter2",
+        r"\\?\UNC\fileserver\share\private\nodes.json token=abcd",
     ],
-    ids=["unquoted-windows", "quoted-windows", "unquoted-unix", "quoted-unix"],
+    ids=[
+        "unquoted-windows",
+        "quoted-windows",
+        "unquoted-unix",
+        "quoted-unix",
+        "unquoted-unc",
+        "quoted-unc",
+        "extended-windows",
+        "extended-unc",
+    ],
 )
 def test_health_error_redacts_absolute_paths_containing_spaces(message: str) -> None:
     target = load_targets("normal")[0]
@@ -908,8 +921,23 @@ def test_health_error_redacts_absolute_paths_containing_spaces(message: str) -> 
     last_error = str(node_snapshot(pool, target.address)["last_error"])
     assert last_error.startswith("FakeTransportError:")
     assert len(last_error) <= 160
-    for secret in ("Alice", "Smith", "private", "nodes.json", "password", "hunter2", "token", "abcd"):
-        assert secret not in last_error
+    if message.startswith(("C:", "\\\\")):
+        assert last_error == "FakeTransportError: <path redacted>"
+    redacted = last_error.lower()
+    for secret in (
+        "fileserver",
+        "share",
+        "users",
+        "alice",
+        "smith",
+        "private",
+        "nodes.json",
+        "password",
+        "hunter2",
+        "token",
+        "abcd",
+    ):
+        assert secret not in redacted
     pool.close()
 
 
