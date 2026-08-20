@@ -24,7 +24,15 @@ def validate_minute(value: str) -> str:
     return value
 
 
+def validate_nonblank_text(value: str) -> str:
+    stripped_value = value.strip()
+    if not stripped_value:
+        raise ValueError("value must not be blank")
+    return stripped_value
+
+
 Minute = Annotated[str, AfterValidator(validate_minute)]
+NonBlankText = Annotated[str, AfterValidator(validate_nonblank_text)]
 
 
 class NormalizedModel(BaseModel):
@@ -43,7 +51,7 @@ class DataQuality(str, Enum):
 class TierPoint(NormalizedModel):
     delta: FiniteFloat = 0.0
     cumulative: FiniteFloat = 0.0
-    source: str
+    source: NonBlankText
     quality: DataQuality
 
 
@@ -94,45 +102,45 @@ class FundFlow(NormalizedModel):
 
 
 class Security(NormalizedModel):
-    symbol: str
-    code: str
-    name: str
-    market: str
+    symbol: NonBlankText
+    code: NonBlankText
+    name: NonBlankText
+    market: NonBlankText
     active: bool = True
 
 
 class Sector(NormalizedModel):
-    sector_id: str
-    name: str
-    sector_type: str
+    sector_id: NonBlankText
+    name: NonBlankText
+    sector_type: NonBlankText
 
 
 class Membership(NormalizedModel):
-    sector_id: str
-    symbol: str
+    sector_id: NonBlankText
+    symbol: NonBlankText
 
 
 class StockMinute(NormalizedModel):
     trade_date: date
     minute: Minute
-    symbol: str
+    symbol: NonBlankText
     close: FiniteFloat = Field(ge=0)
     change_pct: FiniteFloat
     amount_delta: FiniteFloat = Field(ge=0)
     funds: FundFlow
     observed_at: datetime
-    batch_id: str
+    batch_id: NonBlankText
 
 
 class SectorMinute(NormalizedModel):
     trade_date: date
     minute: Minute
-    sector_id: str
+    sector_id: NonBlankText
     change_pct: FiniteFloat
     member_count: int = Field(ge=0)
     funds: FundFlow
     observed_at: datetime
-    batch_id: str
+    batch_id: NonBlankText
 
 
 class ProviderMinuteBatch(NormalizedModel):

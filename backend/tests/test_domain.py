@@ -251,3 +251,55 @@ def test_fund_flow_allows_official_main_to_diverge_from_estimated_subtiers() -> 
     assert funds.main.delta == 100.0
     assert funds.main.delta != funds.super.delta + funds.large.delta
     assert funds.main.quality is DataQuality.OFFICIAL
+
+
+@pytest.mark.parametrize("value", ["", " \t "])
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda value: TierPoint(source=value, quality=DataQuality.OFFICIAL),
+        lambda value: Security(symbol=value, code="600000", name="Bank", market="SH"),
+        lambda value: Security(symbol="SH600000", code=value, name="Bank", market="SH"),
+        lambda value: Security(symbol="SH600000", code="600000", name=value, market="SH"),
+        lambda value: Security(symbol="SH600000", code="600000", name="Bank", market=value),
+        lambda value: Sector(sector_id=value, name="Bank", sector_type="industry"),
+        lambda value: Sector(sector_id="BK0001", name=value, sector_type="industry"),
+        lambda value: Sector(sector_id="BK0001", name="Bank", sector_type=value),
+        lambda value: Membership(sector_id=value, symbol="SH600000"),
+        lambda value: Membership(sector_id="BK0001", symbol=value),
+        lambda value: stock_minute(symbol=value),
+        lambda value: stock_minute(batch_id=value),
+        lambda value: sector_minute(sector_id=value),
+        lambda value: sector_minute(batch_id=value),
+    ],
+)
+def test_required_identifier_fields_reject_blank_text(
+    factory: Callable[[str], object], value: str
+) -> None:
+    with pytest.raises(ValidationError):
+        factory(value)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda value: TierPoint(source=value, quality=DataQuality.OFFICIAL).source,
+        lambda value: Security(symbol=value, code="600000", name="Bank", market="SH").symbol,
+        lambda value: Security(symbol="SH600000", code=value, name="Bank", market="SH").code,
+        lambda value: Security(symbol="SH600000", code="600000", name=value, market="SH").name,
+        lambda value: Security(symbol="SH600000", code="600000", name="Bank", market=value).market,
+        lambda value: Sector(sector_id=value, name="Bank", sector_type="industry").sector_id,
+        lambda value: Sector(sector_id="BK0001", name=value, sector_type="industry").name,
+        lambda value: Sector(sector_id="BK0001", name="Bank", sector_type=value).sector_type,
+        lambda value: Membership(sector_id=value, symbol="SH600000").sector_id,
+        lambda value: Membership(sector_id="BK0001", symbol=value).symbol,
+        lambda value: stock_minute(symbol=value).symbol,
+        lambda value: stock_minute(batch_id=value).batch_id,
+        lambda value: sector_minute(sector_id=value).sector_id,
+        lambda value: sector_minute(batch_id=value).batch_id,
+    ],
+)
+def test_required_identifier_fields_strip_surrounding_whitespace(
+    factory: Callable[[str], str],
+) -> None:
+    assert factory("  identifier\t") == "identifier"
