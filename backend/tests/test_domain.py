@@ -64,7 +64,7 @@ def order_book(**overrides: object) -> OrderBook:
 def bar(**overrides: object) -> Bar:
     values: dict[str, object] = {
         "symbol": "SH600000",
-        "period": "1d",
+        "period": "day",
         "timestamp": datetime(2026, 8, 20, 15, 0),
         "open": 10.0,
         "high": 10.8,
