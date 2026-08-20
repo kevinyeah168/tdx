@@ -1,20 +1,24 @@
 from datetime import date, datetime
 from pathlib import Path
+import time
 
 import sqlite3
 from copy import deepcopy
 
 import pytest
 
-from workbench.domain import DataQuality, FundFlow, SectorMinute, StockMinute, TierPoint
+import workbench.storage.hot_store as hot_store_module
+from workbench.domain import CollectionStatus, DataQuality, FundFlow, SectorMinute, StockMinute, TierPoint
 from workbench.storage.hot_store import HotStore
 
 
-def stock_record(close: float) -> StockMinute:
+def stock_record(
+    close: float, *, symbol: str = "SH600000", batch_id: str = "2026-08-20T09:31"
+) -> StockMinute:
     return StockMinute(
         trade_date=date(2026, 8, 20),
         minute="09:31",
-        symbol="SH600000",
+        symbol=symbol,
         close=close,
         change_pct=1.0,
         amount_delta=1000.0,
@@ -31,11 +35,11 @@ def stock_record(close: float) -> StockMinute:
             quality=DataQuality.ESTIMATED,
         ),
         observed_at=datetime(2026, 8, 20, 9, 31, 5),
-        batch_id="2026-08-20T09:31",
+        batch_id=batch_id,
     )
 
 
-def sector_record() -> SectorMinute:
+def sector_record(*, sector_id: str = "881001", batch_id: str = "2026-08-20T09:31") -> SectorMinute:
     def tier(delta: float, cumulative: float, source: str) -> TierPoint:
         return TierPoint(
             delta=delta,
@@ -47,7 +51,7 @@ def sector_record() -> SectorMinute:
     return SectorMinute(
         trade_date=date(2026, 8, 20),
         minute="09:31",
-        sector_id="881001",
+        sector_id=sector_id,
         change_pct=1.5,
         member_count=2,
         funds=FundFlow(
@@ -58,24 +62,25 @@ def sector_record() -> SectorMinute:
             small=tier(-2.0, -5.0, "small_sum"),
         ),
         observed_at=datetime(2026, 8, 20, 9, 31, 5),
-        batch_id="2026-08-20T09:31",
+        batch_id=batch_id,
     )
 
 
-def batch_status(*, status: str = "complete") -> dict[str, int | float | str]:
-    return {
-        "trade_date": "2026-08-20",
-        "minute": "09:31",
-        "batch_id": "2026-08-20T09:31",
-        "expected_stocks": 1,
-        "collected_stocks": 1,
-        "expected_sectors": 1,
-        "collected_sectors": 1,
-        "duration_ms": 0,
-        "coverage_pct": 100.0,
-        "status": status,
-        "error_summary": "",
-    }
+def batch_status(*, status: str = "complete") -> CollectionStatus:
+    return CollectionStatus(
+        trade_date=date(2026, 8, 20),
+        minute="09:31",
+        batch_id="2026-08-20T09:31",
+        catalog_version="fake-v1",
+        expected_stocks=1,
+        collected_stocks=1,
+        expected_sectors=1,
+        collected_sectors=1,
+        duration_ms=0,
+        coverage_pct=100.0,
+        status=status,
+        error_summary="",
+    )
 
 
 def test_stock_minute_upsert_is_idempotent(tmp_path: Path) -> None:
@@ -125,11 +130,16 @@ def test_complete_batch_round_trips_sector_tiers_and_provenance(tmp_path: Path) 
 def test_complete_batch_rolls_back_all_rows_when_status_insert_fails(tmp_path: Path) -> None:
     store = HotStore(tmp_path / "2026-08-20.sqlite")
     store.initialize()
-    status = batch_status()
-    status["status"] = None  # type: ignore[assignment]
+    with store._session() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_status BEFORE INSERT ON collection_status "
+            "BEGIN SELECT RAISE(ABORT, 'status failure'); END"
+        )
 
     with pytest.raises(sqlite3.IntegrityError):
-        store.write_complete_batch([stock_record(10.0)], [sector_record()], status, started_at=0.0)
+        store.write_complete_batch(
+            [stock_record(10.0)], [sector_record()], batch_status(), started_at=0.0
+        )
 
     assert store.stock_fund_series("2026-08-20", "SH600000") == []
     assert store.sector_fund_series("2026-08-20", "881001") == []
@@ -157,3 +167,113 @@ def test_readonly_connect_does_not_create_parent_directories(tmp_path: Path) -> 
         HotStore(missing_path).connect(readonly=True)
 
     assert not missing_path.parent.exists()
+
+
+def test_complete_batch_duration_includes_stock_write_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+    original_params = hot_store_module._stock_params
+
+    def delayed_params(record: StockMinute) -> dict[str, object]:
+        time.sleep(0.02)
+        return original_params(record)
+
+    monkeypatch.setattr(hot_store_module, "_stock_params", delayed_params)
+    result = store.write_complete_batch(
+        [stock_record(10.0)], [sector_record()], batch_status(), started_at=time.perf_counter()
+    )
+
+    assert result["duration_ms"] >= 20
+
+
+@pytest.mark.parametrize(
+    ("stocks", "sectors", "match"),
+    [
+        ([stock_record(10.0), stock_record(10.1)], [sector_record()], "duplicate stock symbols"),
+        ([stock_record(10.0)], [sector_record(), sector_record()], "duplicate sector IDs"),
+        ([stock_record(10.0, batch_id="wrong")], [sector_record()], "batch_id"),
+        ([stock_record(10.0)], [sector_record(batch_id="wrong")], "batch_id"),
+    ],
+)
+def test_complete_batch_rejects_invalid_record_identity_without_persistence(
+    tmp_path: Path,
+    stocks: list[StockMinute],
+    sectors: list[SectorMinute],
+    match: str,
+) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+
+    with pytest.raises(ValueError, match=match):
+        store.write_complete_batch(stocks, sectors, batch_status(), started_at=time.perf_counter())
+
+    assert store.stock_fund_series("2026-08-20", "SH600000") == []
+    assert store.sector_fund_series("2026-08-20", "881001") == []
+
+
+def test_complete_batch_rejects_status_counts_that_do_not_match_records(tmp_path: Path) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+    status = batch_status().model_copy(
+        update={"expected_stocks": 2, "collected_stocks": 2, "coverage_pct": 100.0}
+    )
+
+    with pytest.raises(ValueError, match="collected_stocks must match stock records"):
+        store.write_complete_batch(
+            [stock_record(10.0)], [sector_record()], status, started_at=time.perf_counter()
+        )
+
+    assert store.stock_fund_series("2026-08-20", "SH600000") == []
+
+
+def test_reduced_retry_replaces_the_entire_minute_snapshot(tmp_path: Path) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+    full_status = batch_status().model_copy(
+        update={"expected_stocks": 2, "collected_stocks": 2, "expected_sectors": 2, "collected_sectors": 2}
+    )
+    store.write_complete_batch(
+        [stock_record(10.0), stock_record(10.1, symbol="SH600001")],
+        [sector_record(), sector_record(sector_id="881002")],
+        full_status,
+        started_at=time.perf_counter(),
+    )
+
+    store.write_complete_batch(
+        [stock_record(10.2)], [sector_record()], batch_status(), started_at=time.perf_counter()
+    )
+
+    assert len(store.stock_fund_series("2026-08-20", "SH600000")) == 1
+    assert store.stock_fund_series("2026-08-20", "SH600001") == []
+    assert len(store.sector_fund_series("2026-08-20", "881001")) == 1
+    assert store.sector_fund_series("2026-08-20", "881002") == []
+
+
+def test_failed_retry_retains_the_previously_committed_snapshot_and_status(tmp_path: Path) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+    store.write_complete_batch(
+        [stock_record(10.0)], [sector_record()], batch_status(), started_at=time.perf_counter()
+    )
+    with store._session() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_status BEFORE INSERT ON collection_status "
+            "BEGIN SELECT RAISE(ABORT, 'status failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.write_complete_batch(
+            [],
+            [],
+            batch_status().model_copy(
+                update={"collected_stocks": 0, "collected_sectors": 0, "coverage_pct": 0.0, "status": "partial"}
+            ),
+            started_at=time.perf_counter(),
+        )
+
+    assert len(store.stock_fund_series("2026-08-20", "SH600000")) == 1
+    assert len(store.sector_fund_series("2026-08-20", "881001")) == 1
+    with store._session(readonly=True) as connection:
+        assert connection.execute("SELECT status FROM collection_status").fetchone()[0] == "complete"

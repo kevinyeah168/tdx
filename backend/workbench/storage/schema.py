@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS collection_status (
     trade_date TEXT NOT NULL,
     minute TEXT NOT NULL,
     batch_id TEXT NOT NULL,
+    catalog_version TEXT NOT NULL,
     expected_stocks INTEGER NOT NULL,
     collected_stocks INTEGER NOT NULL,
     expected_sectors INTEGER NOT NULL,

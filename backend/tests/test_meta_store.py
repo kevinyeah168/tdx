@@ -52,6 +52,23 @@ def test_meta_store_replaces_catalog_atomically(tmp_path: Path) -> None:
     assert store.catalog_version() == "2026-08-20"
 
 
+def test_catalog_snapshot_returns_memberships_count_and_version_together(tmp_path: Path) -> None:
+    store = MetaStore(tmp_path / "meta.sqlite")
+    store.initialize()
+    store.replace_catalog(
+        securities=[Security(symbol="SH600000", code="600000", name="Stock", market="SH")],
+        sectors=[Sector(sector_id="881001", name="Sector", sector_type="industry")],
+        memberships=[Membership(sector_id="881001", symbol="SH600000")],
+        version="catalog-v1",
+    )
+
+    snapshot = store.catalog_snapshot()
+
+    assert snapshot.memberships == (Membership(sector_id="881001", symbol="SH600000"),)
+    assert snapshot.sector_count == 1
+    assert snapshot.catalog_version == "catalog-v1"
+
+
 def test_retention_defaults_to_thirty_and_can_change(tmp_path: Path) -> None:
     store = MetaStore(tmp_path / "meta.sqlite")
     store.initialize()

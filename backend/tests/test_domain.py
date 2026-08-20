@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from workbench.domain import (
+    CollectionStatus,
     DataQuality,
     FundFlow,
     Membership,
@@ -47,6 +48,41 @@ def sector_minute(**overrides: object) -> SectorMinute:
     }
     values.update(overrides)
     return SectorMinute(**values)
+
+
+def collection_status(**overrides: object) -> CollectionStatus:
+    values: dict[str, object] = {
+        "trade_date": date(2026, 8, 20),
+        "minute": "09:31",
+        "batch_id": "2026-08-20T09:31",
+        "catalog_version": "catalog-v1",
+        "expected_stocks": 100,
+        "collected_stocks": 100,
+        "expected_sectors": 4,
+        "collected_sectors": 4,
+        "duration_ms": 1,
+        "coverage_pct": 100.0,
+        "status": "complete",
+        "error_summary": "",
+    }
+    values.update(overrides)
+    return CollectionStatus(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"catalog_version": "  "},
+        {"collected_stocks": 101},
+        {"collected_sectors": 5},
+        {"coverage_pct": 99.0},
+        {"status": "unknown"},
+        {"status": "complete", "collected_sectors": 3},
+    ],
+)
+def test_collection_status_rejects_invalid_or_inconsistent_values(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        collection_status(**overrides)
 
 
 def test_estimated_main_equals_super_plus_large() -> None:

@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 from workbench.domain import Membership, Sector, Security
 from workbench.storage.schema import META_SCHEMA
+
+
+@dataclass(frozen=True)
+class CatalogSnapshot:
+    memberships: tuple[Membership, ...]
+    sector_count: int
+    catalog_version: str | None
 
 
 class MetaStore:
@@ -87,6 +95,25 @@ class MetaStore:
                 "SELECT sector_id, symbol FROM sector_membership ORDER BY sector_id, symbol"
             ).fetchall()
         return [Membership(sector_id=row[0], symbol=row[1]) for row in rows]
+
+    def catalog_snapshot(self) -> CatalogSnapshot:
+        with self._session() as connection:
+            connection.execute("BEGIN")
+            memberships = tuple(
+                Membership(sector_id=row[0], symbol=row[1])
+                for row in connection.execute(
+                    "SELECT sector_id, symbol FROM sector_membership ORDER BY sector_id, symbol"
+                ).fetchall()
+            )
+            sector_count = int(connection.execute("SELECT COUNT(*) FROM sector_master").fetchone()[0])
+            row = connection.execute(
+                "SELECT version FROM catalog_state WHERE singleton=1"
+            ).fetchone()
+        return CatalogSnapshot(
+            memberships=memberships,
+            sector_count=sector_count,
+            catalog_version=str(row[0]) if row else None,
+        )
 
     def catalog_version(self) -> str | None:
         with self._session() as connection:

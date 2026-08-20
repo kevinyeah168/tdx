@@ -5,9 +5,9 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator
 
-from workbench.domain import SectorMinute, StockMinute
+from workbench.domain import CollectionStatus, SectorMinute, StockMinute
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
 
@@ -72,15 +72,16 @@ INSERT INTO sector_minute(
 
 STATUS_UPSERT = """
 INSERT INTO collection_status(
-    trade_date, minute, batch_id,
+    trade_date, minute, batch_id, catalog_version,
     expected_stocks, collected_stocks, expected_sectors, collected_sectors,
     duration_ms, coverage_pct, status, error_summary
 ) VALUES(
-    :trade_date, :minute, :batch_id,
+    :trade_date, :minute, :batch_id, :catalog_version,
     :expected_stocks, :collected_stocks, :expected_sectors, :collected_sectors,
     :duration_ms, :coverage_pct, :status, :error_summary
 ) ON CONFLICT(trade_date, minute) DO UPDATE SET
     batch_id=excluded.batch_id,
+    catalog_version=excluded.catalog_version,
     expected_stocks=excluded.expected_stocks,
     collected_stocks=excluded.collected_stocks,
     expected_sectors=excluded.expected_sectors,
@@ -191,17 +192,46 @@ class HotStore:
         self,
         stocks: list[StockMinute],
         sectors: list[SectorMinute],
-        status: Mapping[str, int | float | str],
+        status: CollectionStatus,
         *,
         started_at: float,
     ) -> dict[str, int | float | str]:
-        final_status = dict(status)
-        final_status["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
+        validated_status = CollectionStatus.model_validate(status.model_dump())
+        self._validate_batch_identity(stocks, sectors, validated_status)
         with self._session() as connection:
+            connection.execute(
+                "DELETE FROM stock_minute WHERE trade_date=? AND minute=?",
+                (validated_status.trade_date.isoformat(), validated_status.minute),
+            )
+            connection.execute(
+                "DELETE FROM sector_minute WHERE trade_date=? AND minute=?",
+                (validated_status.trade_date.isoformat(), validated_status.minute),
+            )
             connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in stocks])
             connection.executemany(SECTOR_UPSERT, [_sector_params(record) for record in sectors])
-            connection.execute(STATUS_UPSERT, final_status)
-        return final_status
+            # Includes transaction writes through sector persistence, excluding status/commit latency.
+            final_status = validated_status.model_copy(
+                update={"duration_ms": int((time.perf_counter() - started_at) * 1000)}
+            )
+            connection.execute(STATUS_UPSERT, final_status.model_dump(mode="json"))
+        return final_status.model_dump(mode="json")
+
+    @staticmethod
+    def _validate_batch_identity(
+        stocks: list[StockMinute], sectors: list[SectorMinute], status: CollectionStatus
+    ) -> None:
+        if len({record.symbol for record in stocks}) != len(stocks):
+            raise ValueError("duplicate stock symbols")
+        if len({record.sector_id for record in sectors}) != len(sectors):
+            raise ValueError("duplicate sector IDs")
+        if status.collected_stocks != len(stocks):
+            raise ValueError("collected_stocks must match stock records")
+        if status.collected_sectors != len(sectors):
+            raise ValueError("collected_sectors must match sector records")
+        expected_identity = (status.trade_date, status.minute, status.batch_id)
+        for record in [*stocks, *sectors]:
+            if (record.trade_date, record.minute, record.batch_id) != expected_identity:
+                raise ValueError("records must match status trade_date, minute, and batch_id")
 
     def stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:

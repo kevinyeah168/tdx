@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -141,6 +141,39 @@ class SectorMinute(NormalizedModel):
     funds: FundFlow
     observed_at: datetime
     batch_id: NonBlankText
+
+
+class CollectionStatus(NormalizedModel):
+    trade_date: date
+    minute: Minute
+    batch_id: NonBlankText
+    catalog_version: NonBlankText
+    expected_stocks: int = Field(ge=0)
+    collected_stocks: int = Field(ge=0)
+    expected_sectors: int = Field(ge=0)
+    collected_sectors: int = Field(ge=0)
+    duration_ms: int = Field(ge=0)
+    coverage_pct: FiniteFloat = Field(ge=0, le=100)
+    status: Literal["complete", "partial"]
+    error_summary: str = ""
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> "CollectionStatus":
+        if self.collected_stocks > self.expected_stocks:
+            raise ValueError("collected_stocks cannot exceed expected_stocks")
+        if self.collected_sectors > self.expected_sectors:
+            raise ValueError("collected_sectors cannot exceed expected_sectors")
+        expected_coverage = (
+            round(self.collected_stocks / self.expected_stocks * 100.0, 4)
+            if self.expected_stocks
+            else 0.0
+        )
+        if self.coverage_pct != expected_coverage:
+            raise ValueError("coverage_pct must match collected_stocks and expected_stocks")
+        is_complete = self.coverage_pct >= 99.5 and self.collected_sectors == self.expected_sectors
+        if (self.status == "complete") != is_complete:
+            raise ValueError("status must match stock coverage and sector completeness")
+        return self
 
 
 class ProviderMinuteBatch(NormalizedModel):
