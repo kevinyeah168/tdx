@@ -60,21 +60,52 @@ PayloadT = TypeVar("PayloadT")
 
 
 class DataEnvelope(NormalizedModel, Generic[PayloadT]):
-    data: PayloadT
+    data: PayloadT | None = None
     source: NonBlankText
     quality: DataQuality
     observed_at: datetime
     catalog_version: NonBlankText
     gap_reason: NonBlankText | None = None
 
+    @model_validator(mode="after")
+    def validate_gap_semantics(self) -> "DataEnvelope[PayloadT]":
+        if self.quality is DataQuality.GAP:
+            if self.gap_reason is None:
+                raise ValueError("gap quality requires gap_reason")
+        else:
+            if self.data is None:
+                raise ValueError("non-gap quality requires data")
+            if self.gap_reason is not None:
+                raise ValueError("non-gap quality cannot carry gap_reason")
+        return self
+
+
+class CapabilityResult(NormalizedModel):
+    available: bool
+    source: NonBlankText
+    latency_ms: FiniteFloat = Field(ge=0)
+    sample_fields: list[NonBlankText] = Field(default_factory=list)
+    error: NonBlankText | None = None
+
+    @model_validator(mode="after")
+    def validate_availability(self) -> "CapabilityResult":
+        if self.available and self.error is not None:
+            raise ValueError("available capability cannot carry an error")
+        if not self.available and self.error is None:
+            raise ValueError("unavailable capability requires an error")
+        return self
+
 
 class ProviderCapabilities(NormalizedModel):
-    catalog: bool
-    minute: bool
-    quote: bool
-    transaction: bool
-    bars: bool
-    order_book: bool
+    security_catalog: CapabilityResult
+    board_list: CapabilityResult
+    board_members: CapabilityResult
+    official_funds: CapabilityResult
+    quotes: CapabilityResult
+    transactions: CapabilityResult
+    minute_data: CapabilityResult
+    bars: CapabilityResult
+    order_book: CapabilityResult
 
 
 class QuoteSnapshot(NormalizedModel):
@@ -89,8 +120,14 @@ class QuoteSnapshot(NormalizedModel):
 
 
 class OrderBookLevel(NormalizedModel):
-    price: FiniteFloat = Field(gt=0)
+    price: FiniteFloat = Field(ge=0)
     volume: FiniteFloat = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_empty_level(self) -> "OrderBookLevel":
+        if self.price == 0 and self.volume != 0:
+            raise ValueError("zero-priced order-book level must have zero volume")
+        return self
 
 
 class OrderBook(NormalizedModel):
@@ -102,8 +139,8 @@ class OrderBook(NormalizedModel):
 
     @model_validator(mode="after")
     def validate_level_order(self) -> "OrderBook":
-        bid_prices = [level.price for level in self.bids]
-        ask_prices = [level.price for level in self.asks]
+        bid_prices = self._populated_prices(self.bids)
+        ask_prices = self._populated_prices(self.asks)
         if any(
             current <= following
             for current, following in zip(bid_prices, bid_prices[1:])
@@ -116,10 +153,28 @@ class OrderBook(NormalizedModel):
             raise ValueError("ask levels must be ordered from lowest to highest price")
         return self
 
+    @staticmethod
+    def _populated_prices(levels: list[OrderBookLevel]) -> list[float]:
+        populated_prices: list[float] = []
+        found_empty_level = False
+        for level in levels:
+            if level.price == 0:
+                found_empty_level = True
+            elif found_empty_level:
+                raise ValueError(
+                    "populated levels must be contiguous before empty trailing levels"
+                )
+            else:
+                populated_prices.append(level.price)
+        return populated_prices
+
+
+BarPeriod = Literal["day", "week", "month", "1m", "5m", "15m", "30m", "60m"]
+
 
 class Bar(NormalizedModel):
     symbol: MarketSymbol
-    period: NonBlankText
+    period: BarPeriod
     timestamp: datetime
     open: FiniteFloat = Field(ge=0)
     high: FiniteFloat = Field(ge=0)

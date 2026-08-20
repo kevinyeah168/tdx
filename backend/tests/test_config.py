@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from workbench.config import WorkbenchSettings, workbench_settings_from_environment
 
@@ -44,6 +45,42 @@ def test_real_tdx_settings_load_from_workbench_prefixed_environment(
     assert settings.enhanced_quote_enabled is False
     assert settings.quote_batch_size == 64
     assert settings.retention_trading_days == 45
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "value"),
+    [
+        ("WORKBENCH_NORMAL_NODE_TIMEOUT_SECONDS", "0"),
+        ("WORKBENCH_NORMAL_NODE_TIMEOUT_SECONDS", "61"),
+        ("WORKBENCH_NORMAL_NODE_TIMEOUT_SECONDS", "slow"),
+        ("WORKBENCH_ENHANCED_NODE_TIMEOUT_SECONDS", "0"),
+        ("WORKBENCH_ENHANCED_NODE_TIMEOUT_SECONDS", "61"),
+        ("WORKBENCH_ENHANCED_NODE_TIMEOUT_SECONDS", "slow"),
+        ("WORKBENCH_NODE_POOL_SIZE", "0"),
+        ("WORKBENCH_NODE_POOL_SIZE", "65"),
+        ("WORKBENCH_NODE_POOL_SIZE", "many"),
+        ("WORKBENCH_NODE_RETRY_COUNT", "-1"),
+        ("WORKBENCH_NODE_RETRY_COUNT", "11"),
+        ("WORKBENCH_NODE_RETRY_COUNT", "many"),
+        ("WORKBENCH_QUOTE_BATCH_SIZE", "0"),
+        ("WORKBENCH_QUOTE_BATCH_SIZE", "81"),
+        ("WORKBENCH_QUOTE_BATCH_SIZE", "many"),
+        ("WORKBENCH_ENHANCED_QUOTE_ENABLED", "sometimes"),
+        ("WORKBENCH_ENHANCED_QUOTE_ENABLED", "2"),
+        ("WORKBENCH_ENHANCED_QUOTE_ENABLED", ""),
+    ],
+)
+def test_real_tdx_environment_rejects_invalid_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    value: str,
+) -> None:
+    for field_name in WorkbenchSettings.model_fields:
+        monkeypatch.delenv(f"WORKBENCH_{field_name.upper()}", raising=False)
+    monkeypatch.setenv(environment_name, value)
+
+    with pytest.raises((ValidationError, ValueError)):
+        workbench_settings_from_environment()
 
 
 def test_settings_create_separate_meta_and_hot_paths(tmp_path: Path) -> None:

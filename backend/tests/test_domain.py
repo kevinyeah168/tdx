@@ -1,10 +1,11 @@
 from datetime import date, datetime
 from math import inf, nan
-from typing import Callable
+from typing import Callable, get_args
 
 import pytest
 from pydantic import ValidationError
 
+import workbench.domain as domain_models
 from workbench.domain import (
     Bar,
     CollectionStatus,
@@ -91,16 +92,35 @@ def transaction(**overrides: object) -> Transaction:
 
 
 def provider_capabilities(**overrides: object) -> ProviderCapabilities:
+    capability_areas = {
+        "security_catalog",
+        "board_list",
+        "board_members",
+        "official_funds",
+        "quotes",
+        "transactions",
+        "minute_data",
+        "bars",
+        "order_book",
+    }
     values: dict[str, object] = {
-        "catalog": True,
-        "minute": True,
-        "quote": True,
-        "transaction": True,
-        "bars": True,
-        "order_book": True,
+        area: capability_result() for area in capability_areas
     }
     values.update(overrides)
     return ProviderCapabilities(**values)
+
+
+def capability_result(**overrides: object) -> object:
+    capability_type = getattr(domain_models, "CapabilityResult", None)
+    assert capability_type is not None, "CapabilityResult must exist"
+    values: dict[str, object] = {
+        "available": True,
+        "source": "tdx_probe",
+        "latency_ms": 12.5,
+        "sample_fields": ["price", "volume"],
+    }
+    values.update(overrides)
+    return capability_type(**values)
 
 
 def data_envelope(**overrides: object) -> DataEnvelope[dict[str, str]]:
@@ -110,6 +130,18 @@ def data_envelope(**overrides: object) -> DataEnvelope[dict[str, str]]:
         "quality": DataQuality.OFFICIAL,
         "observed_at": datetime(2026, 8, 20, 9, 31, 5),
         "catalog_version": "catalog-v1",
+    }
+    values.update(overrides)
+    return DataEnvelope[dict[str, str]](**values)
+
+
+def gap_envelope(**overrides: object) -> DataEnvelope[dict[str, str]]:
+    values: dict[str, object] = {
+        "source": "pytdx_quotes",
+        "quality": DataQuality.GAP,
+        "observed_at": datetime(2026, 8, 20, 9, 31, 5),
+        "catalog_version": "catalog-v1",
+        "gap_reason": "quote unavailable",
     }
     values.update(overrides)
     return DataEnvelope[dict[str, str]](**values)
@@ -455,14 +487,110 @@ def test_real_provider_domain_models_forbid_unknown_fields(
         factory()
 
 
+def test_data_envelope_allows_missing_data_for_a_true_gap() -> None:
+    envelope = gap_envelope()
+
+    assert envelope.data is None
+    assert envelope.quality is DataQuality.GAP
+    assert envelope.gap_reason == "quote unavailable"
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: data_envelope(quality=DataQuality.GAP),
+        lambda: data_envelope(gap_reason="contradictory gap"),
+        lambda: data_envelope(data=None),
+        lambda: gap_envelope(gap_reason="  "),
+        lambda: gap_envelope(quality=DataQuality.OFFICIAL),
+    ],
+)
+def test_data_envelope_rejects_contradictory_gap_semantics(
+    factory: Callable[[], object],
+) -> None:
+    with pytest.raises(ValidationError):
+        factory()
+
+
+def test_non_gap_data_envelope_requires_data() -> None:
+    with pytest.raises(ValidationError):
+        DataEnvelope[dict[str, str]](
+            source="pytdx_quotes",
+            quality=DataQuality.OFFICIAL,
+            observed_at=datetime(2026, 8, 20, 9, 31, 5),
+            catalog_version="catalog-v1",
+        )
+
+
+def test_provider_capabilities_expose_each_probe_area_independently() -> None:
+    expected_areas = {
+        "security_catalog",
+        "board_list",
+        "board_members",
+        "official_funds",
+        "quotes",
+        "transactions",
+        "minute_data",
+        "bars",
+        "order_book",
+    }
+
+    assert set(ProviderCapabilities.model_fields) == expected_areas
+    capabilities = provider_capabilities(
+        official_funds=capability_result(
+            available=False,
+            error="enhanced node unavailable",
+        )
+    )
+    assert capabilities.security_catalog.available is True
+    assert capabilities.official_funds.available is False
+    assert capabilities.official_funds.error == "enhanced node unavailable"
+
+
+def test_capability_result_preserves_structured_probe_details() -> None:
+    result = capability_result(
+        source=" enhanced_quotes ",
+        sample_fields=[" price ", "volume"],
+    )
+
+    assert result.available is True
+    assert result.source == "enhanced_quotes"
+    assert result.latency_ms == 12.5
+    assert result.sample_fields == ["price", "volume"]
+    assert result.error is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"available": True, "error": "unexpected error"},
+        {"available": False},
+        {"latency_ms": -0.01},
+        {"latency_ms": nan},
+        {"latency_ms": inf},
+        {"available": 1},
+        {"latency_ms": "12.5"},
+        {"unknown": True},
+    ],
+)
+def test_capability_result_rejects_inconsistent_or_invalid_values(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        capability_result(**overrides)
+
+
 @pytest.mark.parametrize(
     "factory",
     [
         lambda: quote_snapshot(trade_date="2026-08-20"),
         lambda: quote_snapshot(price="10.2"),
-        lambda: provider_capabilities(catalog=1),
+        lambda: capability_result(available=1),
+        lambda: capability_result(latency_ms="12.5"),
+        lambda: data_envelope(source=1),
         lambda: data_envelope(quality="official"),
         lambda: data_envelope(observed_at="2026-08-20T09:31:05"),
+        lambda: data_envelope(catalog_version=1),
     ],
 )
 def test_real_provider_domain_models_reject_coercible_wrong_types(
@@ -556,6 +684,47 @@ def test_transaction_accepts_normalized_trade_sides(side: str) -> None:
     assert transaction(side=side).side == side
 
 
+def test_order_book_accepts_fully_suspended_five_level_sides() -> None:
+    empty_bids = [OrderBookLevel(price=0.0, volume=0.0) for _ in range(5)]
+    empty_asks = [OrderBookLevel(price=0.0, volume=0.0) for _ in range(5)]
+
+    book = order_book(bids=empty_bids, asks=empty_asks)
+
+    assert all(level.price == 0.0 and level.volume == 0.0 for level in book.bids)
+    assert all(level.price == 0.0 and level.volume == 0.0 for level in book.asks)
+
+
+def test_order_book_accepts_populated_levels_before_empty_trailing_levels() -> None:
+    empty_levels = [OrderBookLevel(price=0.0, volume=0.0) for _ in range(3)]
+    bids = order_book_levels([10.00, 9.99]) + empty_levels
+    asks = order_book_levels([10.01, 10.02]) + [
+        level.model_copy(deep=True) for level in empty_levels
+    ]
+
+    book = order_book(bids=bids, asks=asks)
+
+    assert [level.price for level in book.bids] == [10.00, 9.99, 0.0, 0.0, 0.0]
+    assert [level.price for level in book.asks] == [10.01, 10.02, 0.0, 0.0, 0.0]
+
+
+def test_order_book_level_rejects_zero_price_with_positive_volume() -> None:
+    with pytest.raises(ValidationError, match="zero-priced"):
+        OrderBookLevel(price=0.0, volume=100.0)
+
+
+def test_order_book_rejects_populated_levels_after_an_empty_level() -> None:
+    with pytest.raises(ValidationError, match="contiguous"):
+        order_book(
+            bids=[
+                OrderBookLevel(price=10.0, volume=100.0),
+                OrderBookLevel(price=0.0, volume=0.0),
+                OrderBookLevel(price=9.99, volume=100.0),
+                OrderBookLevel(price=0.0, volume=0.0),
+                OrderBookLevel(price=0.0, volume=0.0),
+            ]
+        )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -588,6 +757,24 @@ def test_bar_rejects_inconsistent_ohlc_relationships(
 ) -> None:
     with pytest.raises(ValidationError):
         bar(**overrides)
+
+
+SUPPORTED_BAR_PERIODS = {"day", "week", "month", "1m", "5m", "15m", "30m", "60m"}
+
+
+def test_bar_period_contract_contains_only_supported_periods() -> None:
+    assert set(get_args(domain_models.BarPeriod)) == SUPPORTED_BAR_PERIODS
+
+
+@pytest.mark.parametrize("period", sorted(SUPPORTED_BAR_PERIODS))
+def test_bar_accepts_supported_periods(period: str) -> None:
+    assert bar(period=period).period == period
+
+
+@pytest.mark.parametrize("period", ["tick", "2m", "1d", "quarter"])
+def test_bar_rejects_unsupported_periods(period: str) -> None:
+    with pytest.raises(ValidationError):
+        bar(period=period)
 
 
 def test_data_envelope_preserves_provenance_and_optional_gap_reason() -> None:

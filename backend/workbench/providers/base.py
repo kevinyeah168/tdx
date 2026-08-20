@@ -7,6 +7,7 @@ from pydantic import model_validator
 
 from workbench.domain import (
     Bar,
+    BarPeriod,
     DataEnvelope,
     Membership,
     NonBlankText,
@@ -71,7 +72,9 @@ class TransactionProvider(Protocol):
 
 @runtime_checkable
 class BarProvider(Protocol):
-    def bars(self, symbol: str, period: str, count: int) -> DataEnvelope[list[Bar]]: ...
+    def bars(
+        self, symbol: str, period: BarPeriod, count: int
+    ) -> DataEnvelope[list[Bar]]: ...
 
 
 @runtime_checkable
