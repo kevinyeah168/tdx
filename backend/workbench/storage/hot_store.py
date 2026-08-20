@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from workbench.domain import SectorMinute, StockMinute
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
@@ -38,6 +39,56 @@ INSERT INTO stock_minute(
     tier_meta_json=excluded.tier_meta_json,
     observed_at=excluded.observed_at,
     batch_id=excluded.batch_id
+"""
+
+SECTOR_UPSERT = """
+INSERT INTO sector_minute(
+    trade_date, minute, sector_id, change_pct, member_count,
+    main_delta, main_cum, super_delta, super_cum, large_delta, large_cum,
+    medium_delta, medium_cum, small_delta, small_cum,
+    tier_meta_json, observed_at, batch_id
+) VALUES(
+    :trade_date, :minute, :sector_id, :change_pct, :member_count,
+    :main_delta, :main_cum, :super_delta, :super_cum, :large_delta, :large_cum,
+    :medium_delta, :medium_cum, :small_delta, :small_cum,
+    :tier_meta_json, :observed_at, :batch_id
+) ON CONFLICT(trade_date, minute, sector_id) DO UPDATE SET
+    change_pct=excluded.change_pct,
+    member_count=excluded.member_count,
+    main_delta=excluded.main_delta,
+    main_cum=excluded.main_cum,
+    super_delta=excluded.super_delta,
+    super_cum=excluded.super_cum,
+    large_delta=excluded.large_delta,
+    large_cum=excluded.large_cum,
+    medium_delta=excluded.medium_delta,
+    medium_cum=excluded.medium_cum,
+    small_delta=excluded.small_delta,
+    small_cum=excluded.small_cum,
+    tier_meta_json=excluded.tier_meta_json,
+    observed_at=excluded.observed_at,
+    batch_id=excluded.batch_id
+"""
+
+STATUS_UPSERT = """
+INSERT INTO collection_status(
+    trade_date, minute, batch_id,
+    expected_stocks, collected_stocks, expected_sectors, collected_sectors,
+    duration_ms, coverage_pct, status, error_summary
+) VALUES(
+    :trade_date, :minute, :batch_id,
+    :expected_stocks, :collected_stocks, :expected_sectors, :collected_sectors,
+    :duration_ms, :coverage_pct, :status, :error_summary
+) ON CONFLICT(trade_date, minute) DO UPDATE SET
+    batch_id=excluded.batch_id,
+    expected_stocks=excluded.expected_stocks,
+    collected_stocks=excluded.collected_stocks,
+    expected_sectors=excluded.expected_sectors,
+    collected_sectors=excluded.collected_sectors,
+    duration_ms=excluded.duration_ms,
+    coverage_pct=excluded.coverage_pct,
+    status=excluded.status,
+    error_summary=excluded.error_summary
 """
 
 
@@ -82,15 +133,38 @@ def _stock_params(record: StockMinute) -> dict[str, Any]:
     }
 
 
+def _sector_params(record: SectorMinute) -> dict[str, Any]:
+    return {
+        "trade_date": record.trade_date.isoformat(),
+        "minute": record.minute,
+        "sector_id": record.sector_id,
+        "change_pct": record.change_pct,
+        "member_count": record.member_count,
+        "main_delta": record.funds.main.delta,
+        "main_cum": record.funds.main.cumulative,
+        "super_delta": record.funds.super.delta,
+        "super_cum": record.funds.super.cumulative,
+        "large_delta": record.funds.large.delta,
+        "large_cum": record.funds.large.cumulative,
+        "medium_delta": record.funds.medium.delta,
+        "medium_cum": record.funds.medium.cumulative,
+        "small_delta": record.funds.small.delta,
+        "small_cum": record.funds.small.cumulative,
+        "tier_meta_json": _tier_meta(record),
+        "observed_at": record.observed_at.isoformat(),
+        "batch_id": record.batch_id,
+    }
+
+
 class HotStore:
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def connect(self, *, readonly: bool = False) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         if readonly:
-            connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+            connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
         else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path)
         configure_hot_connection(connection)
         connection.row_factory = sqlite3.Row
@@ -113,11 +187,35 @@ class HotStore:
         with self._session() as connection:
             connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in records])
 
+    def write_complete_batch(
+        self,
+        stocks: list[StockMinute],
+        sectors: list[SectorMinute],
+        status: Mapping[str, int | float | str],
+        *,
+        started_at: float,
+    ) -> dict[str, int | float | str]:
+        final_status = dict(status)
+        final_status["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
+        with self._session() as connection:
+            connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in stocks])
+            connection.executemany(SECTOR_UPSERT, [_sector_params(record) for record in sectors])
+            connection.execute(STATUS_UPSERT, final_status)
+        return final_status
+
     def stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM stock_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
                 (trade_date, symbol),
+            ).fetchall()
+        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+
+    def sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM sector_minute WHERE trade_date=? AND sector_id=? ORDER BY minute",
+                (trade_date, sector_id),
             ).fetchall()
         return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
 
