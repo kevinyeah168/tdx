@@ -2,7 +2,7 @@
   "security_catalog": {
     "available": true,
     "source": "tdx.normal.security-list",
-    "latency_ms": 312.9999999946449,
+    "latency_ms": 297.0000000059372,
     "sample_fields": [
       "market",
       "code",
@@ -18,7 +18,7 @@
   "board_list": {
     "available": true,
     "source": "tdx.enhanced.board-list",
-    "latency_ms": 219.0000000045984,
+    "latency_ms": 202.99999999406282,
     "sample_fields": [
       "market",
       "code",
@@ -38,7 +38,7 @@
   "board_members": {
     "available": true,
     "source": "tdx.enhanced.board-members",
-    "latency_ms": 30.999999995401595,
+    "latency_ms": 31.000000002677552,
     "sample_fields": [
       "market",
       "code",
@@ -56,30 +56,56 @@
     "error": null
   },
   "official_funds": {
-    "available": false,
+    "available": true,
     "source": "tdx.enhanced.capital-flow",
-    "latency_ms": 31.000000002677552,
-    "sample_fields": [],
-    "error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    "latency_ms": 46.999999998661224,
+    "sample_fields": [
+      "date",
+      "main_in",
+      "main_out",
+      "main_net",
+      "small_in",
+      "small_out",
+      "small_net",
+      "mid_in",
+      "mid_out",
+      "mid_net",
+      "large_in",
+      "large_out"
+    ],
+    "error": null
   },
   "quotes": {
-    "available": false,
-    "source": "tdx.normal.quotes+tdx.enhanced.quotes",
-    "latency_ms": 3218.9999999973224,
-    "sample_fields": [],
-    "error": "CapabilityUnavailable: CapabilityUnavailable: protocol response was empty; OverflowError: int too big to convert"
+    "available": true,
+    "source": "tdx.enhanced.quotes",
+    "latency_ms": 3266.0000000032596,
+    "sample_fields": [
+      "market",
+      "code",
+      "name",
+      "pre_close",
+      "open",
+      "high",
+      "low",
+      "close",
+      "vol",
+      "vol_ratio",
+      "amount",
+      "total_shares"
+    ],
+    "error": null
   },
   "transactions": {
     "available": false,
     "source": "tdx.normal.transactions",
-    "latency_ms": 187.0000000053551,
+    "latency_ms": 203.00000000133878,
     "sample_fields": [],
     "error": "CapabilityUnavailable: protocol response was empty"
   },
   "minute_data": {
     "available": true,
     "source": "tdx.normal.minute-data",
-    "latency_ms": 46.999999998661224,
+    "latency_ms": 61.99999999807915,
     "sample_fields": [
       "datetime",
       "price",
@@ -88,17 +114,26 @@
     "error": null
   },
   "bars": {
-    "available": false,
-    "source": "tdx.normal.bars+tdx.enhanced.kline",
-    "latency_ms": 63.00000000192085,
-    "sample_fields": [],
-    "error": "CapabilityUnavailable: CapabilityUnavailable: protocol response was empty; CapabilityUnavailable: protocol response was empty"
+    "available": true,
+    "source": "tdx.enhanced.kline",
+    "latency_ms": 78.00000000133878,
+    "sample_fields": [
+      "datetime",
+      "open",
+      "high",
+      "low",
+      "close",
+      "vol",
+      "amount",
+      "float_shares"
+    ],
+    "error": null
   },
   "order_book": {
     "available": false,
     "source": "tdx.enhanced.order-book",
-    "latency_ms": 0.0,
+    "latency_ms": 31.9999999992433,
     "sample_fields": [],
-    "error": "OverflowError: int too big to convert"
+    "error": "LocalClientCapabilityLimitation: installed easy-tdx 128-bit request bitmap cannot encode order-book levels 3-5; verified levels 1-2 only"
   }
 }

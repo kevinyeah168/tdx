@@ -8,7 +8,7 @@ import time
 from typing import Any, Protocol, TypeVar, cast
 
 from easy_tdx import BoardType, KlineCategory, Market, Period
-from easy_tdx.codec.bitmap import PresetField
+from easy_tdx.codec.bitmap import FieldBit, PresetField
 
 from workbench.domain import CapabilityResult, ProviderCapabilities
 
@@ -18,9 +18,19 @@ MAX_SAMPLE_FIELDS = 12
 _MAX_ERROR_LENGTH = 200
 _STOCK_CODE = "600000"
 _NORMAL_MARKET = Market.SH
-_ENHANCED_MARKET = 0
+_ENHANCED_MARKET = int(Market.SH)
 _SAMPLE_COUNT = 3
 _BOARD_SAMPLE_COUNT = 8
+
+ENHANCED_QUOTE_FIELDS = PresetField.COMMON
+ENHANCED_ORDER_BOOK_FIELDS = (
+    PresetField.BASIC
+    + PresetField.QUOTE
+    + FieldBit.BID2_PRICE
+    + FieldBit.ASK2_PRICE
+    + FieldBit.BID2_VOLUME
+    + FieldBit.ASK2_VOLUME
+)
 
 _CREDENTIAL_KEY_PATTERN = re.compile(
     r"(?:^|[_.-])(?:user(?:name)?|password|passwd|token|secret|api[-_]?key|credentials?|host(?:name)?)(?:$|[_.-])",
@@ -66,27 +76,18 @@ _CAPITAL_FLOW_FIELDS = {
     "large_out",
     "large_net",
 }
-_ORDER_BOOK_FIELDS = {
-    "bid_price",
-    "bid2_price",
-    "bid3_price",
-    "bid4_price",
-    "bid5_price",
-    "ask_price",
-    "ask2_price",
-    "ask3_price",
-    "ask4_price",
-    "ask5_price",
-    "bid_volume",
-    "bid2_volume",
-    "bid3_volume",
-    "bid4_volume",
-    "bid5_volume",
-    "ask_volume",
-    "ask2_volume",
-    "ask3_volume",
-    "ask4_volume",
-    "ask5_volume",
+_ORDER_BOOK_LEVEL_1_2_RESPONSE_FIELDS = {
+    field.field_name
+    for field in (
+        FieldBit.BID_PRICE,
+        FieldBit.ASK_PRICE,
+        FieldBit.BID_VOLUME,
+        FieldBit.ASK_VOLUME,
+        FieldBit.BID2_PRICE,
+        FieldBit.ASK2_PRICE,
+        FieldBit.BID2_VOLUME,
+        FieldBit.ASK2_VOLUME,
+    )
 }
 
 ResultT = TypeVar("ResultT")
@@ -98,6 +99,10 @@ class ProbeNodePool(Protocol):
 
 
 class CapabilityUnavailable(RuntimeError):
+    pass
+
+
+class LocalClientCapabilityLimitation(CapabilityUnavailable):
     pass
 
 
@@ -120,8 +125,6 @@ def probe_tdx_capabilities(
     """
 
     discovered_board: tuple[str, str] | None = None
-    enhanced_quote_fields = PresetField.BASIC + PresetField.HANDICAP
-
     def security_catalog() -> _Evidence:
         def fetch(client: Any) -> object:
             count = client.get_security_count(_NORMAL_MARKET)
@@ -197,7 +200,7 @@ def probe_tdx_capabilities(
         response = enhanced_pool.execute(
             lambda client: client.get_stock_quotes(
                 [(_ENHANCED_MARKET, _STOCK_CODE)],
-                fields=enhanced_quote_fields,
+                fields=ENHANCED_QUOTE_FIELDS,
             )
         )
         return _response_evidence(
@@ -269,13 +272,17 @@ def probe_tdx_capabilities(
         response = enhanced_pool.execute(
             lambda client: client.get_stock_quotes(
                 [(_ENHANCED_MARKET, _STOCK_CODE)],
-                fields=enhanced_quote_fields,
+                fields=ENHANCED_ORDER_BOOK_FIELDS,
             )
         )
-        return _response_evidence(
+        _response_evidence(
             "tdx.enhanced.order-book",
             response,
-            required={"code", *_ORDER_BOOK_FIELDS},
+            required={"code", *_ORDER_BOOK_LEVEL_1_2_RESPONSE_FIELDS},
+        )
+        raise LocalClientCapabilityLimitation(
+            "installed easy-tdx 128-bit request bitmap cannot encode order-book "
+            "levels 3-5; verified levels 1-2 only"
         )
 
     results: dict[str, CapabilityResult] = {}

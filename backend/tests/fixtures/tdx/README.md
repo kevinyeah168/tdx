@@ -2,22 +2,26 @@
 
 Capture date: 2026-08-20 (Asia/Shanghai).
 
-This fixture is a sanitized live capture. Stock-level checks used `SH600000`.
+This fixture is a sanitized live capture. Stock-level checks used `SH600000`;
+normal calls used `Market.SH` and enhanced calls used `int(Market.SH) == 1`.
 The probe requested `BoardType.HY`, selected the first industry board returned by
 that bounded live response, and used board `881234` (`生物制品`) for the board
 membership check. No board identifier is hardcoded in the probe.
 
 ## Evidence status
 
-All nine entries are live endpoint evidence; none are hand-authored or controlled
-placeholder results.
+None of the entries are hand-authored or controlled placeholder results. Endpoint
+evidence and the local installed-client limitation are classified separately:
 
-- Live `available=true`: `security_catalog`, `board_list`, `board_members`, and
-  `minute_data`.
-- Live `available=false`: `official_funds`, `quotes`, `transactions`, `bars`, and
-  `order_book`. Their errors are bounded sanitized summaries of the observed
-  empty/decoder/field-width responses. These results must remain unavailable
-  rather than being replaced with fake data.
+- Real endpoint responses with `available=true`: `security_catalog`, `board_list`,
+  `board_members`, `official_funds`, `quotes`, `minute_data`, and `bars`.
+- Real endpoint response with `available=false`: `transactions`, whose bounded
+  request returned no rows.
+- Local installed-client limitation with `available=false`: `order_book`. A live,
+  constructible level-1/2 quote request succeeded and was verified, but the
+  installed easy-tdx request builder serializes only a 128-bit field bitmap and
+  cannot encode the level-3/4/5 fields. This is not classified as a remote endpoint
+  failure and must not be upgraded to five-level availability from partial fields.
 
 The JSON records source labels, per-capability latency, and at most twelve real
 protocol field names. It never records response rows, node addresses, credentials,

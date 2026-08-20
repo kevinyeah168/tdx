@@ -8,11 +8,13 @@ import subprocess
 from typing import Any, Callable
 
 from easy_tdx import KlineCategory, Market
+from easy_tdx.codec.bitmap import FieldBit, build_bitmap, normalize_fields
 import pandas as pd
 import pytest
 
 from tools import probe_tdx_capabilities as probe_cli
 from workbench.domain import CapabilityResult, ProviderCapabilities
+from workbench.providers.tdx import probe as tdx_probe
 from workbench.providers.tdx.probe import MAX_SAMPLE_FIELDS, probe_tdx_capabilities
 
 
@@ -189,33 +191,18 @@ class FakeMacClient:
         self._fail_if_requested("get_stock_quotes")
         self.stock_requests.append(("stock_quotes", stocks[0][0], stocks[0][1]))
         self.quote_fields.append(fields)
+        selected = list(normalize_fields(fields))
+        values = {
+            bit.field_name: 1 if bit.fmt in {"<I", "<i"} else 12.34
+            for bit in selected
+        }
         return pd.DataFrame(
             [
                 {
-                    "market": 0,
+                    "market": stocks[0][0],
                     "code": "600000",
                     "name": "浦发银行",
-                    "close": 12.34,
-                    "bid_price": 12.33,
-                    "bid2_price": 12.32,
-                    "bid3_price": 12.31,
-                    "bid4_price": 12.30,
-                    "bid5_price": 12.29,
-                    "ask_price": 12.34,
-                    "ask2_price": 12.35,
-                    "ask3_price": 12.36,
-                    "ask4_price": 12.37,
-                    "ask5_price": 12.38,
-                    "bid_volume": 1,
-                    "bid2_volume": 2,
-                    "bid3_volume": 3,
-                    "bid4_volume": 4,
-                    "bid5_volume": 5,
-                    "ask_volume": 1,
-                    "ask2_volume": 2,
-                    "ask3_volume": 3,
-                    "ask4_volume": 4,
-                    "ask5_volume": 5,
+                    **values,
                 }
             ]
         )
@@ -291,8 +278,60 @@ def test_probe_reports_exact_contract_and_uses_real_discovered_board() -> None:
     }
     assert enhanced.board_member_requests == ["881777"]
     assert all(market is Market.SH and code == "600000" for _, market, code in normal.stock_requests)
-    assert all(market == 0 and code == "600000" for _, market, code in enhanced.stock_requests)
+    assert all(
+        market == int(Market.SH) and code == "600000"
+        for _, market, code in enhanced.stock_requests
+    )
     assert enhanced.quote_fields and all(fields is not None for fields in enhanced.quote_fields)
+
+
+def test_every_real_enhanced_field_selection_fits_installed_bitmap() -> None:
+    selections = {
+        "quotes": tdx_probe.ENHANCED_QUOTE_FIELDS,
+        "order_book": tdx_probe.ENHANCED_ORDER_BOOK_FIELDS,
+    }
+
+    for name, selection in selections.items():
+        bitmap = build_bitmap(selection)
+        selected_bits = list(normalize_fields(selection))
+
+        assert len(bitmap) == 20, name
+        assert selected_bits, name
+        assert max(bit.value for bit in selected_bits) < 128, name
+
+
+def test_order_book_verifies_level_one_two_then_reports_local_five_level_limit() -> None:
+    enhanced = FakeMacClient()
+
+    report = run_probe(enhanced=enhanced)
+
+    assert len(enhanced.quote_fields) == 2
+    quote_fields, order_book_fields = enhanced.quote_fields
+    quote_names = {bit.field_name for bit in normalize_fields(quote_fields)}
+    order_book_names = {
+        bit.field_name for bit in normalize_fields(order_book_fields)
+    }
+    assert "close" in quote_names
+    assert {
+        FieldBit.BID_PRICE.field_name,
+        FieldBit.ASK_PRICE.field_name,
+        FieldBit.BID_VOLUME.field_name,
+        FieldBit.ASK_VOLUME.field_name,
+        FieldBit.BID2_PRICE.field_name,
+        FieldBit.ASK2_PRICE.field_name,
+        FieldBit.BID2_VOLUME.field_name,
+        FieldBit.ASK2_VOLUME.field_name,
+    } <= order_book_names
+    assert order_book_names.isdisjoint(
+        {"bid3_price", "ask3_price", "bid5_volume", "ask5_volume"}
+    )
+    assert report.quotes.available is True
+    assert report.order_book.available is False
+    assert report.order_book.sample_fields == []
+    assert report.order_book.error is not None
+    assert report.order_book.error.startswith("LocalClientCapabilityLimitation:")
+    assert "levels 3-5" in report.order_book.error
+    assert "128-bit" in report.order_book.error
 
 
 def test_one_capability_failure_does_not_hide_successful_capabilities() -> None:
@@ -304,7 +343,7 @@ def test_one_capability_failure_does_not_hide_successful_capabilities() -> None:
     assert all(
         getattr(report, name).available
         for name in ProviderCapabilities.model_fields
-        if name != "transactions"
+        if name not in {"transactions", "order_book"}
     )
 
 
@@ -314,15 +353,19 @@ def test_each_result_has_valid_semantics_and_per_capability_monotonic_latency() 
     report = run_probe(clock=clock)
 
     assert clock.calls == len(ProviderCapabilities.model_fields) * 2
-    for result in report:
-        assert isinstance(result[1], CapabilityResult)
-        capability = result[1]
-        assert capability.available is True
-        assert capability.error is None
+    for name, capability in report:
+        assert isinstance(capability, CapabilityResult)
         assert capability.source
-        assert capability.sample_fields
         assert capability.latency_ms == pytest.approx(25.0)
         assert capability.latency_ms >= 0
+        if name == "order_book":
+            assert capability.available is False
+            assert capability.error is not None
+            assert capability.sample_fields == []
+        else:
+            assert capability.available is True
+            assert capability.error is None
+            assert capability.sample_fields
 
 
 def test_samples_are_bounded_serializable_and_recursively_remove_secrets() -> None:
@@ -509,9 +552,15 @@ def test_committed_real_fixture_matches_strict_model_and_has_no_secrets() -> Non
     assert not re.search(r"(?i)([a-z]:[\\/]|\\\\[^\\]|/(?:home|users|var|tmp)/)", raw)
     assert not re.search(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", raw)
     assert "Traceback" not in raw
+    assert fixture.order_book.available is False
+    assert fixture.order_book.error is not None
+    assert fixture.order_book.error.startswith("LocalClientCapabilityLimitation:")
+    assert "OverflowError" not in fixture.order_book.error
     readme = (FIXTURE_DIR / "README.md").read_text(encoding="utf-8")
     for expected in ("2026-08-20", "SH600000", "board", "live", "available=false", "refresh"):
         assert expected.lower() in readme.lower()
+    assert "local installed-client limitation" in readme.lower()
+    assert "all nine entries are live endpoint evidence" not in readme.lower()
 
 
 def test_raw_probe_outputs_are_ignored_but_sanitized_fixture_is_not() -> None:
