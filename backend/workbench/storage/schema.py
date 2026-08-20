@@ -1,3 +1,12 @@
+import sqlite3
+
+
+def configure_hot_connection(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+
+
 META_SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -37,7 +46,6 @@ CREATE TABLE IF NOT EXISTS catalog_state (
 
 HOT_SCHEMA = """
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
 
 CREATE TABLE IF NOT EXISTS stock_minute (
     trade_date TEXT NOT NULL,
