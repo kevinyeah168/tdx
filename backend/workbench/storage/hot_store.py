@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -12,6 +13,12 @@ from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
 
 LEGACY_CATALOG_VERSION = "legacy-unknown"
+
+
+@dataclass(frozen=True)
+class CompleteFundCurve:
+    latest_complete_minute: str | None
+    rows: list[dict[str, Any]]
 
 
 STOCK_UPSERT = """
@@ -164,13 +171,10 @@ class HotStore:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def connect(
-        self, *, readonly: bool = False, immutable: bool | None = None
-    ) -> sqlite3.Connection:
+    def connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
-            use_immutable = not self._wal_path().exists() if immutable is None else immutable
-            query = "mode=ro&immutable=1" if use_immutable else "mode=ro"
-            connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?{query}", uri=True)
+            # mode=ro forbids writes while retaining SQLite's WAL sidecars as concurrency metadata.
+            connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path)
@@ -179,14 +183,8 @@ class HotStore:
         return connection
 
     @contextmanager
-    def _session(
-        self, *, readonly: bool = False, immutable: bool | None = None
-    ) -> Iterator[sqlite3.Connection]:
-        connection = (
-            self.connect(readonly=readonly)
-            if immutable is None
-            else self.connect(readonly=readonly, immutable=immutable)
-        )
+    def _session(self, *, readonly: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = self.connect(readonly=readonly)
         try:
             with connection:
                 yield connection
@@ -278,36 +276,26 @@ class HotStore:
         return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
 
     def complete_stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
-        return self._complete_fund_series("stock_minute", "symbol", trade_date, symbol)
+        return self.complete_stock_fund_curve(trade_date, symbol).rows
 
     def complete_sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
-        return self._complete_fund_series("sector_minute", "sector_id", trade_date, sector_id)
+        return self.complete_sector_fund_curve(trade_date, sector_id).rows
 
-    def _complete_fund_series(
+    def complete_stock_fund_curve(self, trade_date: str, symbol: str) -> CompleteFundCurve:
+        return self._complete_fund_curve("stock_minute", "symbol", trade_date, symbol)
+
+    def complete_sector_fund_curve(self, trade_date: str, sector_id: str) -> CompleteFundCurve:
+        return self._complete_fund_curve("sector_minute", "sector_id", trade_date, sector_id)
+
+    def _complete_fund_curve(
         self, table: str, entity_column: str, trade_date: str, entity_id: str
-    ) -> list[dict[str, Any]]:
-        used_immutable = not self._wal_path().exists()
-        rows = self._query_complete_fund_series(
-            table, entity_column, trade_date, entity_id, immutable=used_immutable
-        )
-        # A writer can create a WAL after the first check; retry with normal read-only mode so
-        # recently committed WAL frames are not hidden by an immutable snapshot.
-        if used_immutable and self._wal_path().exists():
-            rows = self._query_complete_fund_series(
-                table, entity_column, trade_date, entity_id, immutable=False
-            )
-        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
-
-    def _query_complete_fund_series(
-        self,
-        table: str,
-        entity_column: str,
-        trade_date: str,
-        entity_id: str,
-        *,
-        immutable: bool,
-    ) -> list[sqlite3.Row]:
-        with self._session(readonly=True, immutable=immutable) as connection:
+    ) -> CompleteFundCurve:
+        with self._session(readonly=True) as connection:
+            connection.execute("BEGIN")
+            cursor = connection.execute(
+                "SELECT MAX(minute) FROM collection_status WHERE trade_date=? AND status='complete'",
+                (trade_date,),
+            ).fetchone()
             rows = connection.execute(
                 f"""
                 SELECT series.*
@@ -322,22 +310,15 @@ class HotStore:
                 """,
                 (trade_date, entity_id),
             ).fetchall()
-        return rows
+        return CompleteFundCurve(
+            latest_complete_minute=str(cursor[0]) if cursor and cursor[0] else None,
+            rows=[dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows],
+        )
 
     def latest_complete_minute(self, trade_date: str) -> str | None:
-        used_immutable = not self._wal_path().exists()
-        latest = self._query_latest_complete_minute(trade_date, immutable=used_immutable)
-        if used_immutable and self._wal_path().exists():
-            latest = self._query_latest_complete_minute(trade_date, immutable=False)
-        return latest
-
-    def _query_latest_complete_minute(self, trade_date: str, *, immutable: bool) -> str | None:
-        with self._session(readonly=True, immutable=immutable) as connection:
+        with self._session(readonly=True) as connection:
             row = connection.execute(
                 "SELECT MAX(minute) FROM collection_status WHERE trade_date=? AND status='complete'",
                 (trade_date,),
             ).fetchone()
         return str(row[0]) if row and row[0] else None
-
-    def _wal_path(self) -> Path:
-        return Path(f"{self.path}-wal")

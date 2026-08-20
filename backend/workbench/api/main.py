@@ -125,11 +125,12 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         normalized_symbol = symbol.upper()
         try:
             store = _hot_store(active_settings, trade_date)
+            curve = store.complete_stock_fund_curve(trade_date.isoformat(), normalized_symbol)
             return _serialize_series(
                 entity_key="symbol",
                 entity_id=normalized_symbol,
-                latest_complete_minute=store.latest_complete_minute(trade_date.isoformat()),
-                rows=store.complete_stock_fund_series(trade_date.isoformat(), normalized_symbol),
+                latest_complete_minute=curve.latest_complete_minute,
+                rows=curve.rows,
                 tiers=selected_tiers,
                 payload_model=StockFundFlowPayload,
             )
@@ -143,11 +144,12 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         selected_tiers = _parse_tiers(tiers)
         try:
             store = _hot_store(active_settings, trade_date)
+            curve = store.complete_sector_fund_curve(trade_date.isoformat(), sector_id)
             return _serialize_series(
                 entity_key="sector_id",
                 entity_id=sector_id,
-                latest_complete_minute=store.latest_complete_minute(trade_date.isoformat()),
-                rows=store.complete_sector_fund_series(trade_date.isoformat(), sector_id),
+                latest_complete_minute=curve.latest_complete_minute,
+                rows=curve.rows,
                 tiers=selected_tiers,
                 payload_model=SectorFundFlowPayload,
             )

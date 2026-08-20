@@ -270,7 +270,9 @@ def test_mismatched_batch_rows_are_not_exposed_by_complete_status(tmp_path: Path
     assert stock.status_code == sector.status_code == 404
 
 
-def test_closed_database_read_creates_no_wal_or_shm_artifacts(tmp_path: Path) -> None:
+def test_readonly_curve_query_does_not_mutate_rows_or_schema_despite_wal_sidecars(
+    tmp_path: Path,
+) -> None:
     from workbench.api.main import create_app
 
     settings = WorkbenchSettings(data_dir=tmp_path)
@@ -281,23 +283,29 @@ def test_closed_database_read_creates_no_wal_or_shm_artifacts(tmp_path: Path) ->
     hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
     hot.initialize()
     MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
-    with hot._session() as connection:
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    wal_path = Path(f"{hot.path}-wal")
-    shm_path = Path(f"{hot.path}-shm")
-    assert not wal_path.exists()
-    assert not shm_path.exists()
+    with sqlite3.connect(hot.path) as connection:
+        before_rows = connection.execute(
+            "SELECT minute, symbol, main_delta, batch_id FROM stock_minute ORDER BY minute, symbol"
+        ).fetchall()
+        before_schema = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
 
     response = TestClient(create_app(settings)).get(
         "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
     )
 
     assert response.status_code == 200
-    assert not wal_path.exists()
-    assert not shm_path.exists()
+    with sqlite3.connect(hot.path) as connection:
+        assert connection.execute(
+            "SELECT minute, symbol, main_delta, batch_id FROM stock_minute ORDER BY minute, symbol"
+        ).fetchall() == before_rows
+        assert connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall() == before_schema
 
 
-def test_live_wal_data_remains_visible_to_api_reads(tmp_path: Path) -> None:
+def test_live_wal_data_remains_visible_to_readonly_api_queries(tmp_path: Path) -> None:
     from workbench.api.main import create_app
 
     settings = WorkbenchSettings(data_dir=tmp_path)
@@ -320,6 +328,61 @@ def test_live_wal_data_remains_visible_to_api_reads(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["points"][0]["minute"] == "09:31"
+
+
+def test_stock_curve_uses_one_snapshot_when_a_complete_batch_commits_between_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = FakeMarketProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    collector = MinuteCollector(provider, meta, hot)
+    collector.collect(TRADE_DATE, "09:31")
+    original_connect = HotStore.connect
+    committed = False
+
+    class CursorThenCommitConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> "CursorThenCommitConnection":
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> bool | None:
+            return self.connection.__exit__(*args)
+
+        def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
+            nonlocal committed
+            result = self.connection.execute(sql, parameters)
+            if not committed and "SELECT MAX(minute)" in sql:
+                committed = True
+                collector.collect(TRADE_DATE, "09:32")
+            return result
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.connection, name)
+
+    def connect_with_cursor_then_commit(
+        self: HotStore, *, readonly: bool = False, **kwargs: object
+    ) -> sqlite3.Connection | CursorThenCommitConnection:
+        connection = original_connect(self, readonly=readonly, **kwargs)
+        return CursorThenCommitConnection(connection) if readonly else connection
+
+    monkeypatch.setattr(HotStore, "connect", connect_with_cursor_then_commit)
+    response = TestClient(create_app(settings)).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["latest_complete_minute"] == "09:31"
+    assert [point["minute"] for point in response.json()["points"]] == ["09:31"]
 
 
 @pytest.mark.parametrize("contents", [b"not a sqlite database", None])

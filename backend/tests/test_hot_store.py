@@ -171,6 +171,20 @@ def test_readonly_connect_does_not_create_parent_directories(tmp_path: Path) -> 
     assert not missing_path.parent.exists()
 
 
+def test_readonly_connection_rejects_row_and_schema_mutations(tmp_path: Path) -> None:
+    store = HotStore(tmp_path / "2026-08-20.sqlite")
+    store.initialize()
+    store.write_stocks([stock_record(10.0)])
+
+    with store._session(readonly=True) as connection:
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("UPDATE stock_minute SET close=99")
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("CREATE TABLE forbidden_write(id INTEGER)")
+
+    assert store.stock_fund_series("2026-08-20", "SH600000")[0]["close"] == 10.0
+
+
 def test_initialize_migrates_legacy_collection_status_catalog_provenance(tmp_path: Path) -> None:
     path = tmp_path / "2026-08-20.sqlite"
     connection = sqlite3.connect(path)
@@ -246,10 +260,8 @@ def test_concurrent_initializers_serialize_legacy_catalog_provenance_migration(
         def __getattr__(self, name: str) -> object:
             return getattr(self.connection, name)
 
-    def connect_with_barrier(
-        self: HotStore, *, readonly: bool = False, immutable: bool | None = None
-    ) -> BarrierConnection:
-        return BarrierConnection(original_connect(self, readonly=readonly, immutable=immutable))
+    def connect_with_barrier(self: HotStore, *, readonly: bool = False) -> BarrierConnection:
+        return BarrierConnection(original_connect(self, readonly=readonly))
 
     monkeypatch.setattr(HotStore, "connect", connect_with_barrier)
     errors: list[BaseException] = []
