@@ -44,7 +44,7 @@ MarketSymbol = Annotated[NonBlankText, AfterValidator(validate_market_symbol)]
 
 
 class NormalizedModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class DataQuality(str, Enum):

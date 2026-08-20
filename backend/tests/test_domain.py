@@ -455,6 +455,23 @@ def test_real_provider_domain_models_forbid_unknown_fields(
         factory()
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: quote_snapshot(trade_date="2026-08-20"),
+        lambda: quote_snapshot(price="10.2"),
+        lambda: provider_capabilities(catalog=1),
+        lambda: data_envelope(quality="official"),
+        lambda: data_envelope(observed_at="2026-08-20T09:31:05"),
+    ],
+)
+def test_real_provider_domain_models_reject_coercible_wrong_types(
+    factory: Callable[[], object],
+) -> None:
+    with pytest.raises(ValidationError):
+        factory()
+
+
 @pytest.mark.parametrize("symbol", ["600000", "XX600000", "SH60000", "sh600000"])
 @pytest.mark.parametrize(
     "factory",
