@@ -50,3 +50,9 @@ npm run dev
 
 - 通达信可最小化运行；实时数据来自行情协议，名单来自本地文件
 - 资金数字为分笔主买/主卖推算，页面有口径提示
+
+## Market Workbench 开发
+
+Market Workbench 是面向全市场分钟行情与分层资金曲线的数据基础。已批准的设计见[设计规格](docs/superpowers/specs/2026-08-20-tdx-market-workbench-design.md)，分阶段实现范围见[实施计划](docs/superpowers/plans/2026-08-20-market-data-foundation.md)。
+
+本阶段的安装、运行、接口和验收说明见[开发与运行指南](docs/operations/development.md)。
