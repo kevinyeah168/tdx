@@ -21,6 +21,21 @@ class FakeMarketProvider:
         sector_count: int,
         members_per_sector: int,
     ) -> None:
+        for name, value in {
+            "stock_count": stock_count,
+            "sector_count": sector_count,
+            "members_per_sector": members_per_sector,
+        }.items():
+            if type(value) is not int:
+                raise ValueError(f"{name} must be an integer")
+        if stock_count < 1:
+            raise ValueError("stock_count must be at least 1")
+        if sector_count < 0:
+            raise ValueError("sector_count must be nonnegative")
+        if members_per_sector < 0:
+            raise ValueError("members_per_sector must be nonnegative")
+        if sector_count and members_per_sector > stock_count:
+            raise ValueError("members_per_sector cannot exceed stock_count when sectors exist")
         self.stock_count = stock_count
         self.sector_count = sector_count
         self.members_per_sector = members_per_sector
@@ -63,7 +78,7 @@ class FakeMarketProvider:
             for offset in range(self.members_per_sector)
         ]
         return MarketCatalog(
-            securities=self._securities,
+            securities=[security.model_copy(deep=True) for security in self._securities],
             sectors=sectors,
             memberships=memberships,
             version="fake-v1",
