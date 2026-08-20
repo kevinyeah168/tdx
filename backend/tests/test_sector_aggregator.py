@@ -116,6 +116,71 @@ def test_aggregate_maps_stocks_to_multiple_sectors_sorts_output_and_uses_latest_
     assert all(sector.batch_id == "batch-1" for sector in result)
 
 
+def test_aggregate_uses_latest_observation_from_each_sectors_constituents() -> None:
+    aggregator = SectorAggregator(
+        [
+            Membership(sector_id="881001", symbol="000001"),
+            Membership(sector_id="881002", symbol="000002"),
+        ]
+    )
+    older = datetime(2026, 8, 20, 9, 30, tzinfo=timezone.utc)
+    newer = datetime(2026, 8, 20, 9, 31, tzinfo=timezone.utc)
+
+    result = aggregator.aggregate(
+        [stock("000001", observed_at=older), stock("000002", observed_at=newer)]
+    )
+
+    assert {sector.sector_id: sector.observed_at for sector in result} == {
+        "881001": older,
+        "881002": newer,
+    }
+
+
+def test_aggregate_fund_totals_are_independent_of_stock_input_order() -> None:
+    aggregator = SectorAggregator(
+        [
+            Membership(sector_id="881001", symbol="000001"),
+            Membership(sector_id="881001", symbol="000002"),
+            Membership(sector_id="881001", symbol="000003"),
+        ]
+    )
+
+    def adversarial_stock(symbol: str, value: float) -> StockMinute:
+        return stock(
+            symbol,
+            change_pct=value,
+            main=(value, value),
+            super_=(value, value),
+            large=(value, value),
+            medium=(value, value),
+            small=(value, value),
+        )
+
+    forward = aggregator.aggregate(
+        [
+            adversarial_stock("000001", 1e16),
+            adversarial_stock("000002", -1e16),
+            adversarial_stock("000003", 1.0),
+        ]
+    )
+    reverse = aggregator.aggregate(
+        [
+            adversarial_stock("000003", 1.0),
+            adversarial_stock("000002", -1e16),
+            adversarial_stock("000001", 1e16),
+        ]
+    )
+
+    assert forward == reverse
+    sector = forward[0]
+    assert sector.change_pct == 1.0 / 3.0
+    for tier in (sector.funds.main, sector.funds.super, sector.funds.large, sector.funds.medium, sector.funds.small):
+        assert tier.delta == 1.0
+        assert tier.cumulative == 1.0
+        assert tier.source == "constituent_sum"
+        assert tier.quality is DataQuality.AGGREGATED
+
+
 def test_aggregate_ignores_unmapped_stocks_and_empty_input() -> None:
     aggregator = SectorAggregator([Membership(sector_id="881001", symbol="000001")])
 

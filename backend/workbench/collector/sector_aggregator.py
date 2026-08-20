@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from math import fsum
 from typing import Iterable
 
 from workbench.domain import DataQuality, FundFlow, Membership, SectorMinute, StockMinute, TierPoint
@@ -23,7 +24,6 @@ class SectorAggregator:
             return []
 
         self._validate_batch_identity(records)
-        observed_at = max(stock.observed_at for stock in records)
         first = records[0]
         constituents_by_sector: dict[str, list[StockMinute]] = defaultdict(list)
         for stock in records:
@@ -35,10 +35,10 @@ class SectorAggregator:
                 trade_date=first.trade_date,
                 minute=first.minute,
                 sector_id=sector_id,
-                change_pct=sum(stock.change_pct for stock in constituents) / len(constituents),
+                change_pct=fsum(stock.change_pct for stock in constituents) / len(constituents),
                 member_count=len(constituents),
                 funds=self._sum_funds(constituents),
-                observed_at=observed_at,
+                observed_at=max(stock.observed_at for stock in constituents),
                 batch_id=first.batch_id,
             )
             for sector_id, constituents in sorted(constituents_by_sector.items())
@@ -59,8 +59,8 @@ class SectorAggregator:
     def _sum_funds(stocks: list[StockMinute]) -> FundFlow:
         def tier(name: str) -> TierPoint:
             return TierPoint(
-                delta=sum(getattr(stock.funds, name).delta for stock in stocks),
-                cumulative=sum(getattr(stock.funds, name).cumulative for stock in stocks),
+                delta=fsum(getattr(stock.funds, name).delta for stock in stocks),
+                cumulative=fsum(getattr(stock.funds, name).cumulative for stock in stocks),
                 source="constituent_sum",
                 quality=DataQuality.AGGREGATED,
             )
