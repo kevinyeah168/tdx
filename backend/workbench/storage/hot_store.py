@@ -11,6 +11,9 @@ from workbench.domain import CollectionStatus, SectorMinute, StockMinute
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
 
+LEGACY_CATALOG_VERSION = "legacy-unknown"
+
+
 STOCK_UPSERT = """
 INSERT INTO stock_minute(
     trade_date, minute, symbol, close, change_pct, amount_delta,
@@ -183,6 +186,21 @@ class HotStore:
     def initialize(self) -> None:
         with self._session() as connection:
             connection.executescript(HOT_SCHEMA)
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(collection_status)")
+            }
+            if "catalog_version" not in columns:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        "ALTER TABLE collection_status "
+                        f"ADD COLUMN catalog_version TEXT NOT NULL DEFAULT '{LEGACY_CATALOG_VERSION}'"
+                    )
+                except Exception:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
 
     def write_stocks(self, records: list[StockMinute]) -> None:
         with self._session() as connection:

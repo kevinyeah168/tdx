@@ -169,6 +169,55 @@ def test_readonly_connect_does_not_create_parent_directories(tmp_path: Path) -> 
     assert not missing_path.parent.exists()
 
 
+def test_initialize_migrates_legacy_collection_status_catalog_provenance(tmp_path: Path) -> None:
+    path = tmp_path / "2026-08-20.sqlite"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE collection_status (
+                trade_date TEXT NOT NULL,
+                minute TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                expected_stocks INTEGER NOT NULL,
+                collected_stocks INTEGER NOT NULL,
+                expected_sectors INTEGER NOT NULL,
+                collected_sectors INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                coverage_pct REAL NOT NULL,
+                status TEXT NOT NULL,
+                error_summary TEXT NOT NULL,
+                PRIMARY KEY (trade_date, minute)
+            );
+            INSERT INTO collection_status VALUES(
+                '2026-08-20', '09:30', 'legacy-batch', 1, 1, 0, 0, 12, 100.0, 'complete', ''
+            );
+            """
+        )
+    finally:
+        connection.close()
+
+    store = HotStore(path)
+    store.initialize()
+    store.initialize()
+
+    with store._session(readonly=True) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_status)")}
+        legacy_row = connection.execute(
+            "SELECT catalog_version FROM collection_status WHERE minute='09:30'"
+        ).fetchone()
+    assert "catalog_version" in columns
+    assert legacy_row[0] == "legacy-unknown"
+    assert store.latest_complete_minute("2026-08-20") == "09:30"
+
+    store.write_complete_batch(
+        [stock_record(10.0)], [sector_record()], batch_status(), started_at=time.perf_counter()
+    )
+
+    assert store.latest_complete_minute("2026-08-20") == "09:31"
+    assert len(store.stock_fund_series("2026-08-20", "SH600000")) == 1
+
+
 def test_complete_batch_duration_includes_stock_write_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
