@@ -267,6 +267,31 @@ class HotStore:
             ).fetchall()
         return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
 
+    def complete_stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
+        return self._complete_fund_series("stock_minute", "symbol", trade_date, symbol)
+
+    def complete_sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
+        return self._complete_fund_series("sector_minute", "sector_id", trade_date, sector_id)
+
+    def _complete_fund_series(
+        self, table: str, entity_column: str, trade_date: str, entity_id: str
+    ) -> list[dict[str, Any]]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT series.*
+                FROM {table} AS series
+                INNER JOIN collection_status AS status
+                    ON status.trade_date = series.trade_date
+                    AND status.minute = series.minute
+                    AND status.status = 'complete'
+                WHERE series.trade_date=? AND series.{entity_column}=?
+                ORDER BY series.minute
+                """,
+                (trade_date, entity_id),
+            ).fetchall()
+        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+
     def latest_complete_minute(self, trade_date: str) -> str | None:
         with self._session(readonly=True) as connection:
             row = connection.execute(
