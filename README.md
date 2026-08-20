@@ -56,3 +56,4 @@ npm run dev
 Market Workbench 是面向全市场分钟行情与分层资金曲线的数据基础。已批准的设计见[设计规格](docs/superpowers/specs/2026-08-20-tdx-market-workbench-design.md)，分阶段实现范围见[实施计划](docs/superpowers/plans/2026-08-20-market-data-foundation.md)。
 
 本阶段的安装、运行、接口和验收说明见[开发与运行指南](docs/operations/development.md)。
+API 可通过 `WORKBENCH_DATA_DIR` 指向 Collector 写入的数据目录；未设置时保持默认 `../data`。

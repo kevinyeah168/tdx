@@ -19,12 +19,11 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m workbench.collector.main --fake --once --date 2026-08-20 --minute 09:31 --data-dir ..\data\workbench-dev --stocks 5500 --sectors 400
+$env:WORKBENCH_DATA_DIR = "..\data\workbench-dev"
 .\.venv\Scripts\python.exe -m uvicorn workbench.api.main:app --host 127.0.0.1 --port 8765
 ```
 
-Collector 与 API 是两个独立进程。Collector 是热库的写入者，提交完整批次后 API 才会读取该批次；API 不读取写入中的数据。即使 Collector 停止，API 仍会持续提供最后一次成功提交的数据。
-
-注意：采集命令显式写入 `..\data\workbench-dev`，而当前 API 启动命令固定使用默认的 `..\data`；API 尚未提供数据目录参数或环境变量配置。因此，按以上命令直接启动的 API 不会读取该示例批次。这是第一阶段已知的运行配置缺口，需在后续阶段为 API 增加与 Collector 共享的 settings 后再将两者作为可直接联调的一组命令。
+Collector 与 API 是两个独立进程。Collector 是热库的写入者，提交完整批次后 API 才会读取该批次；API 不读取写入中的数据。API 使用 `WORKBENCH_DATA_DIR` 读取与 Collector 相同的数据目录；未设置该变量时仍使用默认的 `..\data`。即使 Collector 停止，API 仍会持续提供最后一次成功提交的数据。
 
 ## API 示例
 

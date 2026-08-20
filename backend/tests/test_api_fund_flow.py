@@ -18,11 +18,8 @@ from workbench.storage.meta_store import MetaStore
 TRADE_DATE = date(2026, 8, 20)
 
 
-@pytest.fixture
-def client(tmp_path: Path) -> TestClient:
-    from workbench.api.main import create_app
-
-    settings = WorkbenchSettings(data_dir=tmp_path)
+def _collect_fake_minute(data_dir: Path) -> None:
+    settings = WorkbenchSettings(data_dir=data_dir)
     provider = FakeMarketProvider(20, 2, 10)
     meta = MetaStore(settings.meta_db)
     meta.initialize()
@@ -30,7 +27,71 @@ def client(tmp_path: Path) -> TestClient:
     hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
     hot.initialize()
     MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
+
+
+@pytest.fixture
+def client(tmp_path: Path) -> TestClient:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    _collect_fake_minute(tmp_path)
     return TestClient(create_app(settings))
+
+
+def test_default_create_app_reads_data_dir_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from workbench.api.main import create_app
+
+    workbench_dev = tmp_path / "workbench-dev"
+    _collect_fake_minute(workbench_dev)
+    monkeypatch.setenv("WORKBENCH_DATA_DIR", str(workbench_dev))
+
+    response = TestClient(create_app()).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["latest_complete_minute"] == "09:31"
+
+
+def test_explicit_settings_override_workbench_data_dir_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from workbench.api.main import create_app
+
+    environment_data_dir = tmp_path / "environment"
+    explicit_data_dir = tmp_path / "explicit"
+    _collect_fake_minute(explicit_data_dir)
+    monkeypatch.setenv("WORKBENCH_DATA_DIR", str(environment_data_dir))
+
+    response = TestClient(create_app(WorkbenchSettings(data_dir=explicit_data_dir))).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["latest_complete_minute"] == "09:31"
+
+
+def test_default_create_app_retains_default_data_dir_without_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from workbench.config import workbench_settings_from_environment
+
+    monkeypatch.delenv("WORKBENCH_DATA_DIR", raising=False)
+
+    assert workbench_settings_from_environment().data_dir == Path("../data")
+
+
+def test_workbench_data_dir_environment_rejects_blank_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from workbench.config import workbench_settings_from_environment
+
+    monkeypatch.setenv("WORKBENCH_DATA_DIR", "  ")
+
+    with pytest.raises(ValueError, match="WORKBENCH_DATA_DIR must not be blank"):
+        workbench_settings_from_environment()
 
 
 def test_health_and_default_stock_fund_flow_contract(client: TestClient) -> None:

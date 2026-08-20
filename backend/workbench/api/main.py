@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from workbench.config import WorkbenchSettings
+from workbench.config import WorkbenchSettings, workbench_settings_from_environment
 from workbench.storage.hot_store import HotStore
 
 
@@ -110,7 +110,7 @@ def _unavailable_storage() -> HTTPException:
 
 
 def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
-    active_settings = settings or WorkbenchSettings()
+    active_settings = settings if settings is not None else workbench_settings_from_environment()
     application = FastAPI(title="TDX Market Workbench", version="0.1.0")
 
     @application.get("/api/v1/health")

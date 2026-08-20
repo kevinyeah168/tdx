@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -25,3 +26,12 @@ class WorkbenchSettings(BaseModel):
         (self.data_dir / "hot").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "history").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "run").mkdir(parents=True, exist_ok=True)
+
+
+def workbench_settings_from_environment() -> WorkbenchSettings:
+    data_dir = os.environ.get("WORKBENCH_DATA_DIR")
+    if data_dir is None:
+        return WorkbenchSettings()
+    if not data_dir.strip():
+        raise ValueError("WORKBENCH_DATA_DIR must not be blank")
+    return WorkbenchSettings(data_dir=Path(data_dir))
