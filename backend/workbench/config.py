@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -16,7 +17,8 @@ class WorkbenchSettings(BaseModel):
         return self.data_dir / "meta" / "market_meta.sqlite"
 
     def hot_db_for(self, trade_date: str) -> Path:
-        return self.data_dir / "hot" / f"{trade_date}.sqlite"
+        parsed_trade_date = date.fromisoformat(trade_date)
+        return self.data_dir / "hot" / f"{parsed_trade_date.isoformat()}.sqlite"
 
     def ensure_directories(self) -> None:
         (self.data_dir / "meta").mkdir(parents=True, exist_ok=True)

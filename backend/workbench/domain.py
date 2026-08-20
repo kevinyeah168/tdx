@@ -2,8 +2,33 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    model_validator,
+)
+
+
+def validate_minute(value: str) -> str:
+    if len(value) != 5 or value[2] != ":" or not value.replace(":", "").isdigit():
+        raise ValueError("minute must use HH:MM format")
+    try:
+        datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise ValueError("minute must be a valid clock time") from error
+    return value
+
+
+Minute = Annotated[str, AfterValidator(validate_minute)]
+
+
+class NormalizedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class DataQuality(str, Enum):
@@ -15,14 +40,14 @@ class DataQuality(str, Enum):
     GAP = "gap"
 
 
-class TierPoint(BaseModel):
-    delta: float = 0.0
-    cumulative: float = 0.0
+class TierPoint(NormalizedModel):
+    delta: FiniteFloat = 0.0
+    cumulative: FiniteFloat = 0.0
     source: str
     quality: DataQuality
 
 
-class FundFlow(BaseModel):
+class FundFlow(NormalizedModel):
     main: TierPoint
     super: TierPoint
     large: TierPoint
@@ -68,7 +93,7 @@ class FundFlow(BaseModel):
         )
 
 
-class Security(BaseModel):
+class Security(NormalizedModel):
     symbol: str
     code: str
     name: str
@@ -76,43 +101,56 @@ class Security(BaseModel):
     active: bool = True
 
 
-class Sector(BaseModel):
+class Sector(NormalizedModel):
     sector_id: str
     name: str
     sector_type: str
 
 
-class Membership(BaseModel):
+class Membership(NormalizedModel):
     sector_id: str
     symbol: str
 
 
-class StockMinute(BaseModel):
+class StockMinute(NormalizedModel):
     trade_date: date
-    minute: str = Field(pattern=r"^\d{2}:\d{2}$")
+    minute: Minute
     symbol: str
-    close: float
-    change_pct: float
-    amount_delta: float
+    close: FiniteFloat = Field(ge=0)
+    change_pct: FiniteFloat
+    amount_delta: FiniteFloat = Field(ge=0)
     funds: FundFlow
     observed_at: datetime
     batch_id: str
 
 
-class SectorMinute(BaseModel):
+class SectorMinute(NormalizedModel):
     trade_date: date
-    minute: str = Field(pattern=r"^\d{2}:\d{2}$")
+    minute: Minute
     sector_id: str
-    change_pct: float
-    member_count: int
+    change_pct: FiniteFloat
+    member_count: int = Field(ge=0)
     funds: FundFlow
     observed_at: datetime
     batch_id: str
 
 
-class ProviderMinuteBatch(BaseModel):
+class ProviderMinuteBatch(NormalizedModel):
     trade_date: date
-    minute: str
+    minute: Minute
     stocks: list[StockMinute]
-    expected_stocks: int
+    expected_stocks: int = Field(ge=0)
     errors: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_stocks(self) -> "ProviderMinuteBatch":
+        if self.expected_stocks < len(self.stocks):
+            raise ValueError("expected_stocks cannot be lower than the number of stocks")
+        if len({stock.symbol for stock in self.stocks}) != len(self.stocks):
+            raise ValueError("stocks cannot contain duplicate symbols")
+        if any(
+            stock.trade_date != self.trade_date or stock.minute != self.minute
+            for stock in self.stocks
+        ):
+            raise ValueError("stocks must match the batch trade_date and minute")
+        return self
