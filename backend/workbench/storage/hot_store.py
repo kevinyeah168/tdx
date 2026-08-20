@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+from workbench.domain import SectorMinute, StockMinute
+from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
+
+
+STOCK_UPSERT = """
+INSERT INTO stock_minute(
+    trade_date, minute, symbol, close, change_pct, amount_delta,
+    main_delta, main_cum, super_delta, super_cum, large_delta, large_cum,
+    medium_delta, medium_cum, small_delta, small_cum,
+    tier_meta_json, observed_at, batch_id
+) VALUES(
+    :trade_date, :minute, :symbol, :close, :change_pct, :amount_delta,
+    :main_delta, :main_cum, :super_delta, :super_cum, :large_delta, :large_cum,
+    :medium_delta, :medium_cum, :small_delta, :small_cum,
+    :tier_meta_json, :observed_at, :batch_id
+) ON CONFLICT(trade_date, minute, symbol) DO UPDATE SET
+    close=excluded.close,
+    change_pct=excluded.change_pct,
+    amount_delta=excluded.amount_delta,
+    main_delta=excluded.main_delta,
+    main_cum=excluded.main_cum,
+    super_delta=excluded.super_delta,
+    super_cum=excluded.super_cum,
+    large_delta=excluded.large_delta,
+    large_cum=excluded.large_cum,
+    medium_delta=excluded.medium_delta,
+    medium_cum=excluded.medium_cum,
+    small_delta=excluded.small_delta,
+    small_cum=excluded.small_cum,
+    tier_meta_json=excluded.tier_meta_json,
+    observed_at=excluded.observed_at,
+    batch_id=excluded.batch_id
+"""
+
+
+def _tier_meta(record: StockMinute | SectorMinute) -> str:
+    return json.dumps(
+        {
+            name: {"source": point.source, "quality": point.quality.value}
+            for name, point in {
+                "main": record.funds.main,
+                "super": record.funds.super,
+                "large": record.funds.large,
+                "medium": record.funds.medium,
+                "small": record.funds.small,
+            }.items()
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _stock_params(record: StockMinute) -> dict[str, Any]:
+    return {
+        "trade_date": record.trade_date.isoformat(),
+        "minute": record.minute,
+        "symbol": record.symbol,
+        "close": record.close,
+        "change_pct": record.change_pct,
+        "amount_delta": record.amount_delta,
+        "main_delta": record.funds.main.delta,
+        "main_cum": record.funds.main.cumulative,
+        "super_delta": record.funds.super.delta,
+        "super_cum": record.funds.super.cumulative,
+        "large_delta": record.funds.large.delta,
+        "large_cum": record.funds.large.cumulative,
+        "medium_delta": record.funds.medium.delta,
+        "medium_cum": record.funds.medium.cumulative,
+        "small_delta": record.funds.small.delta,
+        "small_cum": record.funds.small.cumulative,
+        "tier_meta_json": _tier_meta(record),
+        "observed_at": record.observed_at.isoformat(),
+        "batch_id": record.batch_id,
+    }
+
+
+class HotStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if readonly:
+            connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        else:
+            connection = sqlite3.connect(self.path)
+        configure_hot_connection(connection)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @contextmanager
+    def _session(self, *, readonly: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = self.connect(readonly=readonly)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def initialize(self) -> None:
+        with self._session() as connection:
+            connection.executescript(HOT_SCHEMA)
+
+    def write_stocks(self, records: list[StockMinute]) -> None:
+        with self._session() as connection:
+            connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in records])
+
+    def stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM stock_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
+                (trade_date, symbol),
+            ).fetchall()
+        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+
+    def latest_complete_minute(self, trade_date: str) -> str | None:
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT MAX(minute) FROM collection_status WHERE trade_date=? AND status='complete'",
+                (trade_date,),
+            ).fetchone()
+        return str(row[0]) if row and row[0] else None
