@@ -230,7 +230,11 @@ def test_node_is_eligible_after_cooldown_and_success_resets_failure_state() -> N
         pool.execute(lambda client: attempts.append(client.address))
     clock.advance(1.0)
 
-    assert pool.execute(lambda client: (attempts.append(client.address), "ok")[1]) == "ok"
+    def succeed(client: FakeSyncClient) -> str:
+        attempts.append(client.address)
+        return "ok"
+
+    assert pool.execute(succeed) == "ok"
     state = node_snapshot(pool, target.address)
     assert attempts == [target.address, target.address]
     assert state["consecutive_failures"] == 0
@@ -395,7 +399,9 @@ def test_health_snapshot_is_json_serializable_and_has_only_controlled_node_field
     pool.probe_all()
 
     with pytest.raises(TdxNodePoolError):
-        pool.execute(lambda _client: (_ for _ in ()).throw(OSError("safe summary")))
+        pool.execute(
+            lambda _client: (_ for _ in ()).throw(FakeTransportError("safe summary"))
+        )
 
     snapshot = pool.health_snapshot()
     assert json.loads(json.dumps(snapshot)) == snapshot
@@ -416,7 +422,7 @@ def test_health_snapshot_is_json_serializable_and_has_only_controlled_node_field
         "consecutive_failures": 1,
         "circuit_open": True,
         "cooldown_remaining_seconds": 15.0,
-        "last_error": "OSError: safe summary",
+        "last_error": "FakeTransportError: safe summary",
     }
     clock.advance(5.0)
     assert node_snapshot(pool, target.address)["cooldown_remaining_seconds"] == 10.0
@@ -518,7 +524,7 @@ def test_aclose_cancels_and_awaits_work_before_closing_pool() -> None:
     asyncio.run(exercise())
 
 
-def test_cancelled_connect_remains_owned_until_aclose_cleans_it_up() -> None:
+def test_cancelled_connect_is_closed_once_before_later_aclose() -> None:
     async def exercise() -> None:
         async def cancel_connect_and_close() -> tuple[TdxNodePool[Any], int]:
             connect_started = asyncio.Event()
@@ -543,13 +549,14 @@ def test_cancelled_connect_remains_owned_until_aclose_cleans_it_up() -> None:
                 client_factory=FakeSyncFactory(),
                 async_client_factory=factory,
             )
-            task = asyncio.create_task(pool.execute_sharded([1], lambda _client, item: item))
+            task = asyncio.create_task(pool.execute_sharded([1], _return_async_item))
             await connect_started.wait()
             client = clients[0]
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
+            assert client.close_calls == 1
             await pool.aclose()
             close_calls = client.close_calls
             clients.clear()
@@ -693,6 +700,217 @@ def test_async_per_item_failover_tries_each_node_once_and_chains_last_transport_
         await pool.aclose()
 
     asyncio.run(exercise())
+
+
+def test_cancelled_async_operation_discards_client_before_open_pool_reuse() -> None:
+    async def exercise() -> None:
+        operation_started = asyncio.Event()
+        never_finish_operation = asyncio.Event()
+        close_started = asyncio.Event()
+        close_release = asyncio.Event()
+
+        class BlockingCloseClient(FakeAsyncClient):
+            def __init__(
+                self,
+                address: str,
+                port: int,
+                timeout: float,
+                *,
+                block_close: bool,
+            ) -> None:
+                super().__init__(address, port, timeout)
+                self.block_close = block_close
+
+            async def close(self) -> None:
+                self.close_calls += 1
+                if self.block_close:
+                    close_started.set()
+                    await close_release.wait()
+
+        clients: list[BlockingCloseClient] = []
+
+        def factory(address: str, port: int, timeout: float) -> BlockingCloseClient:
+            client = BlockingCloseClient(
+                address,
+                port,
+                timeout,
+                block_close=not clients,
+            )
+            clients.append(client)
+            return client
+
+        pool = TdxNodePool(
+            load_targets("normal")[:1],
+            timeout_seconds=1.0,
+            client_factory=FakeSyncFactory(),
+            async_client_factory=factory,
+        )
+
+        async def operation(client: BlockingCloseClient, item: int) -> int:
+            if item == 1:
+                operation_started.set()
+                await never_finish_operation.wait()
+            return clients.index(client)
+
+        batch = asyncio.create_task(pool.execute_sharded([1], operation))
+        await operation_started.wait()
+        batch.cancel()
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=0.5)
+            assert not batch.done()
+            close_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await batch
+
+            assert clients[0].close_calls == 1
+            assert node_snapshot(pool, clients[0].address)["consecutive_failures"] == 0
+            assert node_snapshot(pool, clients[0].address)["circuit_open"] is False
+            assert await pool.execute_sharded([2], operation) == [1]
+            assert len(clients) == 2
+        finally:
+            close_release.set()
+            if not batch.done():
+                batch.cancel()
+            await asyncio.gather(batch, return_exceptions=True)
+            await pool.aclose()
+
+        assert [client.close_calls for client in clients] == [1, 1]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
+def test_cancelled_connect_discards_orphan_before_open_pool_reuse(close_fails: bool) -> None:
+    async def exercise() -> None:
+        connect_started = asyncio.Event()
+        never_finish_connect = asyncio.Event()
+
+        class CancelledConnectClient(FakeAsyncClient):
+            def __init__(
+                self,
+                address: str,
+                port: int,
+                timeout: float,
+                *,
+                block_connect: bool,
+            ) -> None:
+                super().__init__(address, port, timeout)
+                self.block_connect = block_connect
+
+            async def connect(self) -> None:
+                self.connect_calls += 1
+                if self.block_connect:
+                    connect_started.set()
+                    await never_finish_connect.wait()
+
+            async def close(self) -> None:
+                self.close_calls += 1
+                if self.block_connect and close_fails and self.close_calls == 1:
+                    raise OSError("close failed")
+
+        clients: list[CancelledConnectClient] = []
+
+        def factory(address: str, port: int, timeout: float) -> CancelledConnectClient:
+            client = CancelledConnectClient(
+                address,
+                port,
+                timeout,
+                block_connect=not clients,
+            )
+            clients.append(client)
+            return client
+
+        pool = TdxNodePool(
+            load_targets("normal")[:1],
+            timeout_seconds=1.0,
+            client_factory=FakeSyncFactory(),
+            async_client_factory=factory,
+        )
+        batch = asyncio.create_task(pool.execute_sharded([1], _return_async_item))
+        await connect_started.wait()
+        batch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await batch
+
+        assert clients[0].close_calls == 1
+        assert node_snapshot(pool, clients[0].address)["consecutive_failures"] == 0
+        assert node_snapshot(pool, clients[0].address)["circuit_open"] is False
+        assert await pool.execute_sharded([2], _return_async_item) == [2]
+        assert len(clients) == 2
+
+        await pool.aclose()
+        assert clients[0].close_calls == (2 if close_fails else 1)
+        assert clients[1].close_calls == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [FileNotFoundError("missing local file"), PermissionError("local file denied")],
+    ids=["file-not-found", "permission-denied"],
+)
+def test_filesystem_errors_do_not_fail_over_or_penalize_node(error: OSError) -> None:
+    targets = load_targets("normal")[:2]
+    attempts: list[str] = []
+    pool = TdxNodePool(
+        targets,
+        timeout_seconds=1.0,
+        failure_threshold=1,
+        client_factory=FakeSyncFactory(),
+        async_client_factory=FakeAsyncFactory(),
+    )
+
+    def operation(client: FakeSyncClient) -> None:
+        attempts.append(client.address)
+        raise error
+
+    try:
+        with pytest.raises(type(error)) as raised:
+            pool.execute(operation)
+        assert raised.value is error
+        assert attempts == [targets[0].address]
+        assert [node["consecutive_failures"] for node in pool.health_snapshot()["nodes"]] == [
+            0,
+            0,
+        ]
+        assert [node["circuit_open"] for node in pool.health_snapshot()["nodes"]] == [
+            False,
+            False,
+        ]
+    finally:
+        pool.close()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        r"C:\Users\Alice Smith\private\nodes.json password=hunter2",
+        r'failed at "C:\Users\Alice Smith\private\nodes.json" password=hunter2',
+        "failed at /Users/Alice Smith/private/nodes.json token=abcd",
+        "failed at '/Users/Alice Smith/private/nodes.json' token=abcd",
+    ],
+    ids=["unquoted-windows", "quoted-windows", "unquoted-unix", "quoted-unix"],
+)
+def test_health_error_redacts_absolute_paths_containing_spaces(message: str) -> None:
+    target = load_targets("normal")[0]
+    pool = TdxNodePool(
+        [target],
+        timeout_seconds=1.0,
+        failure_threshold=1,
+        client_factory=FakeSyncFactory(),
+        async_client_factory=FakeAsyncFactory(),
+    )
+
+    with pytest.raises(TdxNodePoolError):
+        pool.execute(lambda _client: (_ for _ in ()).throw(FakeTransportError(message)))
+
+    last_error = str(node_snapshot(pool, target.address)["last_error"])
+    assert last_error.startswith("FakeTransportError:")
+    assert len(last_error) <= 160
+    for secret in ("Alice", "Smith", "private", "nodes.json", "password", "hunter2", "token", "abcd"):
+        assert secret not in last_error
+    pool.close()
 
 
 @pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1])

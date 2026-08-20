@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 import re
+import socket
 import threading
 import time
 from typing import Any, Generic, NoReturn, TypeVar, cast
@@ -40,8 +41,9 @@ _URL_CREDENTIAL_PATTERN = re.compile(
     r"\b([a-z][a-z0-9+.-]*://)[^/@\s]+@",
     re.IGNORECASE,
 )
-_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/])[^\s,;]+", re.IGNORECASE)
-_UNIX_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s,;]+)")
+_ABSOLUTE_PATH_START_PATTERN = re.compile(
+    r'''(?ix)(?<![\w])["']?[a-z]:[\\/]|(?<![:/\w])["']?/'''
+)
 
 
 class PoolLifecycle(str, Enum):
@@ -87,7 +89,14 @@ class TdxNodePoolError(RuntimeError):
 def default_retryable_exception_classifier(exc: Exception) -> bool:
     return isinstance(
         exc,
-        (TdxConnectionError, OSError, ConnectionError, TimeoutError),
+        (
+            TdxConnectionError,
+            TimeoutError,
+            ConnectionError,
+            socket.gaierror,
+            socket.herror,
+            asyncio.IncompleteReadError,
+        ),
     )
 
 
@@ -496,12 +505,18 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
                 self._ensure_open()
                 if not self._is_eligible(state):
                     continue
+                client: AsyncTdxClientProtocol | None = None
                 try:
                     async with self._semaphore:
                         self._ensure_open()
                         client = await self._async_client_for(state.target)
                         result = await operation(client, item)
                         self._ensure_open()
+                except asyncio.CancelledError:
+                    if client is not None:
+                        self._evict_async_client(state.target, client)
+                        await self._close_async_client_cancellation_safely(client)
+                    raise
                 except Exception as exc:
                     if not self._is_retryable(exc):
                         raise
@@ -531,6 +546,8 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
         try:
             await client.connect()
         except asyncio.CancelledError:
+            self._evict_async_client(target, client)
+            await self._close_async_client_cancellation_safely(client)
             raise
         except Exception:
             await self._try_close_async_client(client)
@@ -540,9 +557,33 @@ class TdxNodePool(_BaseNodePool[SyncClientT], Generic[SyncClientT]):
         return client
 
     async def _discard_async_client(self, target: NodeTarget) -> None:
-        client = self._async_clients.pop(target, None)
+        client = self._evict_async_client(target)
         if client is not None:
             await self._try_close_async_client(client)
+
+    def _evict_async_client(
+        self,
+        target: NodeTarget,
+        expected: AsyncTdxClientProtocol | None = None,
+    ) -> AsyncTdxClientProtocol | None:
+        with self._state_lock:
+            client = self._async_clients.get(target)
+            if expected is not None and client is not expected:
+                return None
+            return self._async_clients.pop(target, None)
+
+    async def _close_async_client_cancellation_safely(
+        self,
+        client: AsyncTdxClientProtocol,
+    ) -> None:
+        close_task = asyncio.create_task(self._try_close_async_client(client))
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                continue
+        if not close_task.cancelled():
+            close_task.exception()
 
     async def _try_close_async_client(
         self, client: AsyncTdxClientProtocol
@@ -628,8 +669,10 @@ def _sanitized_error(exc: Exception) -> str:
         message = "error details unavailable"
     message = _URL_CREDENTIAL_PATTERN.sub(r"\1<redacted>@", message)
     message = _CREDENTIAL_PATTERN.sub("<redacted>", message)
-    message = _WINDOWS_PATH_PATTERN.sub("<path>", message)
-    message = _UNIX_PATH_PATTERN.sub("<path>", message)
+    path_start = _ABSOLUTE_PATH_START_PATTERN.search(message)
+    if path_start is not None:
+        safe_prefix = message[: path_start.start()].rstrip()
+        message = f"{safe_prefix} <path redacted>" if safe_prefix else "<path redacted>"
     message = " ".join(message.split())
     summary = f"{class_name}: {message}" if message else class_name
     if len(summary) <= _MAX_ERROR_LENGTH:
