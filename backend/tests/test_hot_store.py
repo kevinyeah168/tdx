@@ -246,8 +246,10 @@ def test_concurrent_initializers_serialize_legacy_catalog_provenance_migration(
         def __getattr__(self, name: str) -> object:
             return getattr(self.connection, name)
 
-    def connect_with_barrier(self: HotStore, *, readonly: bool = False) -> BarrierConnection:
-        return BarrierConnection(original_connect(self, readonly=readonly))
+    def connect_with_barrier(
+        self: HotStore, *, readonly: bool = False, immutable: bool | None = None
+    ) -> BarrierConnection:
+        return BarrierConnection(original_connect(self, readonly=readonly, immutable=immutable))
 
     monkeypatch.setattr(HotStore, "connect", connect_with_barrier)
     errors: list[BaseException] = []

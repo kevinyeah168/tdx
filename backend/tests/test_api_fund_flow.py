@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import sqlite3
 
 from fastapi.testclient import TestClient
 import pytest
@@ -206,3 +207,177 @@ def test_persisted_partial_batch_is_hidden_after_a_later_complete_minute(tmp_pat
     assert stock.json()["latest_complete_minute"] == sector.json()["latest_complete_minute"] == "09:32"
     assert [point["minute"] for point in stock.json()["points"]] == ["09:32"]
     assert [point["minute"] for point in sector.json()["points"]] == ["09:32"]
+
+
+def test_market_cursor_can_advance_past_an_entitys_last_visible_point(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    class OperationallyCompleteProvider(FakeMarketProvider):
+        def minute_batch(self, trade_date: date, minute: str):  # type: ignore[no-untyped-def]
+            batch = super().minute_batch(trade_date, minute)
+            if minute == "09:32":
+                return batch.model_copy(
+                    update={"stocks": [stock for stock in batch.stocks if stock.symbol != "SH600000"]}
+                )
+            return batch
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = OperationallyCompleteProvider(200, 2, 100)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    collector = MinuteCollector(provider, meta, hot)
+    collector.collect(TRADE_DATE, "09:31")
+    completed = collector.collect(TRADE_DATE, "09:32")
+    response = TestClient(create_app(settings)).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert completed["status"] == "complete"
+    assert response.status_code == 200
+    assert response.json()["latest_complete_minute"] == "09:32"
+    assert [point["minute"] for point in response.json()["points"]] == ["09:31"]
+
+
+def test_mismatched_batch_rows_are_not_exposed_by_complete_status(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = FakeMarketProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
+    raw_stock = provider.minute_batch(TRADE_DATE, "09:31").stocks[0].model_copy(
+        update={"batch_id": "out-of-band"}
+    )
+    hot.write_stocks([raw_stock])
+    with hot._session() as connection:
+        connection.execute(
+            "UPDATE sector_minute SET batch_id='out-of-band' "
+            "WHERE trade_date=? AND minute=? AND sector_id=?",
+            ("2026-08-20", "09:31", "880000"),
+        )
+    client = TestClient(create_app(settings))
+
+    stock = client.get("/api/v1/stocks/SH600000/fund-flow?date=2026-08-20")
+    sector = client.get("/api/v1/sectors/880000/minutes?date=2026-08-20")
+
+    assert stock.status_code == sector.status_code == 404
+
+
+def test_closed_database_read_creates_no_wal_or_shm_artifacts(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = FakeMarketProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
+    with hot._session() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    wal_path = Path(f"{hot.path}-wal")
+    shm_path = Path(f"{hot.path}-shm")
+    assert not wal_path.exists()
+    assert not shm_path.exists()
+
+    response = TestClient(create_app(settings)).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 200
+    assert not wal_path.exists()
+    assert not shm_path.exists()
+
+
+def test_live_wal_data_remains_visible_to_api_reads(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = FakeMarketProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    writer = hot.connect()
+    try:
+        MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
+        assert Path(f"{hot.path}-wal").exists()
+
+        response = TestClient(create_app(settings)).get(
+            "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+        )
+    finally:
+        writer.close()
+
+    assert response.status_code == 200
+    assert response.json()["points"][0]["minute"] == "09:31"
+
+
+@pytest.mark.parametrize("contents", [b"not a sqlite database", None])
+def test_storage_failures_return_generic_service_unavailable(
+    tmp_path: Path, contents: bytes | None
+) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    path = settings.hot_db_for("2026-08-20")
+    path.parent.mkdir()
+    if contents is None:
+        sqlite3.connect(path).close()
+    else:
+        path.write_bytes(contents)
+
+    response = TestClient(create_app(settings)).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "fund-flow storage is unavailable"}
+
+
+def test_invalid_stored_value_returns_generic_service_unavailable(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    provider = FakeMarketProvider(20, 2, 10)
+    meta = MetaStore(settings.meta_db)
+    meta.initialize()
+    CatalogSyncService(provider, meta).sync()
+    hot = HotStore(settings.hot_db_for(TRADE_DATE.isoformat()))
+    hot.initialize()
+    MinuteCollector(provider, meta, hot).collect(TRADE_DATE, "09:31")
+    with hot._session() as connection:
+        connection.execute(
+            "UPDATE stock_minute SET main_delta='invalid' WHERE trade_date=? AND symbol=?",
+            ("2026-08-20", "SH600000"),
+        )
+
+    response = TestClient(create_app(settings)).get(
+        "/api/v1/stocks/SH600000/fund-flow?date=2026-08-20"
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "fund-flow storage is unavailable"}
+
+
+def test_curve_endpoints_publish_strict_response_models(client: TestClient) -> None:
+    document = client.get("/openapi.json").json()
+    stock_schema = document["paths"]["/api/v1/stocks/{symbol}/fund-flow"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]
+    sector_schema = document["paths"]["/api/v1/sectors/{sector_id}/minutes"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]
+
+    assert stock_schema == {"$ref": "#/components/schemas/StockFundFlowPayload"}
+    assert sector_schema == {"$ref": "#/components/schemas/SectorFundFlowPayload"}
+    assert document["components"]["schemas"]["CurveValue"]["additionalProperties"] is False

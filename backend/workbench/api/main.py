@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from workbench.config import WorkbenchSettings
 from workbench.storage.hot_store import HotStore
@@ -12,6 +14,38 @@ from workbench.storage.hot_store import HotStore
 
 DEFAULT_TIERS = ("main", "super", "large")
 ALLOWED_TIERS = frozenset((*DEFAULT_TIERS, "medium", "small"))
+
+
+class CurveValue(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    delta: float
+    cumulative: float
+    source: str
+    quality: str
+
+
+class CurvePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    minute: str
+    values: dict[str, CurveValue]
+
+
+class CurvePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    latest_complete_minute: str
+    fund_tiers: list[str]
+    points: list[CurvePoint]
+
+
+class StockFundFlowPayload(CurvePayload):
+    symbol: str
+
+
+class SectorFundFlowPayload(CurvePayload):
+    sector_id: str
 
 
 def _parse_tiers(tiers: str | None) -> tuple[str, ...]:
@@ -37,13 +71,21 @@ def _hot_store(settings: WorkbenchSettings, trade_date: date) -> HotStore:
 
 
 def _serialize_series(
-    *, entity_key: str, entity_id: str, rows: list[dict[str, Any]], tiers: tuple[str, ...]
-) -> dict[str, Any]:
+    *,
+    entity_key: str,
+    entity_id: str,
+    latest_complete_minute: str | None,
+    rows: list[dict[str, Any]],
+    tiers: tuple[str, ...],
+    payload_model: type[StockFundFlowPayload] | type[SectorFundFlowPayload],
+) -> StockFundFlowPayload | SectorFundFlowPayload:
     if not rows:
         raise HTTPException(status_code=404, detail="fund-flow data not found")
-    return {
+    if latest_complete_minute is None:
+        raise HTTPException(status_code=404, detail="fund-flow data not found")
+    return payload_model.model_validate({
         entity_key: entity_id,
-        "latest_complete_minute": rows[-1]["minute"],
+        "latest_complete_minute": latest_complete_minute,
         "fund_tiers": list(tiers),
         "points": [
             {
@@ -60,7 +102,11 @@ def _serialize_series(
             }
             for row in rows
         ],
-    }
+    })
+
+
+def _unavailable_storage() -> HTTPException:
+    return HTTPException(status_code=503, detail="fund-flow storage is unavailable")
 
 
 def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
@@ -71,30 +117,42 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
     def health() -> dict[str, bool]:
         return {"ok": True}
 
-    @application.get("/api/v1/stocks/{symbol}/fund-flow")
+    @application.get("/api/v1/stocks/{symbol}/fund-flow", response_model=StockFundFlowPayload)
     def stock_fund_flow(
         symbol: str, trade_date: date = Query(alias="date"), tiers: str | None = None
-    ) -> dict[str, Any]:
+    ) -> StockFundFlowPayload:
         selected_tiers = _parse_tiers(tiers)
         normalized_symbol = symbol.upper()
-        rows = _hot_store(active_settings, trade_date).complete_stock_fund_series(
-            trade_date.isoformat(), normalized_symbol
-        )
-        return _serialize_series(
-            entity_key="symbol", entity_id=normalized_symbol, rows=rows, tiers=selected_tiers
-        )
+        try:
+            store = _hot_store(active_settings, trade_date)
+            return _serialize_series(
+                entity_key="symbol",
+                entity_id=normalized_symbol,
+                latest_complete_minute=store.latest_complete_minute(trade_date.isoformat()),
+                rows=store.complete_stock_fund_series(trade_date.isoformat(), normalized_symbol),
+                tiers=selected_tiers,
+                payload_model=StockFundFlowPayload,
+            )
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
+            raise _unavailable_storage() from error
 
-    @application.get("/api/v1/sectors/{sector_id}/minutes")
+    @application.get("/api/v1/sectors/{sector_id}/minutes", response_model=SectorFundFlowPayload)
     def sector_minutes(
         sector_id: str, trade_date: date = Query(alias="date"), tiers: str | None = None
-    ) -> dict[str, Any]:
+    ) -> SectorFundFlowPayload:
         selected_tiers = _parse_tiers(tiers)
-        rows = _hot_store(active_settings, trade_date).complete_sector_fund_series(
-            trade_date.isoformat(), sector_id
-        )
-        return _serialize_series(
-            entity_key="sector_id", entity_id=sector_id, rows=rows, tiers=selected_tiers
-        )
+        try:
+            store = _hot_store(active_settings, trade_date)
+            return _serialize_series(
+                entity_key="sector_id",
+                entity_id=sector_id,
+                latest_complete_minute=store.latest_complete_minute(trade_date.isoformat()),
+                rows=store.complete_sector_fund_series(trade_date.isoformat(), sector_id),
+                tiers=selected_tiers,
+                payload_model=SectorFundFlowPayload,
+            )
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
+            raise _unavailable_storage() from error
 
     return application
 
