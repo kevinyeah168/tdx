@@ -13,7 +13,12 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from workbench.collector.main import collect_once
+from workbench.collector.catalog_sync import CatalogSyncService
+from workbench.collector.minute_collector import MinuteCollector
+from workbench.config import WorkbenchSettings
+from workbench.providers.fake import FakeMarketProvider
+from workbench.storage.hot_store import HotStore
+from workbench.storage.meta_store import MetaStore
 
 
 BUDGET_SECONDS = 45.0
@@ -21,19 +26,24 @@ BUDGET_SECONDS = 45.0
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="workbench-minute-batch-") as temporary_directory:
+        setup_started_at = time.perf_counter()
+        settings = WorkbenchSettings(data_dir=Path(temporary_directory))
+        settings.ensure_directories()
+        provider = FakeMarketProvider(5_500, 400, 80)
+        meta = MetaStore(settings.meta_db)
+        meta.initialize()
+        CatalogSyncService(provider, meta).sync()
+        hot = HotStore(settings.hot_db_for("2026-08-20"))
+        hot.initialize()
+        setup_seconds = time.perf_counter() - setup_started_at
+
         started_at = time.perf_counter()
-        status = collect_once(
-            trade_date=date(2026, 8, 20),
-            minute="09:31",
-            data_dir=Path(temporary_directory),
-            stocks=5_500,
-            sectors=400,
-            members_per_sector=80,
-        )
+        status = MinuteCollector(provider, meta, hot).collect(date(2026, 8, 20), "09:31")
         wall_seconds = time.perf_counter() - started_at
 
     payload = {
         **status,
+        "setup_seconds": setup_seconds,
         "wall_seconds": wall_seconds,
         "budget_seconds": BUDGET_SECONDS,
     }

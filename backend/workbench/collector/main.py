@@ -66,8 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("../data"),
         help="data directory (default: ../data)",
     )
-    parser.add_argument("--stocks", type=positive_integer, default=100)
-    parser.add_argument("--sectors", type=lambda value: nonnegative_integer(value, "sectors"), default=4)
+    parser.add_argument("--stocks", type=positive_integer, default=5_500)
+    parser.add_argument("--sectors", type=lambda value: nonnegative_integer(value, "sectors"), default=400)
     parser.add_argument(
         "--members-per-sector",
         type=lambda value: nonnegative_integer(value, "members-per-sector"),

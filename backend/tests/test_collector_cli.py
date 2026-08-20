@@ -72,6 +72,9 @@ def test_cli_uses_the_documented_default_data_directory() -> None:
     )
 
     assert arguments.data_dir == Path("../data")
+    assert arguments.stocks == 5_500
+    assert arguments.sectors == 400
+    assert arguments.members_per_sector == 80
 
 
 def test_cli_help_documents_the_default_data_directory() -> None:
@@ -102,6 +105,7 @@ def test_capacity_probe_emits_a_successful_json_report() -> None:
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     assert payload["budget_seconds"] == 45.0
+    assert payload["setup_seconds"] >= 0.0
     assert payload["wall_seconds"] <= payload["budget_seconds"]
     assert payload["coverage_pct"] == 100.0
     assert payload["collected_stocks"] == 5_500
