@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from pathlib import Path
 import time
+import threading
 
 import sqlite3
 from copy import deepcopy
@@ -10,6 +11,7 @@ import pytest
 import workbench.storage.hot_store as hot_store_module
 from workbench.domain import CollectionStatus, DataQuality, FundFlow, SectorMinute, StockMinute, TierPoint
 from workbench.storage.hot_store import HotStore
+from workbench.storage.schema import HOT_SCHEMA
 
 
 def stock_record(
@@ -174,26 +176,13 @@ def test_initialize_migrates_legacy_collection_status_catalog_provenance(tmp_pat
     connection = sqlite3.connect(path)
     try:
         connection.executescript(
-            """
-            CREATE TABLE collection_status (
-                trade_date TEXT NOT NULL,
-                minute TEXT NOT NULL,
-                batch_id TEXT NOT NULL,
-                expected_stocks INTEGER NOT NULL,
-                collected_stocks INTEGER NOT NULL,
-                expected_sectors INTEGER NOT NULL,
-                collected_sectors INTEGER NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                coverage_pct REAL NOT NULL,
-                status TEXT NOT NULL,
-                error_summary TEXT NOT NULL,
-                PRIMARY KEY (trade_date, minute)
-            );
-            INSERT INTO collection_status VALUES(
-                '2026-08-20', '09:30', 'legacy-batch', 1, 1, 0, 0, 12, 100.0, 'complete', ''
-            );
-            """
+            HOT_SCHEMA.replace("    catalog_version TEXT NOT NULL,\n", "")
         )
+        connection.execute(
+            "INSERT INTO collection_status VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("2026-08-20", "09:30", "legacy-batch", 1, 1, 0, 0, 12, 100.0, "complete", ""),
+        )
+        connection.commit()
     finally:
         connection.close()
 
@@ -216,6 +205,80 @@ def test_initialize_migrates_legacy_collection_status_catalog_provenance(tmp_pat
 
     assert store.latest_complete_minute("2026-08-20") == "09:31"
     assert len(store.stock_fund_series("2026-08-20", "SH600000")) == 1
+
+
+def test_concurrent_initializers_serialize_legacy_catalog_provenance_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "2026-08-20.sqlite"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            HOT_SCHEMA.replace("    catalog_version TEXT NOT NULL,\n", "")
+        )
+        connection.execute(
+            "INSERT INTO collection_status VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("2026-08-20", "09:30", "legacy-batch", 1, 1, 0, 0, 12, 100.0, "complete", ""),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    barrier = threading.Barrier(2)
+    original_connect = HotStore.connect
+
+    class BarrierConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> "BarrierConnection":
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> bool | None:
+            return self.connection.__exit__(*args)
+
+        def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
+            if sql == "BEGIN IMMEDIATE":
+                barrier.wait(timeout=5)
+            return self.connection.execute(sql, parameters)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.connection, name)
+
+    def connect_with_barrier(self: HotStore, *, readonly: bool = False) -> BarrierConnection:
+        return BarrierConnection(original_connect(self, readonly=readonly))
+
+    monkeypatch.setattr(HotStore, "connect", connect_with_barrier)
+    errors: list[BaseException] = []
+
+    def initialize(store: HotStore) -> None:
+        try:
+            store.initialize()
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=initialize, args=(HotStore(path),)) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    store = HotStore(path)
+    with store._session(readonly=True) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(collection_status)")]
+        legacy_row = connection.execute(
+            "SELECT catalog_version FROM collection_status WHERE minute='09:30'"
+        ).fetchone()
+    assert columns.count("catalog_version") == 1
+    assert legacy_row[0] == "legacy-unknown"
+
+    store.write_complete_batch(
+        [stock_record(10.0)], [sector_record()], batch_status(), started_at=time.perf_counter()
+    )
+    assert store.latest_complete_minute("2026-08-20") == "09:31"
 
 
 def test_complete_batch_duration_includes_stock_write_time(

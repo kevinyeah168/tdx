@@ -186,21 +186,21 @@ class HotStore:
     def initialize(self) -> None:
         with self._session() as connection:
             connection.executescript(HOT_SCHEMA)
-            columns = {
-                str(row[1]) for row in connection.execute("PRAGMA table_info(collection_status)")
-            }
-            if "catalog_version" not in columns:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {
+                    str(row[1]) for row in connection.execute("PRAGMA table_info(collection_status)")
+                }
+                if "catalog_version" not in columns:
                     connection.execute(
                         "ALTER TABLE collection_status "
                         f"ADD COLUMN catalog_version TEXT NOT NULL DEFAULT '{LEGACY_CATALOG_VERSION}'"
                     )
-                except Exception:
-                    connection.rollback()
-                    raise
-                else:
-                    connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def write_stocks(self, records: list[StockMinute]) -> None:
         with self._session() as connection:
