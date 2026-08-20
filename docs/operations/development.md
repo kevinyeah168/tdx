@@ -39,7 +39,7 @@ GET http://127.0.0.1:8765/api/v1/sectors/880000/minutes?date=2026-08-20&tiers=ma
 
 ## 验证、基准与构建
 
-从仓库根目录运行以下命令。后端三项命令在 `backend` 目录中执行：
+从仓库根目录运行以下命令。后端四项命令在 `backend` 目录中执行：
 
 ```powershell
 cd backend
