@@ -1,139 +1,324 @@
 {
-  "security_catalog": {
-    "available": true,
-    "source": "tdx.normal.security-list",
-    "latency_ms": 297.0000000059372,
-    "sample_fields": [
-      "market",
-      "code",
-      "name",
-      "volunit",
-      "decimal_point",
-      "pre_close",
-      "industry_tdx",
-      "industry_sw"
-    ],
-    "error": null
+  "manifest": {
+    "schema_version": "1.0",
+    "probe_version": "3.1.0",
+    "captured_at": "2026-08-21T08:49:45.525993+08:00",
+    "easy_tdx_version": "1.20.7",
+    "sample_symbol": "SH600000",
+    "discovered_board": {
+      "id": "881234",
+      "name": "生物制品"
+    },
+    "source_outcomes": {
+      "security_catalog": [
+        {
+          "source": "tdx.normal.security-list-all",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [],
+          "error": "TdxNodePoolError: all normal TDX nodes are unavailable"
+        }
+      ],
+      "board_list": [
+        {
+          "source": "tdx.enhanced.board-list",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "market",
+            "code",
+            "name",
+            "price",
+            "rise_speed",
+            "pre_close",
+            "symbol_market",
+            "symbol_code",
+            "symbol_name",
+            "symbol_price",
+            "symbol_rise_speed",
+            "symbol_pre_close"
+          ],
+          "error": null
+        }
+      ],
+      "board_members": [
+        {
+          "source": "tdx.enhanced.board-members",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "market",
+            "code",
+            "name",
+            "pre_close",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "vol_ratio",
+            "amount",
+            "total_shares"
+          ],
+          "error": null
+        }
+      ],
+      "official_funds": [
+        {
+          "source": "tdx.enhanced.capital-flow",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "date",
+            "main_in",
+            "main_out",
+            "main_net",
+            "small_in",
+            "small_out",
+            "small_net",
+            "mid_in",
+            "mid_out",
+            "mid_net",
+            "large_in",
+            "large_out"
+          ],
+          "error": null
+        }
+      ],
+      "quotes": [
+        {
+          "source": "tdx.normal.quotes",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [],
+          "error": "CapabilityUnavailable: quote response was empty"
+        },
+        {
+          "source": "tdx.enhanced.quotes",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "market",
+            "code",
+            "name",
+            "pre_close",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "vol_ratio",
+            "amount",
+            "total_shares"
+          ],
+          "error": null
+        }
+      ],
+      "transactions": [
+        {
+          "source": "tdx.normal.transactions",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [],
+          "error": "CapabilityUnavailable: protocol response was empty"
+        }
+      ],
+      "minute_data": [
+        {
+          "source": "tdx.normal.minute-data",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "datetime",
+            "price",
+            "vol"
+          ],
+          "error": null
+        }
+      ],
+      "bars": [
+        {
+          "source": "tdx.normal.bars",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [],
+          "error": "CapabilityUnavailable: bar response was empty"
+        },
+        {
+          "source": "tdx.enhanced.kline",
+          "attempted": true,
+          "status": "succeeded",
+          "evidence": [
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "amount",
+            "float_shares"
+          ],
+          "error": null
+        }
+      ],
+      "order_book": [
+        {
+          "source": "tdx.normal.order-book",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [],
+          "error": "CapabilityUnavailable: order book response was empty"
+        },
+        {
+          "source": "tdx.enhanced.order-book",
+          "attempted": true,
+          "status": "failed",
+          "evidence": [
+            "market",
+            "code",
+            "name",
+            "bid1_price",
+            "ask1_price",
+            "bid1_volume",
+            "ask1_volume",
+            "bid2_price",
+            "ask2_price",
+            "bid2_volume",
+            "ask2_volume"
+          ],
+          "error": "LocalClientCapabilityLimitation: installed easy-tdx bitmap/command cannot construct order-book levels 3-5 (OverflowError); verified levels 1-2 only"
+        }
+      ]
+    }
   },
-  "board_list": {
-    "available": true,
-    "source": "tdx.enhanced.board-list",
-    "latency_ms": 202.99999999406282,
-    "sample_fields": [
-      "market",
-      "code",
-      "name",
-      "price",
-      "rise_speed",
-      "pre_close",
-      "symbol_market",
-      "symbol_code",
-      "symbol_name",
-      "symbol_price",
-      "symbol_rise_speed",
-      "symbol_pre_close"
-    ],
-    "error": null
-  },
-  "board_members": {
-    "available": true,
-    "source": "tdx.enhanced.board-members",
-    "latency_ms": 31.000000002677552,
-    "sample_fields": [
-      "market",
-      "code",
-      "name",
-      "pre_close",
-      "open",
-      "high",
-      "low",
-      "close",
-      "vol",
-      "vol_ratio",
-      "amount",
-      "total_shares"
-    ],
-    "error": null
-  },
-  "official_funds": {
-    "available": true,
-    "source": "tdx.enhanced.capital-flow",
-    "latency_ms": 46.999999998661224,
-    "sample_fields": [
-      "date",
-      "main_in",
-      "main_out",
-      "main_net",
-      "small_in",
-      "small_out",
-      "small_net",
-      "mid_in",
-      "mid_out",
-      "mid_net",
-      "large_in",
-      "large_out"
-    ],
-    "error": null
-  },
-  "quotes": {
-    "available": true,
-    "source": "tdx.enhanced.quotes",
-    "latency_ms": 3266.0000000032596,
-    "sample_fields": [
-      "market",
-      "code",
-      "name",
-      "pre_close",
-      "open",
-      "high",
-      "low",
-      "close",
-      "vol",
-      "vol_ratio",
-      "amount",
-      "total_shares"
-    ],
-    "error": null
-  },
-  "transactions": {
-    "available": false,
-    "source": "tdx.normal.transactions",
-    "latency_ms": 203.00000000133878,
-    "sample_fields": [],
-    "error": "CapabilityUnavailable: protocol response was empty"
-  },
-  "minute_data": {
-    "available": true,
-    "source": "tdx.normal.minute-data",
-    "latency_ms": 61.99999999807915,
-    "sample_fields": [
-      "datetime",
-      "price",
-      "vol"
-    ],
-    "error": null
-  },
-  "bars": {
-    "available": true,
-    "source": "tdx.enhanced.kline",
-    "latency_ms": 78.00000000133878,
-    "sample_fields": [
-      "datetime",
-      "open",
-      "high",
-      "low",
-      "close",
-      "vol",
-      "amount",
-      "float_shares"
-    ],
-    "error": null
-  },
-  "order_book": {
-    "available": false,
-    "source": "tdx.enhanced.order-book",
-    "latency_ms": 31.9999999992433,
-    "sample_fields": [],
-    "error": "LocalClientCapabilityLimitation: installed easy-tdx 128-bit request bitmap cannot encode order-book levels 3-5; verified levels 1-2 only"
+  "capabilities": {
+    "security_catalog": {
+      "available": false,
+      "source": "tdx.normal.security-list-all",
+      "latency_ms": 91906.0,
+      "sample_fields": [],
+      "error": "TdxNodePoolError: all normal TDX nodes are unavailable"
+    },
+    "board_list": {
+      "available": true,
+      "source": "tdx.enhanced.board-list",
+      "latency_ms": 219.0,
+      "sample_fields": [
+        "market",
+        "code",
+        "name",
+        "price",
+        "rise_speed",
+        "pre_close",
+        "symbol_market",
+        "symbol_code",
+        "symbol_name",
+        "symbol_price",
+        "symbol_rise_speed",
+        "symbol_pre_close"
+      ],
+      "error": null
+    },
+    "board_members": {
+      "available": true,
+      "source": "tdx.enhanced.board-members",
+      "latency_ms": 47.0,
+      "sample_fields": [
+        "market",
+        "code",
+        "name",
+        "pre_close",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vol",
+        "vol_ratio",
+        "amount",
+        "total_shares"
+      ],
+      "error": null
+    },
+    "official_funds": {
+      "available": true,
+      "source": "tdx.enhanced.capital-flow",
+      "latency_ms": 31.0,
+      "sample_fields": [
+        "date",
+        "main_in",
+        "main_out",
+        "main_net",
+        "small_in",
+        "small_out",
+        "small_net",
+        "mid_in",
+        "mid_out",
+        "mid_net",
+        "large_in",
+        "large_out"
+      ],
+      "error": null
+    },
+    "quotes": {
+      "available": true,
+      "source": "tdx.enhanced.quotes",
+      "latency_ms": 235.0,
+      "sample_fields": [
+        "market",
+        "code",
+        "name",
+        "pre_close",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vol",
+        "vol_ratio",
+        "amount",
+        "total_shares"
+      ],
+      "error": null
+    },
+    "transactions": {
+      "available": false,
+      "source": "tdx.normal.transactions",
+      "latency_ms": 31.0,
+      "sample_fields": [],
+      "error": "CapabilityUnavailable: protocol response was empty"
+    },
+    "minute_data": {
+      "available": true,
+      "source": "tdx.normal.minute-data",
+      "latency_ms": 47.0,
+      "sample_fields": [
+        "datetime",
+        "price",
+        "vol"
+      ],
+      "error": null
+    },
+    "bars": {
+      "available": true,
+      "source": "tdx.enhanced.kline",
+      "latency_ms": 78.0,
+      "sample_fields": [
+        "datetime",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vol",
+        "amount",
+        "float_shares"
+      ],
+      "error": null
+    },
+    "order_book": {
+      "available": false,
+      "source": "tdx.normal.order-book+tdx.enhanced.order-book",
+      "latency_ms": 78.0,
+      "sample_fields": [],
+      "error": "CapabilityUnavailable: all attempted sources failed"
+    }
   }
 }

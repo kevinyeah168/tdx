@@ -1,21 +1,51 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from importlib.metadata import version
 import math
-import re
 import time
-from typing import Any, Protocol, TypeVar, cast
+from typing import Generic, Protocol, TypeVar
 
 from easy_tdx import BoardType, KlineCategory, Market, Period
-from easy_tdx.codec.bitmap import FieldBit, PresetField
+from easy_tdx.codec.bitmap import FieldBit, PresetField, build_bitmap
+from easy_tdx.mac.commands.symbol_quotes import SymbolQuotesCmd
 
 from workbench.domain import CapabilityResult, ProviderCapabilities
+from workbench.providers.tdx.clients import EnhancedProbeClient, NormalProbeClient
+from workbench.providers.tdx.probe_models import (
+    CAPABILITY_NAMES,
+    PROBE_SCHEMA_VERSION,
+    PROBE_VERSION,
+    SAMPLE_SYMBOL,
+    CapabilityName,
+    CapabilitySourceOutcomes,
+    DiscoveredBoard,
+    ProbeManifest,
+    SourceOutcome,
+    TdxCapabilityReport,
+)
+from workbench.providers.tdx.probe_validation import (
+    CapabilityUnavailable,
+    ENHANCED_ORDER_BOOK_ALIASES,
+    LocalClientCapabilityLimitation,
+    NORMAL_ORDER_BOOK_ALIASES,
+    ProbeDeadlineExceeded,
+    ValidationEvidence,
+    normalize_protocol_aliases,
+    response_rows,
+    sanitized_error,
+    validate_bars,
+    validate_minute_data,
+    validate_official_funds,
+    validate_order_book,
+    validate_protocol_fields,
+    validate_quotes,
+    validate_security_catalog,
+)
 
 
-MAX_SAMPLE_ROWS = 2
-MAX_SAMPLE_FIELDS = 12
-_MAX_ERROR_LENGTH = 200
 _STOCK_CODE = "600000"
 _NORMAL_MARKET = Market.SH
 _ENHANCED_MARKET = int(Market.SH)
@@ -23,536 +53,522 @@ _SAMPLE_COUNT = 3
 _BOARD_SAMPLE_COUNT = 8
 
 ENHANCED_QUOTE_FIELDS = PresetField.COMMON
-ENHANCED_ORDER_BOOK_FIELDS = (
-    PresetField.BASIC
-    + PresetField.QUOTE
-    + FieldBit.BID2_PRICE
-    + FieldBit.ASK2_PRICE
-    + FieldBit.BID2_VOLUME
-    + FieldBit.ASK2_VOLUME
-)
 
-_CREDENTIAL_KEY_PATTERN = re.compile(
-    r"(?:^|[_.-])(?:user(?:name)?|password|passwd|token|secret|api[-_]?key|credentials?|host(?:name)?)(?:$|[_.-])",
-    re.IGNORECASE,
-)
-_CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"\b(?:user(?:name)?|password|passwd|token|secret|api[-_]?key|credentials?|host(?:name)?)\b"
-    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-    re.IGNORECASE,
-)
-_URL_CREDENTIAL_PATTERN = re.compile(
-    r"\b([a-z][a-z0-9+.-]*://)[^/@\s]+@",
-    re.IGNORECASE,
-)
-_IPV4_PATTERN = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
-_IPV6_PATTERN = re.compile(
-    r"\[(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\]",
-    re.IGNORECASE,
-)
-_HOST_PORT_PATTERN = re.compile(
-    r"\b(?:(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5})?|[a-z][a-z0-9-]*:\d{1,5})\b",
-    re.IGNORECASE,
-)
-_ABSOLUTE_PATH_PATTERN = re.compile(
-    r'''(?ix)(?<!\w)["']?\\\\|(?<![\w])["']?[a-z]:[\\/]|(?<![:/\w])["']?/'''
-)
-_STACK_MARKER_PATTERN = re.compile(
-    r"(?im)(?:^|\n)\s*(?:traceback\b|file\s+[\"']|at\s+\S+\s*\()"
-)
-
-_CAPITAL_FLOW_FIELDS = {
-    "date",
-    "main_in",
-    "main_out",
-    "main_net",
-    "small_in",
-    "small_out",
-    "small_net",
-    "mid_in",
-    "mid_out",
-    "mid_net",
-    "large_in",
-    "large_out",
-    "large_net",
-}
-_ORDER_BOOK_LEVEL_1_2_RESPONSE_FIELDS = {
-    field.field_name
-    for field in (
-        FieldBit.BID_PRICE,
-        FieldBit.ASK_PRICE,
-        FieldBit.BID_VOLUME,
-        FieldBit.ASK_VOLUME,
-        FieldBit.BID2_PRICE,
-        FieldBit.ASK2_PRICE,
-        FieldBit.BID2_VOLUME,
-        FieldBit.ASK2_VOLUME,
-    )
-}
-
+ClientT = TypeVar("ClientT", covariant=True)
 ResultT = TypeVar("ResultT")
 Clock = Callable[[], float]
+Validator = Callable[[object], ValidationEvidence]
 
 
-class ProbeNodePool(Protocol):
-    def execute(self, operation: Callable[[Any], ResultT]) -> ResultT: ...
-
-
-class CapabilityUnavailable(RuntimeError):
-    pass
-
-
-class LocalClientCapabilityLimitation(CapabilityUnavailable):
-    pass
+class ProbeNodePool(Protocol, Generic[ClientT]):
+    def execute(self, operation: Callable[[ClientT], ResultT]) -> ResultT: ...
 
 
 @dataclass(frozen=True, slots=True)
-class _Evidence:
-    source: str
-    sample_fields: list[str]
+class EnhancedHandicapPlan:
+    fields: tuple[FieldBit, ...]
+    levels: int
+    aliases: dict[str, str]
+    limitation: str | None
+
+
+@dataclass(slots=True)
+class _ProbeContext:
+    normal_pool: ProbeNodePool[NormalProbeClient]
+    enhanced_pool: ProbeNodePool[EnhancedProbeClient]
+    clock: Clock
+    overall_deadline_at: float
+    capability_deadline_at: float = math.inf
+    discovered_board: DiscoveredBoard | None = None
+
+    def deadline_exhausted(self) -> bool:
+        now = self.clock()
+        return now >= self.overall_deadline_at or now >= self.capability_deadline_at
+
+    def attempt(
+        self,
+        source: str,
+        operation: Callable[[], object],
+        validator: Validator,
+    ) -> SourceOutcome:
+        if self.deadline_exhausted():
+            return _failed_outcome(
+                source,
+                ProbeDeadlineExceeded("capability deadline exhausted before source attempt"),
+            )
+        try:
+            response = operation()
+            evidence = validator(response)
+        except Exception as exc:
+            return _failed_outcome(source, exc)
+        return SourceOutcome(
+            source=source,
+            attempted=True,
+            status="succeeded",
+            evidence=evidence.sample_fields,
+            error=None,
+        )
+
+
+CapabilityCheck = Callable[[_ProbeContext], list[SourceOutcome]]
 
 
 def probe_tdx_capabilities(
-    normal_pool: ProbeNodePool,
-    enhanced_pool: ProbeNodePool,
+    normal_pool: ProbeNodePool[NormalProbeClient],
+    enhanced_pool: ProbeNodePool[EnhancedProbeClient],
     *,
     clock: Clock = time.monotonic,
-) -> ProviderCapabilities:
-    """Probe each TDX protocol capability independently.
+    captured_at: datetime | None = None,
+    easy_tdx_version: str | None = None,
+    overall_deadline_seconds: float = 120.0,
+    capability_deadline_seconds: float = 20.0,
+) -> TdxCapabilityReport:
+    """Probe TDX capabilities independently and retain every source outcome."""
 
-    Injected pools own their client lifecycle. The probe records protocol field names only;
-    it never records node identities or complete response rows.
-    """
+    _validate_deadline("overall_deadline_seconds", overall_deadline_seconds)
+    _validate_deadline("capability_deadline_seconds", capability_deadline_seconds)
+    overall_started = clock()
+    context = _ProbeContext(
+        normal_pool=normal_pool,
+        enhanced_pool=enhanced_pool,
+        clock=clock,
+        overall_deadline_at=overall_started + overall_deadline_seconds,
+    )
+    results: dict[str, CapabilityResult] = {}
+    source_outcomes: dict[str, list[SourceOutcome]] = {}
 
-    discovered_board: tuple[str, str] | None = None
-    def security_catalog() -> _Evidence:
-        def fetch(client: Any) -> object:
-            count = client.get_security_count(_NORMAL_MARKET)
-            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-                raise CapabilityUnavailable("security count response was empty")
-            return client.get_security_list(_NORMAL_MARKET, 0)
+    for capability, check in CAPABILITY_REGISTRY:
+        if clock() >= context.overall_deadline_at:
+            result, outcomes = _controlled_deadline_result()
+        else:
+            started = clock()
+            context.capability_deadline_at = min(
+                context.overall_deadline_at,
+                started + capability_deadline_seconds,
+            )
+            outcomes = check(context)
+            finished = clock()
+            result = _aggregate_result(outcomes, started=started, finished=finished)
+        results[capability] = result
+        source_outcomes[capability] = outcomes
 
-        response = normal_pool.execute(fetch)
-        return _response_evidence(
-            "tdx.normal.security-list",
-            response,
-            required={"code", "name"},
+    manifest = ProbeManifest(
+        schema_version=PROBE_SCHEMA_VERSION,
+        probe_version=PROBE_VERSION,
+        captured_at=captured_at or datetime.now().astimezone(),
+        easy_tdx_version=easy_tdx_version or version("easy-tdx"),
+        sample_symbol=SAMPLE_SYMBOL,
+        discovered_board=context.discovered_board,
+        source_outcomes=CapabilitySourceOutcomes.model_validate(source_outcomes),
+    )
+    return TdxCapabilityReport(
+        manifest=manifest,
+        capabilities=ProviderCapabilities.model_validate(results),
+    )
+
+
+def enhanced_handicap_plan() -> EnhancedHandicapPlan:
+    """Detect installed full-handicap request support through real construction."""
+
+    partial_names = (
+        "BID_PRICE",
+        "ASK_PRICE",
+        "BID_VOLUME",
+        "ASK_VOLUME",
+        "BID2_PRICE",
+        "ASK2_PRICE",
+        "BID2_VOLUME",
+        "ASK2_VOLUME",
+    )
+    full_names = partial_names + (
+        "BID3_PRICE",
+        "ASK3_PRICE",
+        "BID3_VOLUME",
+        "ASK3_VOLUME",
+        "BID4_PRICE",
+        "ASK4_PRICE",
+        "BID4_VOLUME",
+        "ASK4_VOLUME",
+        "BID5_PRICE",
+        "ASK5_PRICE",
+        "BID5_VOLUME",
+        "ASK5_VOLUME",
+    )
+    members = FieldBit.__members__
+    partial = tuple(members[name] for name in partial_names if name in members)
+    full = tuple(members[name] for name in full_names if name in members)
+    missing_full = [name for name in full_names if name not in members]
+
+    if not missing_full:
+        try:
+            build_bitmap(full)
+            SymbolQuotesCmd([(_ENHANCED_MARKET, _STOCK_CODE)], full).build_request()
+        except Exception as exc:
+            limitation = (
+                "installed easy-tdx bitmap/command cannot construct order-book "
+                f"levels 3-5 ({type(exc).__name__})"
+            )
+        else:
+            return EnhancedHandicapPlan(
+                fields=full,
+                levels=5,
+                aliases=dict(ENHANCED_ORDER_BOOK_ALIASES),
+                limitation=None,
+            )
+    else:
+        limitation = (
+            "installed easy-tdx is missing full order-book fields: "
+            + ", ".join(missing_full)
         )
 
-    def board_list() -> _Evidence:
-        nonlocal discovered_board
-        response = enhanced_pool.execute(
+    build_bitmap(partial)
+    SymbolQuotesCmd([(_ENHANCED_MARKET, _STOCK_CODE)], partial).build_request()
+    return EnhancedHandicapPlan(
+        fields=partial,
+        levels=2,
+        aliases=dict(ENHANCED_ORDER_BOOK_ALIASES),
+        limitation=limitation,
+    )
+
+
+def _probe_security_catalog(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
+            "tdx.normal.security-list-all",
+            lambda: context.normal_pool.execute(
+                lambda client: client.get_security_list_all()
+            ),
+            validate_security_catalog,
+        )
+    ]
+
+
+def _probe_board_list(context: _ProbeContext) -> list[SourceOutcome]:
+    response_holder: list[object] = []
+
+    def fetch() -> object:
+        response = context.enhanced_pool.execute(
             lambda client: client.get_board_list(
                 board_type=BoardType.HY,
                 count=_BOARD_SAMPLE_COUNT,
             )
         )
-        evidence = _response_evidence(
-            "tdx.enhanced.board-list",
+        response_holder.append(response)
+        return response
+
+    outcome = context.attempt(
+        "tdx.enhanced.board-list",
+        fetch,
+        lambda response: validate_protocol_fields(
             response,
             required={"code", "name"},
-        )
-        first_row = _first_row(response)
-        board_id = _safe_identifier(first_row.get("code"))
-        board_name = _safe_identifier(first_row.get("name"))
-        if board_id is None or board_name is None:
-            raise CapabilityUnavailable("industry board identity could not be verified")
-        discovered_board = (board_id, board_name)
-        return evidence
+        ),
+    )
+    if outcome.status == "succeeded":
+        rows = response_rows(response_holder[0], limit=1)
+        if rows:
+            board_id = str(rows[0].get("code", "")).strip()
+            board_name = str(rows[0].get("name", "")).strip()
+            if board_id and board_name:
+                context.discovered_board = DiscoveredBoard(
+                    id=board_id,
+                    name=board_name,
+                )
+            else:
+                outcome = _failed_outcome(
+                    "tdx.enhanced.board-list",
+                    CapabilityUnavailable("industry board identity could not be verified"),
+                )
+    return [outcome]
 
-    def board_members() -> _Evidence:
-        if discovered_board is None:
-            raise CapabilityUnavailable("industry board discovery unavailable")
-        board_id, _board_name = discovered_board
-        response = enhanced_pool.execute(
-            lambda client: client.get_board_members(board_id, count=_SAMPLE_COUNT)
-        )
-        return _response_evidence(
+
+def _probe_board_members(context: _ProbeContext) -> list[SourceOutcome]:
+    if context.discovered_board is None:
+        return [
+            _failed_outcome(
+                "tdx.enhanced.board-members",
+                CapabilityUnavailable("industry board discovery unavailable"),
+            )
+        ]
+    board_id = context.discovered_board.id
+    return [
+        context.attempt(
             "tdx.enhanced.board-members",
-            response,
-            required={"code", "name"},
+            lambda: context.enhanced_pool.execute(
+                lambda client: client.get_board_members(
+                    board_id,
+                    count=_SAMPLE_COUNT,
+                )
+            ),
+            lambda response: validate_protocol_fields(
+                response,
+                required={"code", "name"},
+            ),
         )
+    ]
 
-    def official_funds() -> _Evidence:
-        response = enhanced_pool.execute(
-            lambda client: client.get_capital_flow(_ENHANCED_MARKET, _STOCK_CODE)
-        )
-        return _response_evidence(
+
+def _probe_official_funds(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
             "tdx.enhanced.capital-flow",
-            response,
-            required=_CAPITAL_FLOW_FIELDS,
+            lambda: context.enhanced_pool.execute(
+                lambda client: client.get_capital_flow(
+                    _ENHANCED_MARKET,
+                    _STOCK_CODE,
+                )
+            ),
+            lambda response: validate_official_funds(
+                response,
+                expected_market=_ENHANCED_MARKET,
+                expected_code=_STOCK_CODE,
+            ),
         )
+    ]
 
-    def normal_quotes() -> _Evidence:
-        response = normal_pool.execute(
+
+def _probe_quotes(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
+            "tdx.normal.quotes",
+            lambda: context.normal_pool.execute(
+                lambda client: client.get_security_quotes(
+                    [(_NORMAL_MARKET, _STOCK_CODE)]
+                )
+            ),
+            lambda response: validate_quotes(
+                response,
+                expected_market=_ENHANCED_MARKET,
+                expected_code=_STOCK_CODE,
+            ),
+        ),
+        context.attempt(
+            "tdx.enhanced.quotes",
+            lambda: context.enhanced_pool.execute(
+                lambda client: client.get_stock_quotes(
+                    [(_ENHANCED_MARKET, _STOCK_CODE)],
+                    fields=ENHANCED_QUOTE_FIELDS,
+                )
+            ),
+            lambda response: validate_quotes(
+                response,
+                expected_market=_ENHANCED_MARKET,
+                expected_code=_STOCK_CODE,
+            ),
+        ),
+    ]
+
+
+def _probe_transactions(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
+            "tdx.normal.transactions",
+            lambda: context.normal_pool.execute(
+                lambda client: client.get_transaction_data(
+                    _NORMAL_MARKET,
+                    _STOCK_CODE,
+                    0,
+                    _SAMPLE_COUNT,
+                )
+            ),
+            lambda response: validate_protocol_fields(
+                response,
+                required={"time", "price", "vol"},
+            ),
+        )
+    ]
+
+
+def _probe_minute_data(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
+            "tdx.normal.minute-data",
+            lambda: context.normal_pool.execute(
+                lambda client: client.get_minute_time_data(
+                    _NORMAL_MARKET,
+                    _STOCK_CODE,
+                )
+            ),
+            validate_minute_data,
+        )
+    ]
+
+
+def _probe_bars(context: _ProbeContext) -> list[SourceOutcome]:
+    return [
+        context.attempt(
+            "tdx.normal.bars",
+            lambda: context.normal_pool.execute(
+                lambda client: client.get_security_bars(
+                    _NORMAL_MARKET,
+                    _STOCK_CODE,
+                    KlineCategory.DAY,
+                    0,
+                    _SAMPLE_COUNT,
+                )
+            ),
+            lambda response: validate_bars(
+                response,
+                expected_market=_ENHANCED_MARKET,
+                expected_code=_STOCK_CODE,
+            ),
+        ),
+        context.attempt(
+            "tdx.enhanced.kline",
+            lambda: context.enhanced_pool.execute(
+                lambda client: client.get_stock_kline(
+                    _ENHANCED_MARKET,
+                    _STOCK_CODE,
+                    Period.DAILY,
+                    0,
+                    _SAMPLE_COUNT,
+                )
+            ),
+            lambda response: validate_bars(
+                response,
+                expected_market=_ENHANCED_MARKET,
+                expected_code=_STOCK_CODE,
+            ),
+        ),
+    ]
+
+
+def _probe_order_book(context: _ProbeContext) -> list[SourceOutcome]:
+    normal = context.attempt(
+        "tdx.normal.order-book",
+        lambda: context.normal_pool.execute(
             lambda client: client.get_security_quotes(
                 [(_NORMAL_MARKET, _STOCK_CODE)]
             )
-        )
-        return _response_evidence(
-            "tdx.normal.quotes",
-            response,
-            required={"code"},
-            required_any=({"price", "close"},),
-        )
+        ),
+        lambda response: validate_order_book(
+            normalize_protocol_aliases(response, NORMAL_ORDER_BOOK_ALIASES),
+            expected_market=_ENHANCED_MARKET,
+            expected_code=_STOCK_CODE,
+            levels=5,
+        ),
+    )
 
-    def enhanced_quotes() -> _Evidence:
-        response = enhanced_pool.execute(
+    plan = enhanced_handicap_plan()
+    enhanced = context.attempt(
+        "tdx.enhanced.order-book",
+        lambda: context.enhanced_pool.execute(
             lambda client: client.get_stock_quotes(
                 [(_ENHANCED_MARKET, _STOCK_CODE)],
-                fields=ENHANCED_QUOTE_FIELDS,
+                fields=plan.fields,
             )
-        )
-        return _response_evidence(
-            "tdx.enhanced.quotes",
-            response,
-            required={"code"},
-            required_any=({"price", "close"},),
-        )
-
-    def transactions() -> _Evidence:
-        response = normal_pool.execute(
-            lambda client: client.get_transaction_data(
-                _NORMAL_MARKET,
-                _STOCK_CODE,
-                0,
-                _SAMPLE_COUNT,
-            )
-        )
-        return _response_evidence(
-            "tdx.normal.transactions",
-            response,
-            required={"time", "price", "vol"},
-        )
-
-    def minute_data() -> _Evidence:
-        response = normal_pool.execute(
-            lambda client: client.get_minute_time_data(_NORMAL_MARKET, _STOCK_CODE)
-        )
-        return _response_evidence(
-            "tdx.normal.minute-data",
-            response,
-            required={"vol"},
-            required_any=({"price", "close"},),
-        )
-
-    def normal_bars() -> _Evidence:
-        response = normal_pool.execute(
-            lambda client: client.get_security_bars(
-                _NORMAL_MARKET,
-                _STOCK_CODE,
-                KlineCategory.DAY,
-                0,
-                _SAMPLE_COUNT,
-            )
-        )
-        return _response_evidence(
-            "tdx.normal.bars",
-            response,
-            required={"open", "high", "low", "close"},
-        )
-
-    def enhanced_bars() -> _Evidence:
-        response = enhanced_pool.execute(
-            lambda client: client.get_stock_kline(
-                _ENHANCED_MARKET,
-                _STOCK_CODE,
-                Period.DAILY,
-                0,
-                _SAMPLE_COUNT,
-            )
-        )
-        return _response_evidence(
-            "tdx.enhanced.kline",
-            response,
-            required={"open", "high", "low", "close"},
-        )
-
-    def order_book() -> _Evidence:
-        response = enhanced_pool.execute(
-            lambda client: client.get_stock_quotes(
-                [(_ENHANCED_MARKET, _STOCK_CODE)],
-                fields=ENHANCED_ORDER_BOOK_FIELDS,
-            )
-        )
-        _response_evidence(
-            "tdx.enhanced.order-book",
-            response,
-            required={"code", *_ORDER_BOOK_LEVEL_1_2_RESPONSE_FIELDS},
-        )
-        raise LocalClientCapabilityLimitation(
-            "installed easy-tdx 128-bit request bitmap cannot encode order-book "
-            "levels 3-5; verified levels 1-2 only"
-        )
-
-    results: dict[str, CapabilityResult] = {}
-    results["security_catalog"] = _run_capability(
-        "tdx.normal.security-list", security_catalog, clock
+        ),
+        lambda response: validate_order_book(
+            normalize_protocol_aliases(response, plan.aliases),
+            expected_market=_ENHANCED_MARKET,
+            expected_code=_STOCK_CODE,
+            levels=plan.levels,
+        ),
     )
-    results["board_list"] = _run_capability(
-        "tdx.enhanced.board-list", board_list, clock
-    )
-    results["board_members"] = _run_capability(
-        "tdx.enhanced.board-members", board_members, clock
-    )
-    results["official_funds"] = _run_capability(
-        "tdx.enhanced.capital-flow", official_funds, clock
-    )
-    results["quotes"] = _run_capability(
-        "tdx.normal.quotes+tdx.enhanced.quotes",
-        lambda: _combine_evidence(normal_quotes, enhanced_quotes),
-        clock,
-    )
-    results["transactions"] = _run_capability(
-        "tdx.normal.transactions", transactions, clock
-    )
-    results["minute_data"] = _run_capability(
-        "tdx.normal.minute-data", minute_data, clock
-    )
-    results["bars"] = _run_capability(
-        "tdx.normal.bars+tdx.enhanced.kline",
-        lambda: _combine_evidence(normal_bars, enhanced_bars),
-        clock,
-    )
-    results["order_book"] = _run_capability(
-        "tdx.enhanced.order-book", order_book, clock
-    )
-    return ProviderCapabilities.model_validate(results)
+    if enhanced.status == "succeeded" and plan.limitation is not None:
+        enhanced = SourceOutcome(
+            source=enhanced.source,
+            attempted=True,
+            status="failed",
+            evidence=enhanced.evidence,
+            error=sanitized_error(
+                LocalClientCapabilityLimitation(
+                    f"{plan.limitation}; verified levels 1-2 only"
+                )
+            ),
+        )
+    return [normal, enhanced]
 
 
-def sanitized_error(exc: BaseException) -> str:
-    """Return a bounded single-line exception summary safe for committed reports."""
-
-    class_name = type(exc).__name__ if type(exc).__name__.isidentifier() else "ProviderError"
-    try:
-        message = str(exc)
-    except Exception:
-        message = "error details unavailable"
-
-    stack_marker = _STACK_MARKER_PATTERN.search(message)
-    if stack_marker is not None:
-        message = message[: stack_marker.start()]
-    message = _URL_CREDENTIAL_PATTERN.sub(r"\1<redacted>@", message)
-    message = _CREDENTIAL_VALUE_PATTERN.sub("<redacted>", message)
-    message = _IPV4_PATTERN.sub("<host redacted>", message)
-    message = _IPV6_PATTERN.sub("<host redacted>", message)
-    message = _HOST_PORT_PATTERN.sub("<host redacted>", message)
-    path_marker = _ABSOLUTE_PATH_PATTERN.search(message)
-    if path_marker is not None:
-        prefix = message[: path_marker.start()].rstrip(" :,-\t\r\n")
-        message = f"{prefix} <path redacted>" if prefix else "<path redacted>"
-    message = " ".join(message.split())
-    summary = f"{class_name}: {message}" if message else class_name
-    if len(summary) > _MAX_ERROR_LENGTH:
-        summary = f"{summary[: _MAX_ERROR_LENGTH - 3]}..."
-    return summary
+CAPABILITY_REGISTRY: tuple[tuple[CapabilityName, CapabilityCheck], ...] = (
+    ("security_catalog", _probe_security_catalog),
+    ("board_list", _probe_board_list),
+    ("board_members", _probe_board_members),
+    ("official_funds", _probe_official_funds),
+    ("quotes", _probe_quotes),
+    ("transactions", _probe_transactions),
+    ("minute_data", _probe_minute_data),
+    ("bars", _probe_bars),
+    ("order_book", _probe_order_book),
+)
 
 
-def _run_capability(
-    attempted_source: str,
-    check: Callable[[], _Evidence],
-    clock: Clock,
+def _aggregate_result(
+    outcomes: list[SourceOutcome],
+    *,
+    started: float,
+    finished: float,
 ) -> CapabilityResult:
-    started = clock()
-    try:
-        evidence = check()
-    except Exception as exc:
-        available = False
-        source = attempted_source
-        sample_fields: list[str] = []
-        error = sanitized_error(exc)
-    else:
-        available = True
-        source = evidence.source
-        sample_fields = evidence.sample_fields
-        error = None
-    finished = clock()
+    successful = [outcome for outcome in outcomes if outcome.status == "succeeded"]
+    labels = [outcome.source for outcome in (successful or outcomes)]
+    source = "+".join(dict.fromkeys(labels))
+    fields: list[str] = []
+    for outcome in successful:
+        for field in outcome.evidence:
+            if field not in fields and len(fields) < 12:
+                fields.append(field)
     latency_ms = (finished - started) * 1000.0
     if not math.isfinite(latency_ms) or latency_ms < 0:
         latency_ms = 0.0
+    latency_ms = round(latency_ms, 3)
+
+    if successful:
+        return CapabilityResult(
+            available=True,
+            source=source,
+            latency_ms=latency_ms,
+            sample_fields=fields,
+            error=None,
+        )
+    errors = [outcome.error for outcome in outcomes if outcome.error is not None]
+    error = (
+        errors[0]
+        if len(errors) == 1
+        else sanitized_error(CapabilityUnavailable("all attempted sources failed"))
+    )
     return CapabilityResult(
-        available=available,
+        available=False,
         source=source,
         latency_ms=latency_ms,
-        sample_fields=sample_fields,
+        sample_fields=[],
         error=error,
     )
 
 
-def _combine_evidence(*checks: Callable[[], _Evidence]) -> _Evidence:
-    successes: list[_Evidence] = []
-    errors: list[str] = []
-    for check in checks:
-        try:
-            successes.append(check())
-        except Exception as exc:
-            errors.append(sanitized_error(exc))
-    if not successes:
-        detail = "; ".join(errors) or "no protocol source returned evidence"
-        raise CapabilityUnavailable(detail)
+def _controlled_deadline_result() -> tuple[CapabilityResult, list[SourceOutcome]]:
+    error = sanitized_error(
+        ProbeDeadlineExceeded("overall probe deadline exhausted")
+    )
+    outcome = SourceOutcome(
+        source="probe.deadline",
+        attempted=True,
+        status="failed",
+        evidence=[],
+        error=error,
+    )
+    result = CapabilityResult(
+        available=False,
+        source="probe.deadline",
+        latency_ms=0.0,
+        sample_fields=[],
+        error=error,
+    )
+    return result, [outcome]
 
-    fields: list[str] = []
-    for evidence in successes:
-        for field in evidence.sample_fields:
-            if field not in fields and len(fields) < MAX_SAMPLE_FIELDS:
-                fields.append(field)
-    return _Evidence(
-        source="+".join(evidence.source for evidence in successes),
-        sample_fields=fields,
+
+def _failed_outcome(source: str, exc: BaseException) -> SourceOutcome:
+    return SourceOutcome(
+        source=source,
+        attempted=True,
+        status="failed",
+        evidence=[],
+        error=sanitized_error(exc),
     )
 
 
-def _response_evidence(
-    source: str,
-    response: object,
-    *,
-    required: set[str],
-    required_any: tuple[set[str], ...] = (),
-) -> _Evidence:
-    if _response_is_empty(response):
-        raise CapabilityUnavailable("protocol response was empty")
-
-    protocol_fields = set(_top_level_fields(response))
-    missing = sorted(required - protocol_fields)
-    if missing:
-        raise CapabilityUnavailable(
-            f"response missing required protocol fields: {', '.join(missing)}"
-        )
-    for alternatives in required_any:
-        if protocol_fields.isdisjoint(alternatives):
-            raise CapabilityUnavailable(
-                "response missing required protocol fields: "
-                + " or ".join(sorted(alternatives))
-            )
-
-    sample_fields = _bounded_sample_fields(response)
-    if not sample_fields:
-        raise CapabilityUnavailable("response had no safe protocol fields")
-    return _Evidence(source=source, sample_fields=sample_fields)
+def _validate_deadline(name: str, value: float) -> None:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
 
 
-def _response_is_empty(response: object) -> bool:
-    if response is None:
-        return True
-    empty = getattr(response, "empty", None)
-    if isinstance(empty, bool):
-        return empty
-    if isinstance(response, Mapping | Sequence) and not isinstance(
-        response, str | bytes | bytearray
-    ):
-        return len(response) == 0
-    return False
-
-
-def _first_row(response: object) -> dict[str, object]:
-    rows = _sample_rows(response)
-    if not rows:
-        return {}
-    row = rows[0]
-    if isinstance(row, Mapping):
-        return {str(key): value for key, value in row.items()}
-    if is_dataclass(row) and not isinstance(row, type):
-        return cast(dict[str, object], asdict(row))
-    values = getattr(row, "__dict__", None)
-    if isinstance(values, dict):
-        return {str(key): value for key, value in values.items()}
-    return {}
-
-
-def _top_level_fields(response: object) -> list[str]:
-    columns = getattr(response, "columns", None)
-    if columns is not None:
-        return [str(column) for column in list(columns)]
-    row = _first_row(response)
-    return list(row)
-
-
-def _sample_rows(response: object) -> list[object]:
-    head = getattr(response, "head", None)
-    to_dict = getattr(response, "to_dict", None)
-    if callable(head) and callable(to_dict):
-        records = head(MAX_SAMPLE_ROWS).to_dict(orient="records")
-        return list(records)[:MAX_SAMPLE_ROWS]
-    if isinstance(response, Mapping):
-        return [response]
-    if isinstance(response, Sequence) and not isinstance(
-        response, str | bytes | bytearray
-    ):
-        return list(response[:MAX_SAMPLE_ROWS])
-    return [response]
-
-
-def _bounded_sample_fields(response: object) -> list[str]:
-    fields: list[str] = []
-
-    def add_rows(value: object, prefix: str = "", depth: int = 0) -> None:
-        if len(fields) >= MAX_SAMPLE_FIELDS or depth > 3:
-            return
-        if is_dataclass(value) and not isinstance(value, type):
-            value = asdict(value)
-        if isinstance(value, Mapping):
-            for key, nested_value in value.items():
-                safe_key = _safe_field_name(key)
-                if safe_key is None:
-                    continue
-                field = f"{prefix}.{safe_key}" if prefix else safe_key
-                if field not in fields:
-                    fields.append(field)
-                    if len(fields) >= MAX_SAMPLE_FIELDS:
-                        return
-                if isinstance(nested_value, Mapping | Sequence) and not isinstance(
-                    nested_value, str | bytes | bytearray
-                ):
-                    add_rows(nested_value, field, depth + 1)
-        elif isinstance(value, Sequence) and not isinstance(
-            value, str | bytes | bytearray
-        ):
-            for nested_value in value[:MAX_SAMPLE_ROWS]:
-                add_rows(nested_value, prefix, depth + 1)
-                if len(fields) >= MAX_SAMPLE_FIELDS:
-                    return
-        else:
-            values = getattr(value, "__dict__", None)
-            if isinstance(values, dict):
-                add_rows(values, prefix, depth + 1)
-
-    rows = _sample_rows(response)
-    for row in rows[:MAX_SAMPLE_ROWS]:
-        add_rows(row)
-        if len(fields) >= MAX_SAMPLE_FIELDS:
-            break
-    return fields
-
-
-def _safe_field_name(value: object) -> str | None:
-    try:
-        field = str(value).strip()
-    except Exception:
-        return None
-    if not field or len(field) > 80:
-        return None
-    if _CREDENTIAL_KEY_PATTERN.search(field):
-        return None
-    if (
-        _IPV4_PATTERN.search(field)
-        or _IPV6_PATTERN.search(field)
-        or _HOST_PORT_PATTERN.search(field)
-    ):
-        return None
-    if _ABSOLUTE_PATH_PATTERN.search(field) or _STACK_MARKER_PATTERN.search(field):
-        return None
-    return field
-
-
-def _safe_identifier(value: object) -> str | None:
-    if value is None:
-        return None
-    try:
-        identifier = str(value).strip()
-    except Exception:
-        return None
-    if not identifier or len(identifier) > 80:
-        return None
-    if _safe_field_name(identifier) is None:
-        return None
-    return identifier
+assert tuple(name for name, _check in CAPABILITY_REGISTRY) == CAPABILITY_NAMES
