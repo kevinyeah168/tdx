@@ -8,6 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from datetime import date as date_type
+
+from workbench.collector.trading_clock import (
+    clip_minute_for_live_session,
+    filter_minutes_for_live_session,
+    should_include_closing_minute,
+)
 from workbench.domain import CollectionStatus, SectorMinute, StockMinute
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
@@ -214,6 +221,87 @@ class HotStore:
         with self._session() as connection:
             connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in records])
 
+    def write_sectors(self, records: list[SectorMinute]) -> None:
+        if not records:
+            return
+        with self._session() as connection:
+            connection.executemany(SECTOR_UPSERT, [_sector_params(record) for record in records])
+
+    def delete_sector_minutes(self, trade_date: str, sector_id: str, minutes: tuple[str, ...]) -> None:
+        if not minutes:
+            return
+        placeholders = ",".join("?" * len(minutes))
+        with self._session() as connection:
+            connection.execute(
+                f"DELETE FROM sector_minute WHERE trade_date=? AND sector_id=? AND minute IN ({placeholders})",
+                (trade_date, sector_id, *minutes),
+            )
+
+    def delete_stock_minutes(self, trade_date: str, symbol: str, minutes: tuple[str, ...]) -> None:
+        if not minutes:
+            return
+        placeholders = ",".join("?" * len(minutes))
+        with self._session() as connection:
+            connection.execute(
+                f"DELETE FROM stock_minute WHERE trade_date=? AND symbol=? AND minute IN ({placeholders})",
+                (trade_date, symbol.upper(), *minutes),
+            )
+
+    def upsert_priority_minute_status(
+        self,
+        *,
+        trade_date: str,
+        minute: str,
+        batch_id: str,
+        catalog_version: str,
+        collected_sectors: int,
+        collected_stocks: int,
+        expected_sectors: int,
+        expected_stocks: int,
+        duration_ms: int,
+    ) -> None:
+        if collected_sectors <= 0 and collected_stocks <= 0:
+            return
+        from datetime import date as date_type
+
+        from workbench.domain import CollectionStatus
+
+        safe_expected_stocks = max(expected_stocks, collected_stocks, 1)
+        safe_expected_sectors = max(expected_sectors, collected_sectors, 1)
+        coverage_pct = round(collected_stocks / safe_expected_stocks * 100.0, 4)
+        status = CollectionStatus(
+            trade_date=date_type.fromisoformat(trade_date),
+            minute=minute,
+            batch_id=batch_id,
+            catalog_version=catalog_version or "unknown",
+            expected_stocks=safe_expected_stocks,
+            collected_stocks=collected_stocks,
+            expected_sectors=safe_expected_sectors,
+            collected_sectors=collected_sectors,
+            duration_ms=max(duration_ms, 0),
+            coverage_pct=coverage_pct,
+            status="partial",
+            error_summary="priority-batch",
+        )
+        with self._session() as connection:
+            connection.execute(STATUS_UPSERT, status.model_dump(mode="json"))
+
+    def count_sector_minutes(self, trade_date: str, sector_id: str) -> int:
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM sector_minute WHERE trade_date=? AND sector_id=?",
+                (trade_date, sector_id),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def count_stock_minutes(self, trade_date: str, symbol: str) -> int:
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM stock_minute WHERE trade_date=? AND symbol=?",
+                (trade_date, symbol.upper()),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def write_complete_batch(
         self,
         stocks: list[StockMinute],
@@ -259,13 +347,40 @@ class HotStore:
             if (record.trade_date, record.minute, record.batch_id) != expected_identity:
                 raise ValueError("records must match status trade_date, minute, and batch_id")
 
+    def _filter_live_rows(self, trade_date: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return rows
+        allowed = set(
+            filter_minutes_for_live_session(
+                date_type.fromisoformat(trade_date),
+                sorted({str(row["minute"]) for row in rows}),
+            )
+        )
+        return [row for row in rows if str(row["minute"]) in allowed]
+
+    def purge_intraday_closing_minutes(self, trade_date: str) -> int:
+        """Remove synthetic 15:00 tick-backfill rows while the session is still open."""
+        if should_include_closing_minute(date_type.fromisoformat(trade_date)):
+            return 0
+        with self._session() as connection:
+            sector_deleted = connection.execute(
+                "DELETE FROM sector_minute WHERE trade_date=? AND minute='15:00'",
+                (trade_date,),
+            ).rowcount
+            stock_deleted = connection.execute(
+                "DELETE FROM stock_minute WHERE trade_date=? AND minute='15:00'",
+                (trade_date,),
+            ).rowcount
+        return int(sector_deleted or 0) + int(stock_deleted or 0)
+
     def stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM stock_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
                 (trade_date, symbol),
             ).fetchall()
-        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        return self._filter_live_rows(trade_date, parsed)
 
     def sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:
@@ -273,7 +388,8 @@ class HotStore:
                 "SELECT * FROM sector_minute WHERE trade_date=? AND sector_id=? ORDER BY minute",
                 (trade_date, sector_id),
             ).fetchall()
-        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        return self._filter_live_rows(trade_date, parsed)
 
     def complete_stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
         return self.complete_stock_fund_curve(trade_date, symbol).rows
@@ -285,7 +401,93 @@ class HotStore:
         return self._complete_fund_curve("stock_minute", "symbol", trade_date, symbol)
 
     def complete_sector_fund_curve(self, trade_date: str, sector_id: str) -> CompleteFundCurve:
-        return self._complete_fund_curve("sector_minute", "sector_id", trade_date, sector_id)
+        rows = self.sector_fund_series(trade_date, sector_id)
+        latest = rows[-1]["minute"] if rows else self.latest_sector_minute(trade_date)
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            str(latest) if latest else None,
+        )
+        return CompleteFundCurve(
+            latest_complete_minute=latest,
+            rows=rows,
+        )
+
+    def live_stock_fund_curve(self, trade_date: str, symbol: str) -> CompleteFundCurve:
+        complete = self._complete_fund_curve("stock_minute", "symbol", trade_date, symbol)
+        with self._session(readonly=True) as connection:
+            priority_rows = connection.execute(
+                """
+                SELECT * FROM stock_minute
+                WHERE trade_date=? AND symbol=? AND batch_id LIKE '%-priority'
+                ORDER BY minute
+                """,
+                (trade_date, symbol),
+            ).fetchall()
+        merged: dict[str, dict[str, Any]] = {
+            str(row["minute"]): dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])}
+            for row in complete.rows
+        }
+        for row in priority_rows:
+            merged[str(row["minute"])] = dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])}
+        ordered = self._filter_live_rows(
+            trade_date,
+            [merged[minute] for minute in sorted(merged)],
+        )
+        latest = ordered[-1]["minute"] if ordered else complete.latest_complete_minute
+        if latest is None:
+            latest = self.latest_stock_minute(trade_date)
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            str(latest) if latest else None,
+        )
+        return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+
+    def latest_stock_minute(self, trade_date: str) -> str | None:
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT MAX(minute) FROM stock_minute WHERE trade_date=?",
+                (trade_date,),
+            ).fetchone()
+        minute = str(row[0]) if row and row[0] else None
+        return clip_minute_for_live_session(date_type.fromisoformat(trade_date), minute)
+
+    def session_minutes(self, trade_date: str) -> list[str]:
+        complete = set(self._complete_minutes(trade_date))
+        with self._session(readonly=True) as connection:
+            sector_rows = connection.execute(
+                "SELECT DISTINCT minute FROM sector_minute WHERE trade_date=? ORDER BY minute",
+                (trade_date,),
+            ).fetchall()
+            stock_rows = connection.execute(
+                "SELECT DISTINCT minute FROM stock_minute WHERE trade_date=? ORDER BY minute",
+                (trade_date,),
+            ).fetchall()
+        for row in sector_rows:
+            complete.add(str(row[0]))
+        for row in stock_rows:
+            complete.add(str(row[0]))
+        return filter_minutes_for_live_session(
+            date_type.fromisoformat(trade_date),
+            sorted(complete),
+        )
+
+    def _complete_minutes(self, trade_date: str) -> list[str]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT minute FROM collection_status WHERE trade_date=? AND status='complete' ORDER BY minute",
+                (trade_date,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def latest_available_minute(self, trade_date: str) -> str | None:
+        candidates = [
+            self.latest_complete_minute(trade_date),
+            self.latest_sector_minute(trade_date),
+            self.latest_stock_minute(trade_date),
+        ]
+        present = [minute for minute in candidates if minute]
+        minute = max(present) if present else None
+        return clip_minute_for_live_session(date_type.fromisoformat(trade_date), minute)
 
     def _complete_fund_curve(
         self, table: str, entity_column: str, trade_date: str, entity_id: str
@@ -322,3 +524,65 @@ class HotStore:
                 (trade_date,),
             ).fetchone()
         return str(row[0]) if row and row[0] else None
+
+    def latest_sector_minute(self, trade_date: str) -> str | None:
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT MAX(minute) FROM sector_minute WHERE trade_date=?",
+                (trade_date,),
+            ).fetchone()
+        minute = str(row[0]) if row and row[0] else None
+        return clip_minute_for_live_session(date_type.fromisoformat(trade_date), minute)
+
+    def record_gap(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+        trade_date: str,
+        minute: str,
+        reason: str,
+    ) -> None:
+        with self._session() as connection:
+            connection.execute(
+                "INSERT INTO data_gap("
+                "entity_type, entity_id, trade_date, minute, reason, retry_count, resolved"
+                ") VALUES(?, ?, ?, ?, ?, 0, 0) "
+                "ON CONFLICT(entity_type, entity_id, trade_date, minute) DO UPDATE SET "
+                "reason=excluded.reason, retry_count=data_gap.retry_count + 1",
+                (entity_type, entity_id, trade_date, minute, reason),
+            )
+
+    def unresolved_gaps(self, trade_date: str) -> list[dict[str, str | int]]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT entity_type, entity_id, trade_date, minute, reason, retry_count "
+                "FROM data_gap WHERE trade_date=? AND resolved=0 ORDER BY minute, entity_id",
+                (trade_date,),
+            ).fetchall()
+        return [
+            {
+                "entity_type": str(row[0]),
+                "entity_id": str(row[1]),
+                "trade_date": str(row[2]),
+                "minute": str(row[3]),
+                "reason": str(row[4]),
+                "retry_count": int(row[5]),
+            }
+            for row in rows
+        ]
+
+    def resolve_gap(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+        trade_date: str,
+        minute: str,
+    ) -> None:
+        with self._session() as connection:
+            connection.execute(
+                "UPDATE data_gap SET resolved=1 "
+                "WHERE entity_type=? AND entity_id=? AND trade_date=? AND minute=?",
+                (entity_type, entity_id, trade_date, minute),
+            )

@@ -14,15 +14,18 @@ The strict report has two top-level members:
 - `capabilities` contains the unchanged strict `ProviderCapabilities` aggregate.
 
 An aggregate can remain available when one fallback succeeds. Its manifest still
-records every normal/enhanced source attempted, including sanitized failures and
-bounded protocol-field evidence. Evidence contains only top-level protocol field
-identifiers; it never contains response rows or arbitrary nested mapping keys.
+records every normal/enhanced source outcome, including successful attempts,
+sanitized attempted failures, and explicit unattempted `skipped` outcomes for
+deadline/dependency conditions. Evidence contains only bounded top-level protocol
+field identifiers; it never contains response rows or arbitrary nested mapping keys.
 
-The full security catalog probe calls easy-tDX `get_security_list_all()` directly
-and requires distinct valid SH, SZ, and BJ records. A nonempty partial catalog is
-therefore controlled unavailable. The installed easy-tDX 1.20.7 implementation
-currently documents a BJ retrieval limitation, which the report must expose rather
-than conceal.
+The full security catalog probe calls the installed easy-tDX
+`get_security_list_all(pages=1000000)` mechanism. Passing an integer keeps the
+package's real count/page network loop but bypasses its `pages="all"` local cache;
+a cache hit is never accepted as live endpoint evidence. Validation requires
+distinct valid SH, SZ, and BJ records, so a nonempty partial catalog is controlled
+unavailable. The installed easy-tDX 1.20.7 implementation currently documents a BJ
+retrieval limitation, which the report must expose rather than conceal.
 
 The installed capital-flow parser supplies official flow values but no usable date
 (its decoded date is blank). The probe validates finite official fields and the
@@ -37,18 +40,16 @@ five-level availability independently only when every price/volume level validat
 
 ## Duration bound
 
-The default CLI limits each normal and enhanced pool to `--max-node-attempts 2`
-with `--socket-timeout-seconds 3`. Thus an individual transport operation has an
-upper bound of two target attempts at three seconds each. The probe also uses a
-20-second cooperative per-capability deadline and a 120-second cooperative overall
-deadline; after either deadline is observed, it starts no remaining capability or
-fallback work and records controlled unavailable results.
-
-easy-tDX methods such as the full-list helper can perform a finite sequence of
-internal page requests inside one synchronous call. Those requests retain the
-three-second socket timeout, but Python cannot preempt the in-flight synchronous
-method at the cooperative deadline. Consequently, final wall time is bounded by
-the deadline plus completion of the one in-flight, socket-bounded easy-tDX method.
+The default CLI limits each normal and enhanced source to
+`--max-node-attempts 2` with `--socket-timeout-seconds 3`. Every blocking source
+call runs in its own Windows `spawn` worker process. The watchdog starts its timer
+before process startup and applies the smaller remaining 20-second per-capability
+and 120-second overall hard deadline. On expiry it terminates the worker, waits at
+most `--worker-termination-grace-seconds 0.1`, then kills and joins it if needed.
+Thus the observable upper bound is the remaining hard deadline plus at most the
+explicit cleanup grace. A blocked source cannot return late success: execution is capped by the
+remaining hard deadline and timeout cleanup adds at most the explicit 0.1-second
+grace. Remaining work is recorded as unattempted `skipped`, not attempted failure.
 
 ## Privacy boundary
 
@@ -67,7 +68,8 @@ fixture path; the CLI creates the strict wrapper and all audit metadata atomical
 ```
 
 Optional duration controls are `--max-node-attempts`,
-`--socket-timeout-seconds`, `--overall-deadline-seconds`, and
-`--capability-deadline-seconds`. After refresh, run the focused probe tests and the
-privacy scan before committing. Never manually edit the capture timestamp,
+`--socket-timeout-seconds`, `--overall-hard-deadline-seconds`,
+`--capability-hard-deadline-seconds`, and
+`--worker-termination-grace-seconds`. After refresh, run the focused probe tests
+and the privacy scan before committing. Never manually edit the capture timestamp,
 installed version, discovered board, capability status, or source outcomes.

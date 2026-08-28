@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from workbench.domain import ProviderCapabilities
 
 
-PROBE_SCHEMA_VERSION: Literal["1.0"] = "1.0"
-PROBE_VERSION: Literal["3.1.0"] = "3.1.0"
+PROBE_SCHEMA_VERSION: Literal["1.1"] = "1.1"
+PROBE_VERSION: Literal["3.2.0"] = "3.2.0"
 SAMPLE_SYMBOL: Literal["SH600000"] = "SH600000"
 
 CAPABILITY_NAMES = (
@@ -35,7 +35,7 @@ CapabilityName = Literal[
     "bars",
     "order_book",
 ]
-SourceStatus = Literal["succeeded", "failed"]
+SourceStatus = Literal["succeeded", "failed", "skipped"]
 ProtocolField = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")]
 
 
@@ -58,7 +58,7 @@ class DiscoveredBoard(ProbeModel):
 
 class SourceOutcome(ProbeModel):
     source: Annotated[str, Field(min_length=1, max_length=120)]
-    attempted: Literal[True] = True
+    attempted: bool
     status: SourceStatus
     evidence: list[ProtocolField] = Field(default_factory=list, max_length=12)
     error: Annotated[str, Field(min_length=1, max_length=200)] | None = None
@@ -73,10 +73,23 @@ class SourceOutcome(ProbeModel):
 
     @model_validator(mode="after")
     def validate_status(self) -> "SourceOutcome":
-        if self.status == "succeeded" and self.error is not None:
-            raise ValueError("succeeded source cannot carry an error")
-        if self.status == "failed" and self.error is None:
-            raise ValueError("failed source requires an error")
+        if self.status == "succeeded":
+            if not self.attempted:
+                raise ValueError("succeeded source must have been attempted")
+            if self.error is not None:
+                raise ValueError("succeeded source cannot carry an error")
+        elif self.status == "failed":
+            if not self.attempted:
+                raise ValueError("failed source must have been attempted")
+            if self.error is None:
+                raise ValueError("failed source requires an error")
+        else:
+            if self.attempted:
+                raise ValueError("skipped source cannot have been attempted")
+            if self.error is None:
+                raise ValueError("skipped source requires a reason")
+            if self.evidence:
+                raise ValueError("skipped source cannot carry evidence")
         if len(set(self.evidence)) != len(self.evidence):
             raise ValueError("source evidence fields must be unique")
         return self
@@ -106,8 +119,8 @@ class CapabilitySourceOutcomes(ProbeModel):
 
 
 class ProbeManifest(ProbeModel):
-    schema_version: Literal["1.0"]
-    probe_version: Literal["3.1.0"]
+    schema_version: Literal["1.1"]
+    probe_version: Literal["3.2.0"]
     captured_at: datetime
     easy_tdx_version: Annotated[str, Field(min_length=1, max_length=40)]
     sample_symbol: Literal["SH600000"]

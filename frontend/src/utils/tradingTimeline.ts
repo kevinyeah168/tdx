@@ -21,23 +21,50 @@ export function alignValuesToTradingMinutes(
   values: (number | null)[],
 ): (number | null)[] {
   const map: Record<string, number | null> = {}
-  let lastSampledTime: string | null = null
+  let lastActualMinute: string | null = null
   sourceTimeline.forEach((t, i) => {
     const v = values[i] ?? null
     map[t] = v
-    // Keep the latest minute that actually has a captured sample
-    if (v != null) lastSampledTime = t
+    if (v != null) lastActualMinute = t
   })
 
   let last: number | null = null
   return TRADING_MINUTES.map((t) => {
-    // Fixed full-day X axis, but do not extend the line past latest sample
-    if (lastSampledTime == null || t > lastSampledTime) return null
-    if (t in map && map[t] != null) last = map[t]
+    if (lastActualMinute == null || t > lastActualMinute) return null
+    if (t in map && map[t] != null) {
+      last = map[t]
+      return last
+    }
     return last
   })
 }
 
+/** Hide synthetic 15:00 and future replay minutes while today's session is open. */
+export function filterLiveReplayMinutes(minutes: string[], tradeDate: string, now = new Date()): string[] {
+  const today = now.toISOString().slice(0, 10)
+  if (tradeDate !== today) return minutes
+  const clock = currentTradingClockMinute(now)
+  if (clock >= '15:00') return minutes
+  return minutes.filter((minute) => minute !== '15:00' && minute <= clock)
+}
+
+export function capLiveReplayMinute(minute: string | null | undefined, tradeDate: string, now = new Date()): string | null {
+  if (!minute) return null
+  const filtered = filterLiveReplayMinutes([minute], tradeDate, now)
+  return filtered[0] ?? null
+}
+
 export function countNonNullValues(values: (number | null)[] | undefined): number {
   return (values || []).filter((v) => v != null).length
+}
+
+export function currentTradingClockMinute(now = new Date()): string {
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+}
+
+/** Drop synthetic 15:00 and future minutes while the session is still open. */
+export function withoutPrematureClosingPoint<T extends { minute: string }>(points: T[], now = new Date()): T[] {
+  const clock = currentTradingClockMinute(now)
+  if (clock >= '15:00') return points
+  return points.filter((point) => point.minute !== '15:00' && point.minute <= clock)
 }

@@ -15,6 +15,10 @@ class CatalogSnapshot:
     memberships: tuple[Membership, ...]
     sector_count: int
     catalog_version: str | None
+    synced_at: str | None = None
+    source: str | None = None
+    stale: bool = False
+    error_summary: str | None = None
 
 
 class MetaStore:
@@ -42,6 +46,25 @@ class MetaStore:
             connection.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('retention_days', '30')"
             )
+            self._migrate_catalog_state(connection)
+
+    def _migrate_catalog_state(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(catalog_state)").fetchall()
+        }
+        if "synced_at" not in columns:
+            connection.execute("ALTER TABLE catalog_state ADD COLUMN synced_at TEXT")
+        if "source" not in columns:
+            connection.execute(
+                "ALTER TABLE catalog_state ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        if "stale" not in columns:
+            connection.execute(
+                "ALTER TABLE catalog_state ADD COLUMN stale INTEGER NOT NULL DEFAULT 0"
+            )
+        if "error_summary" not in columns:
+            connection.execute("ALTER TABLE catalog_state ADD COLUMN error_summary TEXT")
 
     def replace_catalog(
         self,
@@ -50,6 +73,10 @@ class MetaStore:
         sectors: list[Sector],
         memberships: list[Membership],
         version: str,
+        synced_at: str | None = None,
+        source: str = "unknown",
+        stale: bool = False,
+        error_summary: str | None = None,
     ) -> None:
         with self._session() as connection:
             connection.execute("DELETE FROM sector_membership")
@@ -68,9 +95,23 @@ class MetaStore:
                 [(m.sector_id, m.symbol) for m in memberships],
             )
             connection.execute(
-                "INSERT INTO catalog_state(singleton, version) VALUES(1, ?) "
-                "ON CONFLICT(singleton) DO UPDATE SET version=excluded.version",
-                (version,),
+                "INSERT INTO catalog_state("
+                "singleton, version, synced_at, source, stale, error_summary"
+                ") VALUES(1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET "
+                "version=excluded.version, "
+                "synced_at=excluded.synced_at, "
+                "source=excluded.source, "
+                "stale=excluded.stale, "
+                "error_summary=excluded.error_summary",
+                (version, synced_at, source, int(stale), error_summary),
+            )
+
+    def mark_catalog_stale(self, *, error_summary: str, source: str = "unknown") -> None:
+        with self._session() as connection:
+            connection.execute(
+                "UPDATE catalog_state SET stale=1, error_summary=?, source=? WHERE singleton=1",
+                (error_summary, source),
             )
 
     def security_count(self) -> int:
@@ -107,12 +148,17 @@ class MetaStore:
             )
             sector_count = int(connection.execute("SELECT COUNT(*) FROM sector_master").fetchone()[0])
             row = connection.execute(
-                "SELECT version FROM catalog_state WHERE singleton=1"
+                "SELECT version, synced_at, source, stale, error_summary "
+                "FROM catalog_state WHERE singleton=1"
             ).fetchone()
         return CatalogSnapshot(
             memberships=memberships,
             sector_count=sector_count,
             catalog_version=str(row[0]) if row else None,
+            synced_at=str(row[1]) if row and row[1] is not None else None,
+            source=str(row[2]) if row and row[2] is not None else None,
+            stale=bool(row[3]) if row else False,
+            error_summary=str(row[4]) if row and row[4] is not None else None,
         )
 
     def catalog_version(self) -> str | None:
@@ -136,3 +182,15 @@ class MetaStore:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(days),),
             )
+
+    def security_names(self, symbols: list[str]) -> dict[str, str]:
+        if not symbols:
+            return {}
+        unique = list(dict.fromkeys(symbols))
+        placeholders = ",".join("?" for _ in unique)
+        with self._session() as connection:
+            rows = connection.execute(
+                f"SELECT symbol, name FROM security_master WHERE symbol IN ({placeholders})",
+                unique,
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}

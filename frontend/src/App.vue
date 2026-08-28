@@ -20,6 +20,8 @@ import TopBar from '@/components/layout/TopBar.vue'
 
 import DashboardPage from '@/components/pages/DashboardPage.vue'
 
+import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
+
 import { useNaiveTheme } from '@/composables/useNaiveTheme'
 
 import { useBoardStore } from '@/stores/boardStore'
@@ -65,12 +67,10 @@ onMounted(async () => {
 
 
   pollTimer = setInterval(async () => {
-
+    if (boardStore.isPanelBusy) return
     await boardStore.loadBoard()
-
     boardStore.resetCountdown()
-
-  }, 6000)
+  }, WORKBENCH_REFRESH_MS)
 
 
 

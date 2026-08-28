@@ -87,3 +87,33 @@ body {
 .n-drawer .n-drawer-footer {
   border-top: 1px solid var(--border);
 }
+
+/* ECharts 资金曲线 tooltip：高度跟图表，尽量一次展全 */
+.fund-flow-tooltip {
+  max-width: min(300px, calc(100vw - 24px));
+  line-height: 1.25 !important;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+}
+
+.fund-flow-tooltip table {
+  border-collapse: collapse;
+}
+
+.fund-flow-tooltip tr {
+  line-height: 1.25;
+}
+
+.fund-flow-tooltip td {
+  padding: 1px 0 !important;
+  vertical-align: middle;
+}
+
+.fund-flow-tooltip::-webkit-scrollbar {
+  width: 6px;
+}
+
+.fund-flow-tooltip::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+}

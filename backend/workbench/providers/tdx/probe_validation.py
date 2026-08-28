@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time as datetime_time
 import math
 from numbers import Integral, Real
 import re
@@ -203,6 +203,26 @@ def validate_minute_data(response: object) -> ValidationEvidence:
     return _evidence(response)
 
 
+def validate_transactions(
+    response: object,
+    *,
+    expected_market: int,
+    expected_code: str,
+) -> ValidationEvidence:
+    rows = _required_rows(response, "transaction")
+    for row in rows:
+        _validate_context(
+            row,
+            expected_market=expected_market,
+            expected_code=expected_code,
+            required=False,
+        )
+        _parse_time(row.get("time"))
+        _finite_field(row, ("price",), minimum=0.0, positive=True)
+        _finite_field(row, ("vol", "volume"), minimum=0.0)
+    return _evidence(response)
+
+
 def validate_bars(
     response: object,
     *,
@@ -241,19 +261,28 @@ def validate_order_book(
             expected_code=expected_code,
             required=True,
         )
+        bids: list[float] = []
+        asks: list[float] = []
         for level in range(1, levels + 1):
             for side in ("bid", "ask"):
-                _finite_field(
+                price = _finite_field(
                     row,
                     (f"{side}{level}_price",),
                     minimum=0.0,
                     positive=True,
                 )
+                (bids if side == "bid" else asks).append(price)
                 _finite_field(
                     row,
                     (f"{side}{level}_volume",),
                     minimum=0.0,
                 )
+        if any(earlier < later for earlier, later in zip(bids, bids[1:])):
+            raise CapabilityUnavailable("order-book bid prices were not descending")
+        if any(earlier > later for earlier, later in zip(asks, asks[1:])):
+            raise CapabilityUnavailable("order-book ask prices were not ascending")
+        if bids[0] > asks[0]:
+            raise CapabilityUnavailable("order-book best bid crossed the best ask")
 
     fields = sample_protocol_fields(response)
     if levels == 5 and "bid5_price" not in fields:
@@ -495,6 +524,21 @@ def _parse_datetime(value: object) -> datetime | date:
         return datetime.fromisoformat(candidate)
     except ValueError as exc:
         raise CapabilityUnavailable("response datetime was not parseable") from exc
+
+
+def _parse_time(value: object) -> datetime_time:
+    if isinstance(value, datetime):
+        return value.timetz()
+    if isinstance(value, datetime_time):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise CapabilityUnavailable("response transaction time was missing or invalid")
+    try:
+        return datetime_time.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise CapabilityUnavailable(
+            "response transaction time was not parseable"
+        ) from exc
 
 
 def _safe_protocol_field(value: object) -> str | None:

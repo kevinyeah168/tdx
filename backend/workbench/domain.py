@@ -341,6 +341,8 @@ class ProviderMinuteBatch(NormalizedModel):
     minute: Minute
     stocks: list[StockMinute]
     expected_stocks: int = Field(ge=0)
+    sectors: list[SectorMinute] | None = None
+    expected_sectors: int = Field(default=0, ge=0)
     errors: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -354,4 +356,14 @@ class ProviderMinuteBatch(NormalizedModel):
             for stock in self.stocks
         ):
             raise ValueError("stocks must match the batch trade_date and minute")
+        if self.expected_sectors < len(self.sectors or []):
+            raise ValueError("expected_sectors cannot be lower than the number of sectors")
+        if self.sectors is not None:
+            if len({sector.sector_id for sector in self.sectors}) != len(self.sectors):
+                raise ValueError("sectors cannot contain duplicate sector IDs")
+            if any(
+                sector.trade_date != self.trade_date or sector.minute != self.minute
+                for sector in self.sectors
+            ):
+                raise ValueError("sectors must match the batch trade_date and minute")
         return self

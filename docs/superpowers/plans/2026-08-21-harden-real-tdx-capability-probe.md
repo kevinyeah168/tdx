@@ -6,7 +6,7 @@
 
 **Architecture:** Add a strict probe-local report wrapper and split orchestration, models, and semantic validation. Composite probes retain structured outcomes per source, while the CLI bounds real-network work and generates reproducible metadata.
 
-**Tech Stack:** Python 3.11+, Pydantic 2, pandas, easy-tdx 1.20.7, pytest, mypy.
+**Tech Stack:** Python 3.10+, Pydantic 2, pandas, easy-tdx 1.20.7, pytest, mypy.
 
 ---
 

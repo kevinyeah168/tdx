@@ -7,7 +7,7 @@ import { useChartTheme } from '@/composables/useChartTheme'
 import { useThemeStore } from '@/stores/themeStore'
 import { useBoardStore } from '@/stores/boardStore'
 import { seriesColor } from '@/utils/chartColors'
-import { fmtMoney, toYi } from '@/utils/format'
+import { fmtMoney, fmtPct, fmtSectorSeriesLabel, toYi } from '@/utils/format'
 import {
   alignValuesToTradingMinutes,
   countNonNullValues,
@@ -44,11 +44,23 @@ const highlighted = computed(() =>
   props.mode === 'stock' ? highlightedStock.value : highlightedSector.value,
 )
 
+const soloStockSeries = computed(() => {
+  if (props.mode !== 'stock' || !highlighted.value) return null
+  return seriesList.value.find((item) => item.id === highlighted.value) ?? null
+})
+
+const showPriceOverlay = computed(() => {
+  const solo = soloStockSeries.value
+  return Boolean(solo?.price_values?.some((value) => value != null))
+})
+
+const PRICE_SERIES_PREFIX = '__price__:'
+
 const hasChartData = computed(() => {
   const tl = sourceTimeline.value || []
   return seriesList.value.some((s) => {
     const aligned = alignValuesToTradingMinutes(tl, s.values || [])
-    return countNonNullValues(aligned) >= 2
+    return countNonNullValues(aligned) >= 1
   })
 })
 
@@ -65,6 +77,7 @@ const emptyTitle = computed(() => {
   const session = board.value.trading_session
   if (session?.marketStatus === 'pre_open') return '尚未开盘'
   if (session?.marketStatus === 'non_trading_day') return '非交易日'
+  if (session?.marketStatus === 'open') return '加载中'
   return '暂无分时数据'
 })
 
@@ -75,18 +88,24 @@ const emptyMessage = computed(() => {
   return '今日尚未开盘，数据在交易日 09:31 开始实时更新'
 })
 
-function shortName(name: string, max = 8): string {
-  return name.length > max ? `${name.slice(0, max)}…` : name
+function seriesLabel(item: FlowSeries): string {
+  if (props.mode === 'sector') return fmtSectorSeriesLabel(item)
+  return item.name
+}
+
+function shortLabel(item: FlowSeries, max = 10): string {
+  const label = seriesLabel(item)
+  return label.length > max ? `${label.slice(0, max)}…` : label
 }
 
 function endLabelStyle(color: string, emphasized: boolean, list: FlowSeries[]) {
   return {
     show: true,
     formatter: (params: { seriesName?: string; value?: number | null }) => {
-      const item = list.find((s) => s.name === params.seriesName || s.id === params.seriesName)
-      const label = item?.name || params.seriesName || ''
+      const item = list.find((s) => s.id === params.seriesName)
+      const label = item ? shortLabel(item) : params.seriesName || ''
       const money = item ? fmtMoney(item.cum_main) : fmtMoney((params.value ?? 0) * 1e8)
-      return `${shortName(label)} ${money}`
+      return `${label} ${money}`
     },
     color,
     fontSize: emphasized ? 11 : 10,
@@ -105,10 +124,67 @@ function lastNonNullIndex(values: (number | null)[]): number {
   return -1
 }
 
-function baseAxis(gridRight: number) {
+function chartTipMaxHeight(): number {
+  const h = chartEl.value?.clientHeight ?? 0
+  // 最大高度与图表可视高度一致，优先一次展全
+  if (h >= 120) return h
+  return Math.max(320, Math.min(window.innerHeight - 32, 720))
+}
+
+function tooltipNearMouse(
+  point: number[],
+  _params: unknown,
+  _dom: HTMLElement,
+  _rect: { x: number; y: number; width: number; height: number },
+  size: { contentSize: number[]; viewSize: number[] },
+): number[] {
+  // 返回图表内坐标；appendTo body 时由 ECharts 换算到页面
+  const [tw, th] = size.contentSize
+  const [vw, vh] = size.viewSize
+  const gap = 16
+  let x = point[0] + gap
+  let y = point[1] - 12
+
+  if (x + tw > vw - 4) x = point[0] - tw - gap
+  if (x < 4) x = 4
+
+  // 高度接近图表时贴顶，避免裁切；否则跟随鼠标并夹在图表内
+  if (th >= vh * 0.82) {
+    y = 2
+  } else {
+    if (y + th > vh - 4) y = vh - th - 4
+    if (y < 2) y = 2
+  }
+
+  return [x, y]
+}
+
+function baseAxis(gridRight: number, list: FlowSeries[], showPrice = false) {
   const c = colors.value
+  const seriesCount = seriesList.value.length
+  const tipMaxH = chartTipMaxHeight()
+  const dense = seriesCount > 10
+  const yAxis: object[] = [
+    {
+      scale: true,
+      axisLabel: { color: c.axis, formatter: (v: number) => `${v}`, fontSize: 10 },
+      name: '亿',
+      nameTextStyle: { color: c.axis, fontSize: 10 },
+      splitLine: { lineStyle: { color: c.splitLine } },
+    },
+  ]
+  if (showPrice) {
+    yAxis.push({
+      scale: true,
+      position: 'right',
+      axisLabel: { color: c.axis, formatter: (v: number) => v.toFixed(2), fontSize: 10 },
+      name: '价格',
+      nameTextStyle: { color: c.axis, fontSize: 10 },
+      splitLine: { show: false },
+    })
+  }
   return {
-    grid: { left: 48, right: gridRight, top: 32, bottom: 32 },
+    grid: { left: 48, right: showPrice ? gridRight + 40 : gridRight, top: 32, bottom: 32 },
     xAxis: {
       type: 'category' as const,
       data: TRADING_MINUTES,
@@ -123,18 +199,50 @@ function baseAxis(gridRight: number) {
       axisLine: { lineStyle: { color: c.axisLine } },
       axisTick: { show: false },
     },
-    yAxis: {
-      scale: true,
-      axisLabel: { color: c.axis, formatter: (v: number) => `${v}`, fontSize: 10 },
-      name: '亿',
-      nameTextStyle: { color: c.axis, fontSize: 10 },
-      splitLine: { lineStyle: { color: c.splitLine } },
-    },
+    yAxis,
     tooltip: {
       trigger: 'axis' as const,
+      appendTo: 'body' as const,
+      className: 'fund-flow-tooltip',
+      order: 'valueDesc' as const,
+      position: tooltipNearMouse,
       backgroundColor: c.tooltipBg,
       borderColor: c.tooltipBorder,
-      textStyle: { color: c.tooltipText, fontSize: 12 },
+      borderWidth: 1,
+      padding: dense ? [6, 10] : [8, 12],
+      textStyle: {
+        color: c.tooltipText,
+        fontSize: dense ? 11 : 12,
+        lineHeight: dense ? 16 : 18,
+      },
+      extraCssText: [
+        `max-height:${tipMaxH}px`,
+        'overflow-y:auto',
+        'pointer-events:none',
+        'box-shadow:0 8px 28px rgba(15,23,42,0.18)',
+        'border-radius:8px',
+        'z-index:4000',
+      ].join(';'),
+      formatter: (params: unknown) => {
+        if (!Array.isArray(params) || !params.length) return ''
+        const axisLabel = String(params[0]?.axisValue ?? '')
+        const lines = [...params]
+          .filter((entry) => entry.value != null && entry.value !== '')
+          .sort((a, b) => Number(b.value) - Number(a.value))
+          .map((entry) => {
+            const seriesKey = String(entry.seriesId ?? entry.seriesName ?? '')
+            if (seriesKey.startsWith(PRICE_SERIES_PREFIX)) {
+              const solo = soloStockSeries.value
+              const pct = solo?.change_pct
+              const pctText = pct != null ? ` (${fmtPct(pct)})` : ''
+              return `${entry.marker}价格: ${Number(entry.value).toFixed(2)}${pctText}`
+            }
+            const item = list.find((s) => s.id === entry.seriesName)
+            const label = item ? seriesLabel(item) : entry.seriesName
+            return `${entry.marker}${label}: ${Number(entry.value).toFixed(2)}亿`
+          })
+        return `${axisLabel}<br/>${lines.join('<br/>')}`
+      },
       valueFormatter: (v: unknown) =>
         v == null ? '—' : `${Number(v).toFixed(2)}亿`,
     },
@@ -156,9 +264,10 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[]) {
 
     return {
       id: s.id,
-      name: s.name,
+      name: props.mode === 'sector' ? s.id : s.name,
       type: 'line' as const,
       showSymbol: false,
+      triggerLineEvent: true,
       connectNulls: false,
       smooth: 0.15,
       clip: false,
@@ -183,9 +292,101 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[]) {
   return { series, gridRight }
 }
 
+function buildPriceSeries(item: FlowSeries, tl: string[]) {
+  if (!item.price_values) return null
+  const aligned = alignValuesToTradingMinutes(tl, item.price_values)
+  const tipIdx = lastNonNullIndex(aligned)
+  if (tipIdx < 0) return null
+  const data = aligned.map((value, index) => (index <= tipIdx ? value : null))
+  const lastPrice = aligned[tipIdx]
+  const priceColor = themeStore.isDark ? '#cbd5e1' : '#64748b'
+
+  return {
+    id: `${PRICE_SERIES_PREFIX}${item.id}`,
+    name: `${PRICE_SERIES_PREFIX}${item.id}`,
+    type: 'line' as const,
+    yAxisIndex: 1,
+    showSymbol: false,
+    triggerLineEvent: false,
+    connectNulls: false,
+    smooth: 0.15,
+    clip: false,
+    data,
+    z: 11,
+    silent: true,
+    lineStyle: {
+      width: 1.8,
+      type: 'dashed' as const,
+      color: priceColor,
+      opacity: 0.92,
+      shadowBlur: 0,
+      shadowColor: undefined,
+    },
+    itemStyle: { color: priceColor },
+    endLabel: {
+      show: true,
+      formatter: () => `价 ${Number(lastPrice).toFixed(2)}`,
+      color: priceColor,
+      fontSize: 10,
+      fontWeight: 600,
+      distance: 6,
+      backgroundColor: themeStore.isDark ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.88)',
+      padding: [2, 5, 2, 5],
+      borderRadius: 4,
+    },
+    labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
+  }
+}
+
+function resolveSeriesId(params: {
+  seriesId?: string | number
+  seriesName?: string
+  seriesIndex?: number
+}): string | null {
+  const list = seriesList.value || []
+  if (params.seriesId != null && params.seriesId !== '') {
+    return String(params.seriesId)
+  }
+  if (params.seriesName) {
+    const byId = list.find((s) => s.id === params.seriesName)
+    if (byId) return byId.id
+    const byName = list.find((s) => s.name === params.seriesName)
+    if (byName) return byName.id
+  }
+  if (typeof params.seriesIndex === 'number' && list[params.seriesIndex]) {
+    return list[params.seriesIndex]!.id
+  }
+  return null
+}
+
+function onChartClick(params: {
+  componentType?: string
+  seriesId?: string | number
+  seriesName?: string
+  seriesIndex?: number
+}) {
+  if (params.componentType !== 'series') return
+  const id = resolveSeriesId(params)
+  if (!id) return
+  if (props.mode === 'sector') {
+    void boardStore.selectSectorForLinkage(id)
+  } else {
+    boardStore.toggleHighlight(id, 'stock')
+  }
+}
+
+function bindChartEvents() {
+  if (!chart) return
+  chart.off('click')
+  chart.on('click', onChartClick)
+}
+
 function renderChart() {
   if (!chartEl.value) return
-  if (!chart) chart = echarts.init(chartEl.value)
+  if (!chart) {
+    chart = echarts.init(chartEl.value)
+    bindChartEvents()
+  }
 
   if (showEmpty.value) {
     chart.clear()
@@ -195,13 +396,18 @@ function renderChart() {
   const tl = sourceTimeline.value || []
   const list = seriesList.value || []
   const { series, gridRight } = buildSeries(list, highlighted.value, tl)
+  const chartSeries = [...series]
+  if (showPriceOverlay.value && soloStockSeries.value) {
+    const priceSeries = buildPriceSeries(soloStockSeries.value, tl)
+    if (priceSeries) chartSeries.push(priceSeries)
+  }
 
   chart.setOption(
     {
       backgroundColor: 'transparent',
       animation: false,
-      ...baseAxis(gridRight),
-      series,
+      ...baseAxis(gridRight, list, showPriceOverlay.value),
+      series: chartSeries,
     },
     true,
   )
@@ -212,7 +418,7 @@ function resizeChart() {
 }
 
 watch(
-  [sourceTimeline, seriesList, highlighted, showEmpty, () => props.mode, colors, () => themeStore.isDark],
+  [sourceTimeline, seriesList, highlighted, showEmpty, showPriceOverlay, () => props.mode, colors, () => themeStore.isDark],
   async () => {
     await nextTick()
     renderChart()

@@ -1,0 +1,10 @@
+[
+  {
+    "main_net": 2500000,
+    "main_in": 3000000,
+    "main_out": 500000,
+    "small_net": 100000,
+    "small_in": 150000,
+    "small_out": 50000
+  }
+]

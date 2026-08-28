@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from datetime import date
 
+from workbench.collector.heartbeat import write_collector_heartbeat
 from workbench.collector.sector_aggregator import SectorAggregator
 from workbench.domain import CollectionStatus
 from workbench.providers.base import MarketDataProvider
@@ -25,7 +26,10 @@ class MinuteCollector:
         catalog = self.meta.catalog_snapshot()
         if catalog.catalog_version is None:
             raise ValueError("catalog version is required before minute collection")
-        sectors = SectorAggregator(catalog.memberships).aggregate(batch.stocks)
+        if batch.sectors is not None and batch.sectors:
+            sectors = batch.sectors
+        else:
+            sectors = SectorAggregator(catalog.memberships).aggregate(batch.stocks)
         coverage_pct = (
             round(len(batch.stocks) / batch.expected_stocks * 100.0, 4)
             if batch.expected_stocks
@@ -46,4 +50,6 @@ class MinuteCollector:
             status="complete" if coverage_pct >= 99.5 and sector_complete else "partial",
             error_summary=" | ".join(batch.errors),
         )
-        return self.hot.write_complete_batch(batch.stocks, sectors, status, started_at=started_at)
+        result = self.hot.write_complete_batch(batch.stocks, sectors, status, started_at=started_at)
+        write_collector_heartbeat(self.meta.path.parent.parent)
+        return result

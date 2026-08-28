@@ -12,6 +12,13 @@ class WorkbenchSettings(BaseModel):
     tdx_home: Path = Path("C:/new_tdx64")
     retention_trading_days: int = Field(default=30, ge=1, le=2500)
     quote_interval_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    priority_interval_seconds: float = Field(default=5.0, ge=1.0, le=15.0)
+    full_collect_interval_seconds: float = Field(default=45.0, ge=15.0, le=300.0)
+    priority_rank_pool: int = Field(default=80, ge=0, le=200)
+    priority_max_sectors: int = Field(default=80, ge=1, le=200)
+    priority_max_stocks: int = Field(default=1000, ge=1, le=1500)
+    priority_sector_members: int = Field(default=30, ge=1, le=100)
+    priority_linkage_members: int = Field(default=30, ge=1, le=100)
     minute_budget_seconds: float = Field(default=45.0, gt=0.0, le=55.0)
     normal_node_timeout_seconds: float = Field(default=3.0, gt=0.0, le=60.0)
     enhanced_node_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
@@ -19,6 +26,13 @@ class WorkbenchSettings(BaseModel):
     node_retry_count: int = Field(default=2, ge=0, le=10)
     enhanced_quote_enabled: bool = True
     quote_batch_size: int = Field(default=80, ge=1, le=80)
+    # 采集优先主力分钟资金；日 K 与分笔五层推算默认关闭
+    sync_history_bars_on_collect: bool = False
+    estimate_transaction_tiers: bool = False
+    # 板块主力/涨跌与旧版板块脉搏一致：MAC get_board_summary + 板块列表涨跌幅
+    sector_official_main_enabled: bool = True
+    intraday_full_minute_ratio: float = Field(default=0.85, ge=0.5, le=1.0)
+    tick_backfill_batch_size: int = Field(default=8, ge=1, le=40)
 
     @property
     def meta_db(self) -> Path:
@@ -45,4 +59,12 @@ def workbench_settings_from_environment() -> WorkbenchSettings:
         if not raw_value.strip():
             raise ValueError(f"{environment_name} must not be blank")
         values[field_name] = raw_value
-    return WorkbenchSettings.model_validate(values)
+    settings = WorkbenchSettings.model_validate(values)
+    return merge_user_config(settings)
+
+
+def merge_user_config(settings: WorkbenchSettings) -> WorkbenchSettings:
+    from workbench.storage.workbench_config import read_workbench_user_config
+
+    user_cfg = read_workbench_user_config(settings.data_dir)
+    return settings.model_copy(update={"tdx_home": Path(user_cfg.tdx_home)})

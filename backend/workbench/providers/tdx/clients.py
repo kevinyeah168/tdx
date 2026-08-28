@@ -5,6 +5,9 @@ from typing import Callable, Protocol, TypeAlias
 from easy_tdx import AsyncTdxClient, KlineCategory, MacClient, Market, TdxClient
 
 
+NETWORK_FULL_LIST_PAGE_LIMIT = 1_000_000
+
+
 class SyncTdxClient(Protocol):
     def connect(self) -> None: ...
 
@@ -63,6 +66,12 @@ class EnhancedProbeClient(SyncTdxClient, Protocol):
         start: int,
         count: int,
     ) -> object: ...
+
+
+def get_security_list_all_network(client: NormalProbeClient) -> object:
+    """Fetch every installed easy-tdx page while bypassing its ``pages='all'`` cache."""
+
+    return client.get_security_list_all(pages=NETWORK_FULL_LIST_PAGE_LIMIT)
 
 
 SyncClientFactory: TypeAlias = Callable[[str, int, float], SyncTdxClient]

@@ -2,18 +2,22 @@ export interface BoardItem {
   id: string
   name: string
   change_pct?: number | null
+  cum_main?: number | null
+  sector_type?: string | null
 }
 
 export interface FlowSeries {
   id: string
   name: string
   symbol?: string
+  sector_type?: string | null
   cum_main: number
   change_pct?: number | null
   values: (number | null)[]
   cum_tick?: number
   cum_mac?: number
   price?: number | null
+  price_values?: (number | null)[]
 }
 
 export type SectorSeries = FlowSeries
@@ -79,6 +83,7 @@ export interface StockDetail {
 export interface CatalogResponse {
   boards: BoardItem[]
   type?: string
+  searchHint?: string
 }
 
 export interface SelectedBoardsResponse {
@@ -94,6 +99,6 @@ export interface SelectedStocksResponse {
   stocks: BoardItem[]
 }
 
-export type BoardCatalogType = 'HY' | 'GN' | 'HY2'
+export type BoardCatalogType = 'HY' | 'GN' | 'HY2' | 'IDX'
 
 export type ViewTab = 'sector' | 'stock'

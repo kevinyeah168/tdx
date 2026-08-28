@@ -1,0 +1,32 @@
+[
+  {
+    "symbol": "SH600000",
+    "market": "SH",
+    "code": "600000",
+    "price": 10.5,
+    "pre_close": 10.0,
+    "volume": 1000,
+    "amount": 10500000,
+    "main_net_amount": 2500000
+  },
+  {
+    "symbol": "SZ000001",
+    "market": "SZ",
+    "code": "000001",
+    "price": 12.0,
+    "pre_close": 12.5,
+    "volume": 2000,
+    "amount": 24000000,
+    "main_net_amount": -1200000
+  },
+  {
+    "symbol": "BJ920001",
+    "market": "BJ",
+    "code": "920001",
+    "price": 8.0,
+    "pre_close": 8.0,
+    "volume": 500,
+    "amount": 4000000,
+    "main_net_amount": 100000
+  }
+]

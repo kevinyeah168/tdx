@@ -16,7 +16,11 @@ from easy_tdx.models.security import SecurityInfo
 import pytest
 
 from workbench.providers.tdx import probe as tdx_probe
-from workbench.providers.tdx.clients import NormalProbeClient
+from workbench.providers.tdx.clients import (
+    NETWORK_FULL_LIST_PAGE_LIMIT,
+    NormalProbeClient,
+    get_security_list_all_network,
+)
 from workbench.providers.tdx.probe_validation import (
     ENHANCED_ORDER_BOOK_ALIASES,
     normalize_protocol_aliases,
@@ -73,6 +77,54 @@ def test_installed_full_list_signature_and_real_page_mechanism(
     ]
     assert all(request for _, _, request in command_pages)
     assert set(result["market"]) == {Market.SH, Market.SZ}
+
+
+def test_network_full_list_path_bypasses_installed_easy_tdx_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TdxClient(
+        host="contract.invalid",
+        port=7709,
+        timeout=0.1,
+        auto_reconnect=False,
+    )
+    starts: list[tuple[Market, int]] = []
+
+    def cache_access(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("live capability evidence must not access the cache")
+
+    monkeypatch.setattr(easy_client_module, "_load_cache", cache_access)
+    monkeypatch.setattr(easy_client_module, "_save_cache", cache_access)
+    monkeypatch.setattr(client, "get_report_file", lambda _name: b"")
+    monkeypatch.setattr(client, "get_security_count", lambda _market: 1001)
+
+    def execute(command: Any) -> list[SecurityInfo]:
+        assert isinstance(command, GetSecurityListCmd)
+        assert command.build_request()
+        starts.append((command.market, command.start))
+        return [
+            SecurityInfo(
+                market=command.market,
+                code="600000" if command.market is Market.SH else "000001",
+                name="网络契约样本",
+                volunit=100,
+                decimal_point=2,
+                pre_close=12.0,
+            )
+        ]
+
+    monkeypatch.setattr(client, "_execute", execute)
+
+    result = get_security_list_all_network(client)
+
+    assert NETWORK_FULL_LIST_PAGE_LIMIT > 2
+    assert starts == [
+        (Market.SH, 0),
+        (Market.SH, 1000),
+        (Market.SZ, 0),
+        (Market.SZ, 1000),
+    ]
+    assert len(result) == 4
 
 
 def test_real_mac_quote_and_order_book_command_construction(

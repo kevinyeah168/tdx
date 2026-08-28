@@ -31,7 +31,7 @@ const themeIcon = computed(() =>
 <template>
   <header class="mb-3 flex items-center justify-between gap-4 px-1">
     <h1 class="m-0 text-lg font-700 tracking-tight text-[var(--text)] lg:text-xl">
-      板块脉搏-TDX
+      板块脉搏
     </h1>
 
     <NSpace align="center" :size="8" class="shrink-0">

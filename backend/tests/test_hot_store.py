@@ -377,6 +377,26 @@ def test_reduced_retry_replaces_the_entire_minute_snapshot(tmp_path: Path) -> No
     assert store.sector_fund_series("2026-08-20", "881002") == []
 
 
+def test_sector_fund_series_hides_closing_minute_during_live_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trade_date = date.today().isoformat()
+    store = HotStore(tmp_path / f"{trade_date}.sqlite")
+    store.initialize()
+
+    def sector_at(minute: str) -> SectorMinute:
+        record = sector_record(batch_id=f"{trade_date}Tbackfill-tick")
+        return record.model_copy(update={"trade_date": date.today(), "minute": minute})
+
+    store.write_sectors([sector_at("09:30"), sector_at("09:50"), sector_at("15:00")])
+
+    rows = store.sector_fund_series(trade_date, "881001")
+    minutes = [row["minute"] for row in rows]
+    assert "15:00" not in minutes
+    assert store.purge_intraday_closing_minutes(trade_date) >= 1
+    assert "15:00" not in [row["minute"] for row in store.sector_fund_series(trade_date, "881001")]
+
+
 def test_failed_retry_retains_the_previously_committed_snapshot_and_status(tmp_path: Path) -> None:
     store = HotStore(tmp_path / "2026-08-20.sqlite")
     store.initialize()

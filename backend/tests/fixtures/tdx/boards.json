@@ -1,0 +1,5 @@
+[
+  {"sector_id": "881001", "name": "银行", "sector_type": "industry"},
+  {"sector_id": "885001", "name": "人工智能", "sector_type": "concept"},
+  {"sector_id": "881001", "name": "银行重复", "sector_type": "industry"}
+]

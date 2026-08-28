@@ -7,12 +7,15 @@ from typing import Any, cast
 from easy_tdx import KlineCategory, Market
 from easy_tdx.codec.bitmap import Fields, normalize_fields
 import pandas as pd
+import pytest
 
+from workbench.providers.tdx import probe as tdx_probe
 from workbench.providers.tdx.probe import (
     enhanced_handicap_plan,
     probe_tdx_capabilities,
 )
 from workbench.providers.tdx.probe_models import CAPABILITY_NAMES, TdxCapabilityReport
+from workbench.providers.tdx.probe_worker import InlineTestSourceExecutor
 
 
 CAPTURED_AT = datetime(
@@ -279,17 +282,19 @@ def run_probe(
     normal: FakeNormalProbeClient | None = None,
     enhanced: FakeEnhancedProbeClient | None = None,
     clock: Callable[[], float] | None = None,
-    overall_deadline_seconds: float = 120.0,
-    capability_deadline_seconds: float = 20.0,
+    overall_hard_deadline_seconds: float = 120.0,
+    capability_hard_deadline_seconds: float = 20.0,
 ) -> TdxCapabilityReport:
     return probe_tdx_capabilities(
-        FakePool(normal or FakeNormalProbeClient()),
-        FakePool(enhanced or FakeEnhancedProbeClient()),
+        source_executor=InlineTestSourceExecutor(
+            FakePool(normal or FakeNormalProbeClient()),
+            FakePool(enhanced or FakeEnhancedProbeClient()),
+        ),
         clock=clock or StepClock(),
         captured_at=CAPTURED_AT,
         easy_tdx_version="1.20.7",
-        overall_deadline_seconds=overall_deadline_seconds,
-        capability_deadline_seconds=capability_deadline_seconds,
+        overall_hard_deadline_seconds=overall_hard_deadline_seconds,
+        capability_hard_deadline_seconds=capability_hard_deadline_seconds,
     )
 
 
@@ -299,7 +304,8 @@ def test_probe_uses_full_catalog_and_returns_strict_report_with_discovered_board
 
     report = run_probe(normal=normal, enhanced=enhanced)
 
-    assert normal.full_list_calls == ["all"]
+    assert len(normal.full_list_calls) == 1
+    assert isinstance(normal.full_list_calls[0], int)
     assert report.manifest.sample_symbol == "SH600000"
     assert report.manifest.discovered_board is not None
     assert report.manifest.discovered_board.id == "881777"
@@ -398,8 +404,8 @@ def test_overall_deadline_marks_remaining_capabilities_controlled_unavailable() 
     report = run_probe(
         normal=normal,
         clock=clock,
-        overall_deadline_seconds=1.0,
-        capability_deadline_seconds=1.0,
+        overall_hard_deadline_seconds=1.0,
+        capability_hard_deadline_seconds=1.0,
     )
 
     assert report.capabilities.security_catalog.available is True
@@ -412,7 +418,8 @@ def test_overall_deadline_marks_remaining_capabilities_controlled_unavailable() 
         assert "ProbeDeadlineExceeded" in result.error
         assert len(outcomes) == 1
         assert outcomes[0].source == "probe.deadline"
-        assert outcomes[0].status == "failed"
+        assert outcomes[0].attempted is False
+        assert outcomes[0].status == "skipped"
 
 
 def test_per_capability_deadline_stops_later_fallback_source_attempt() -> None:
@@ -430,11 +437,65 @@ def test_per_capability_deadline_stops_later_fallback_source_attempt() -> None:
     report = run_probe(
         normal=SlowNormalQuote(),
         clock=clock,
-        overall_deadline_seconds=100.0,
-        capability_deadline_seconds=1.0,
+        overall_hard_deadline_seconds=100.0,
+        capability_hard_deadline_seconds=1.0,
     )
 
     assert report.capabilities.quotes.available is True
     outcomes = report.manifest.source_outcomes.quotes
-    assert [outcome.status for outcome in outcomes] == ["succeeded", "failed"]
+    assert [outcome.status for outcome in outcomes] == ["succeeded", "skipped"]
+    assert outcomes[1].attempted is False
     assert "ProbeDeadlineExceeded" in (outcomes[1].error or "")
+
+
+def test_board_dependency_skip_is_not_an_attempted_failure() -> None:
+    report = run_probe(
+        enhanced=FakeEnhancedProbeClient({"get_board_list"}),
+    )
+
+    outcome = report.manifest.source_outcomes.board_members[0]
+    assert outcome.source == "tdx.enhanced.board-members"
+    assert outcome.attempted is False
+    assert outcome.status == "skipped"
+    assert "discovery" in (outcome.error or "")
+
+
+def test_board_model_failure_is_isolated_and_later_capabilities_continue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_board(**_kwargs: object) -> object:
+        raise ValueError("unexpected board model failure at 192.0.2.1")
+
+    monkeypatch.setattr(tdx_probe, "DiscoveredBoard", invalid_board)
+
+    report = run_probe()
+
+    outcomes = report.manifest.source_outcomes.board_list
+    assert outcomes[0].source == "tdx.enhanced.board-list"
+    assert outcomes[0].status == "succeeded"
+    assert outcomes[-1].source == "probe.capability-isolation"
+    assert outcomes[-1].status == "failed"
+    assert "<host redacted>" in (outcomes[-1].error or "")
+    assert report.capabilities.board_list.available is False
+    assert report.manifest.source_outcomes.board_members[0].status == "skipped"
+    assert report.capabilities.quotes.available is True
+
+
+def test_enhanced_handicap_plan_failure_preserves_normal_order_book_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_plan() -> object:
+        raise OverflowError("installed bitmap command construction failed")
+
+    monkeypatch.setattr(tdx_probe, "enhanced_handicap_plan", fail_plan)
+
+    report = run_probe()
+
+    outcomes = report.manifest.source_outcomes.order_book
+    assert [outcome.source for outcome in outcomes] == [
+        "tdx.normal.order-book",
+        "tdx.enhanced.order-book",
+    ]
+    assert [outcome.status for outcome in outcomes] == ["succeeded", "failed"]
+    assert "OverflowError" in (outcomes[1].error or "")
+    assert report.capabilities.order_book.available is True

@@ -10,6 +10,8 @@ import type {
   FlowSeries,
 } from '@/types/board'
 
+const WORKBENCH_MODE = import.meta.env.VITE_WORKBENCH === 'true'
+
 async function parseJson<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json() as Promise<T>
@@ -101,7 +103,17 @@ export function normalizeBoard(data: Partial<BoardPayload>): BoardPayload {
 export async function fetchBoard(opts?: {
   stockDate?: string | null
   sectorDate?: string | null
+  sectorSourceMode?: 'auto' | 'selected'
+  stockSourceMode?: 'linkage' | 'selected'
+  linkageSectorId?: string | null
+  autoSectorCount?: number
+  linkageTopK?: number
+  replayMinute?: string | null
 }): Promise<BoardPayload> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchBoard } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchBoard(opts)
+  }
   const params = new URLSearchParams()
   if (opts?.stockDate) params.set('stock_date', opts.stockDate)
   if (opts?.sectorDate) params.set('sector_date', opts.sectorDate)
@@ -157,17 +169,29 @@ export async function fetchBoardCatalog(
   q = '',
   limit = 300,
 ): Promise<CatalogResponse> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchBoardCatalog } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchBoardCatalog(type, q, limit)
+  }
   const params = new URLSearchParams({ type, q, limit: String(limit) })
   const res = await fetch(`/api/board-catalog?${params}`)
   return parseJson<CatalogResponse>(res)
 }
 
 export async function fetchSelectedBoards(): Promise<SelectedBoardsResponse> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchSelectedBoards } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchSelectedBoards()
+  }
   const res = await fetch('/api/selected-boards')
   return parseJson<SelectedBoardsResponse>(res)
 }
 
 export async function saveSelectedBoards(boards: BoardItem[]): Promise<void> {
+  if (WORKBENCH_MODE) {
+    const { saveWorkbenchSelectedBoards } = await import('@/api/workbenchBoard')
+    return saveWorkbenchSelectedBoards(boards)
+  }
   await fetch('/api/selected-boards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -176,17 +200,29 @@ export async function saveSelectedBoards(boards: BoardItem[]): Promise<void> {
 }
 
 export async function fetchStockCatalog(q = '', limit = 50): Promise<StockCatalogResponse> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchStockCatalog } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchStockCatalog(q, limit)
+  }
   const params = new URLSearchParams({ q, limit: String(limit) })
   const res = await fetch(`/api/stock-catalog?${params}`)
   return parseJson<StockCatalogResponse>(res)
 }
 
 export async function fetchSelectedStocks(): Promise<SelectedStocksResponse> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchSelectedStocks } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchSelectedStocks()
+  }
   const res = await fetch('/api/selected-stocks')
   return parseJson<SelectedStocksResponse>(res)
 }
 
 export async function saveSelectedStocks(stocks: BoardItem[]): Promise<void> {
+  if (WORKBENCH_MODE) {
+    const { saveWorkbenchSelectedStocks } = await import('@/api/workbenchBoard')
+    return saveWorkbenchSelectedStocks(stocks)
+  }
   await fetch('/api/selected-stocks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -195,10 +231,18 @@ export async function saveSelectedStocks(stocks: BoardItem[]): Promise<void> {
 }
 
 export async function refreshBoardData(): Promise<void> {
+  if (WORKBENCH_MODE) {
+    const { refreshWorkbenchBoardData } = await import('@/api/workbenchBoard')
+    return refreshWorkbenchBoardData()
+  }
   await fetch('/api/refresh', { method: 'POST' })
 }
 
 export async function fetchStock(symbol: string, date?: string | null): Promise<StockDetail | null> {
+  if (WORKBENCH_MODE) {
+    const { fetchWorkbenchStock } = await import('@/api/workbenchBoard')
+    return fetchWorkbenchStock(symbol, date)
+  }
   const params = new URLSearchParams()
   if (date) params.set('date', date)
   const qs = params.toString()

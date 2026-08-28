@@ -226,6 +226,11 @@ def test_committed_real_fixture_matches_strict_generated_schema_and_privacy_audi
     for _, result in fixture.capabilities:
         assert result.latency_ms == round(result.latency_ms, 3)
         assert len(result.sample_fields) <= MAX_SAMPLE_FIELDS
+    catalog_outcome = fixture.manifest.source_outcomes.security_catalog[0]
+    assert catalog_outcome.attempted is True
+    assert catalog_outcome.status == "failed"
+    assert "SourceHardDeadlineExceeded" in (catalog_outcome.error or "")
+    assert fixture.capabilities.security_catalog.latency_ms <= 20_100.0
 
     payload = json.loads(raw)
     assert set(payload) == {"manifest", "capabilities"}
@@ -246,7 +251,8 @@ def test_committed_real_fixture_matches_strict_generated_schema_and_privacy_audi
     assert "date" in readme.lower()
     assert "upper bound" in readme.lower()
     assert "--max-node-attempts" in readme
-    assert "--overall-deadline-seconds" in readme
+    assert "--overall-hard-deadline-seconds" in readme
+    assert "--worker-termination-grace-seconds" in readme
     assert "2026-08-20" not in readme
     assert "881234" not in readme
 

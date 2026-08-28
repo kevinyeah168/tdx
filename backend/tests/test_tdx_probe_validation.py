@@ -18,6 +18,7 @@ from workbench.providers.tdx.probe_validation import (
     validate_order_book,
     validate_quotes,
     validate_security_catalog,
+    validate_transactions,
 )
 
 
@@ -197,6 +198,57 @@ def test_minute_data_accepts_parseable_datetime_positive_price_and_nonnegative_v
 @pytest.mark.parametrize(
     "mutation",
     [
+        {"market": 0},
+        {"code": "000001"},
+        {"time": "25:01:02"},
+        {"time": "not-a-time"},
+        {"price": math.nan},
+        {"price": 0.0},
+        {"vol": -1},
+        {"vol": math.inf},
+    ],
+)
+def test_transactions_reject_invalid_context_time_price_and_volume(
+    mutation: dict[str, object],
+) -> None:
+    row: dict[str, object] = {
+        "market": 1,
+        "code": "600000",
+        "time": "14:59:01",
+        "price": 12.34,
+        "vol": 100,
+    }
+    row.update(mutation)
+
+    with pytest.raises(CapabilityUnavailable):
+        validate_transactions(
+            [row],
+            expected_market=1,
+            expected_code="600000",
+        )
+
+
+def test_transactions_accept_parseable_time_and_requested_context() -> None:
+    evidence = validate_transactions(
+        [
+            {
+                "market": 1,
+                "code": "600000",
+                "time": "09:30",
+                "price": 12.34,
+                "vol": 0,
+            }
+        ],
+        expected_market=1,
+        expected_code="600000",
+    )
+
+    assert evidence.sample_fields == ["market", "code", "time", "price", "vol"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
         {"code": "000001"},
         {"market": 0},
         {"datetime": "2026-02-30"},
@@ -253,6 +305,29 @@ def test_order_book_requires_finite_usable_levels_and_requested_context() -> Non
                 expected_code="600000",
                 levels=5,
             )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"bid2_price": 12.31},
+        {"ask2_price": 12.33},
+        {"bid1_price": 12.40},
+    ],
+)
+def test_order_book_rejects_unsorted_or_crossed_prices(
+    mutation: dict[str, object],
+) -> None:
+    row = canonical_order_book(levels=2)
+    row.update(mutation)
+
+    with pytest.raises(CapabilityUnavailable):
+        validate_order_book(
+            [row],
+            expected_market=1,
+            expected_code="600000",
+            levels=2,
+        )
 
 
 def test_order_book_normalizes_normal_and_ambiguous_enhanced_aliases() -> None:

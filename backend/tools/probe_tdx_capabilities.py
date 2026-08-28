@@ -18,29 +18,27 @@ from easy_tdx.config import get_port
 from easy_tdx.transport.sync import KNOWN_HOSTS, MAC_HOSTS
 
 from workbench.config import WorkbenchSettings
-from workbench.providers.tdx.clients import EnhancedProbeClient, NormalProbeClient
-from workbench.providers.tdx.node_pool import MacNodePool, NodeTarget, TdxNodePool
+from workbench.providers.tdx.node_pool import NodeTarget
 from workbench.providers.tdx.probe import probe_tdx_capabilities
 from workbench.providers.tdx.probe_models import TdxCapabilityReport
 from workbench.providers.tdx.probe_validation import sanitized_error
+from workbench.providers.tdx.probe_worker import (
+    LiveSourceExecutorConfig,
+    ProcessSourceExecutor,
+)
 
 
 ProbeRunner = Callable[..., TdxCapabilityReport]
 
 DEFAULT_MAX_NODE_ATTEMPTS = 2
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 3.0
-DEFAULT_OVERALL_DEADLINE_SECONDS = 120.0
-DEFAULT_CAPABILITY_DEADLINE_SECONDS = 20.0
+DEFAULT_OVERALL_HARD_DEADLINE_SECONDS = 120.0
+DEFAULT_CAPABILITY_HARD_DEADLINE_SECONDS = 20.0
+DEFAULT_WORKER_TERMINATION_GRACE_SECONDS = 0.1
 
 
 class ProbeSetupError(RuntimeError):
     pass
-
-
-class ProbeCleanupError(RuntimeError):
-    def __init__(self, errors: Sequence[BaseException]) -> None:
-        self.errors = tuple(errors)
-        super().__init__(f"{len(self.errors)} TDX probe pool cleanup operation(s) failed")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,16 +60,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="socket timeout for each target attempt (default: 3.0)",
     )
     parser.add_argument(
-        "--overall-deadline-seconds",
+        "--overall-hard-deadline-seconds",
         type=_positive_float,
-        default=DEFAULT_OVERALL_DEADLINE_SECONDS,
-        help="overall cooperative probe deadline (default: 120.0)",
+        default=DEFAULT_OVERALL_HARD_DEADLINE_SECONDS,
+        help="overall wall-clock source execution deadline (default: 120.0)",
     )
     parser.add_argument(
-        "--capability-deadline-seconds",
+        "--capability-hard-deadline-seconds",
         type=_positive_float,
-        default=DEFAULT_CAPABILITY_DEADLINE_SECONDS,
-        help="cooperative deadline per capability (default: 20.0)",
+        default=DEFAULT_CAPABILITY_HARD_DEADLINE_SECONDS,
+        help="wall-clock source execution deadline per capability (default: 20.0)",
+    )
+    parser.add_argument(
+        "--worker-termination-grace-seconds",
+        type=_positive_float,
+        default=DEFAULT_WORKER_TERMINATION_GRACE_SECONDS,
+        help="bounded terminate/kill cleanup grace after a source timeout (default: 0.1)",
     )
     return parser
 
@@ -88,8 +92,13 @@ def run(
             options.tdx_home,
             max_node_attempts=options.max_node_attempts,
             socket_timeout_seconds=options.socket_timeout_seconds,
-            overall_deadline_seconds=options.overall_deadline_seconds,
-            capability_deadline_seconds=options.capability_deadline_seconds,
+            overall_hard_deadline_seconds=options.overall_hard_deadline_seconds,
+            capability_hard_deadline_seconds=(
+                options.capability_hard_deadline_seconds
+            ),
+            worker_termination_grace_seconds=(
+                options.worker_termination_grace_seconds
+            ),
         )
         report = TdxCapabilityReport.model_validate(report)
     except Exception as exc:
@@ -109,14 +118,24 @@ def run_live_probe(
     *,
     max_node_attempts: int = DEFAULT_MAX_NODE_ATTEMPTS,
     socket_timeout_seconds: float = DEFAULT_SOCKET_TIMEOUT_SECONDS,
-    overall_deadline_seconds: float = DEFAULT_OVERALL_DEADLINE_SECONDS,
-    capability_deadline_seconds: float = DEFAULT_CAPABILITY_DEADLINE_SECONDS,
+    overall_hard_deadline_seconds: float = DEFAULT_OVERALL_HARD_DEADLINE_SECONDS,
+    capability_hard_deadline_seconds: float = (
+        DEFAULT_CAPABILITY_HARD_DEADLINE_SECONDS
+    ),
+    worker_termination_grace_seconds: float = (
+        DEFAULT_WORKER_TERMINATION_GRACE_SECONDS
+    ),
 ) -> TdxCapabilityReport:
     _validate_positive_integer("max_node_attempts", max_node_attempts)
     _validate_positive_number("socket_timeout_seconds", socket_timeout_seconds)
-    _validate_positive_number("overall_deadline_seconds", overall_deadline_seconds)
     _validate_positive_number(
-        "capability_deadline_seconds", capability_deadline_seconds
+        "overall_hard_deadline_seconds", overall_hard_deadline_seconds
+    )
+    _validate_positive_number(
+        "capability_hard_deadline_seconds", capability_hard_deadline_seconds
+    )
+    _validate_positive_number(
+        "worker_termination_grace_seconds", worker_termination_grace_seconds
     )
     settings = WorkbenchSettings(tdx_home=tdx_home)
     port = get_port()
@@ -129,43 +148,21 @@ def run_live_probe(
         NodeTarget(address=address, port=port)
         for address in MAC_HOSTS[:target_limit]
     ]
-    normal_pool: TdxNodePool[NormalProbeClient] = TdxNodePool(
-        normal_targets,
-        timeout_seconds=socket_timeout_seconds,
+    config = LiveSourceExecutorConfig(
+        normal_targets=tuple(normal_targets),
+        enhanced_targets=tuple(enhanced_targets),
+        socket_timeout_seconds=socket_timeout_seconds,
         failure_threshold=max(settings.node_retry_count, 1),
     )
-    enhanced_pool: MacNodePool[EnhancedProbeClient] = MacNodePool(
-        enhanced_targets,
-        timeout_seconds=socket_timeout_seconds,
-        failure_threshold=max(settings.node_retry_count, 1),
+    source_executor = ProcessSourceExecutor(
+        config,
+        termination_grace_seconds=worker_termination_grace_seconds,
     )
-    try:
-        report = probe_tdx_capabilities(
-            normal_pool,
-            enhanced_pool,
-            overall_deadline_seconds=overall_deadline_seconds,
-            capability_deadline_seconds=capability_deadline_seconds,
-        )
-    except BaseException as primary:
-        try:
-            _close_probe_pools(normal_pool, enhanced_pool)
-        except ProbeCleanupError as cleanup:
-            raise primary from cleanup
-        raise
-    _close_probe_pools(normal_pool, enhanced_pool)
-    return report
-
-
-def _close_probe_pools(normal_pool: object, enhanced_pool: object) -> None:
-    errors: list[BaseException] = []
-    for pool in (normal_pool, enhanced_pool):
-        try:
-            close = getattr(pool, "close")
-            close()
-        except BaseException as exc:
-            errors.append(exc)
-    if errors:
-        raise ProbeCleanupError(errors)
+    return probe_tdx_capabilities(
+        source_executor=source_executor,
+        overall_hard_deadline_seconds=overall_hard_deadline_seconds,
+        capability_hard_deadline_seconds=capability_hard_deadline_seconds,
+    )
 
 
 def _validate_tdx_home(tdx_home: Path) -> None:

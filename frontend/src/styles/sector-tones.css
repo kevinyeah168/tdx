@@ -1,0 +1,100 @@
+.sector-tone-industry {
+  --sector-tone: #2563eb;
+  --sector-tone-soft: color-mix(in srgb, #2563eb 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #2563eb 34%, var(--border));
+}
+
+.sector-tone-concept {
+  --sector-tone: #7c3aed;
+  --sector-tone-soft: color-mix(in srgb, #7c3aed 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #7c3aed 34%, var(--border));
+}
+
+.sector-tone-industry2 {
+  --sector-tone: #0891b2;
+  --sector-tone-soft: color-mix(in srgb, #0891b2 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #0891b2 34%, var(--border));
+}
+
+.sector-tone-classic_index {
+  --sector-tone: #d97706;
+  --sector-tone-soft: color-mix(in srgb, #d97706 14%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #d97706 36%, var(--border));
+}
+
+.sector-tone-style {
+  --sector-tone: #db2777;
+  --sector-tone-soft: color-mix(in srgb, #db2777 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #db2777 34%, var(--border));
+}
+
+.sector-tone-region {
+  --sector-tone: #059669;
+  --sector-tone-soft: color-mix(in srgb, #059669 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #059669 34%, var(--border));
+}
+
+.sector-tone-default {
+  --sector-tone: #64748b;
+  --sector-tone-soft: color-mix(in srgb, #64748b 12%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #64748b 30%, var(--border));
+}
+
+.sector-type-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: #fff;
+  background: var(--sector-tone);
+}
+
+.sector-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 30px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--sector-tone-border);
+  background: var(--sector-tone-soft);
+}
+
+.sector-chip-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.sector-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sector-tone) 16%, transparent);
+  color: var(--sector-tone);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.sector-chip-close:hover {
+  background: color-mix(in srgb, var(--sector-tone) 28%, transparent);
+}

@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS catalog_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version TEXT NOT NULL
+    version TEXT NOT NULL,
+    synced_at TEXT,
+    source TEXT NOT NULL DEFAULT 'unknown',
+    stale INTEGER NOT NULL DEFAULT 0,
+    error_summary TEXT
 );
 """
 

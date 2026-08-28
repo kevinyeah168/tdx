@@ -1,0 +1,7 @@
+[
+  {"hour": 9, "minute": 31, "price": 10.5, "vol": 120, "buyorsell": 0},
+  {"hour": 9, "minute": 31, "price": 10.5, "vol": 120, "buyorsell": 0},
+  {"hour": 9, "minute": 31, "price": 10.4, "vol": 500, "buyorsell": 1},
+  {"hour": 9, "minute": 31, "price": 10.6, "vol": 30, "buyorsell": 0},
+  {"hour": 9, "minute": 31, "price": 10.2, "vol": 2000, "buyorsell": 0}
+]

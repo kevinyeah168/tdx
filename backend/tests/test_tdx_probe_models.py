@@ -110,6 +110,51 @@ def test_source_outcome_rejects_inconsistent_status_and_error(
         )
 
 
+def test_source_outcome_models_attempted_failure_and_unattempted_skip() -> None:
+    failure = SourceOutcome(
+        source="tdx.normal.quotes",
+        attempted=True,
+        status="failed",
+        evidence=[],
+        error="RuntimeError: endpoint unavailable",
+    )
+    skipped = SourceOutcome(
+        source="tdx.enhanced.quotes",
+        attempted=False,
+        status="skipped",
+        evidence=[],
+        error="ProbeDeadlineExceeded: capability deadline exhausted",
+    )
+
+    assert failure.attempted is True
+    assert skipped.attempted is False
+
+
+@pytest.mark.parametrize(
+    ("attempted", "status", "error"),
+    [
+        (False, "failed", "RuntimeError: contradictory"),
+        (True, "skipped", "ProbeDeadlineExceeded: contradictory"),
+        (False, "skipped", None),
+    ],
+)
+def test_source_outcome_rejects_invalid_skip_and_attempt_semantics(
+    attempted: bool,
+    status: str,
+    error: str | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        SourceOutcome.model_validate(
+            {
+                "source": "tdx.normal.quotes",
+                "attempted": attempted,
+                "status": status,
+                "evidence": [],
+                "error": error,
+            }
+        )
+
+
 def test_report_models_reject_extra_fields_and_missing_capability_outcomes() -> None:
     payload = source_outcomes().model_dump()
     payload.pop("order_book")

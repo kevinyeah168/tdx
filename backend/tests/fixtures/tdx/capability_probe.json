@@ -1,22 +1,22 @@
 {
   "manifest": {
-    "schema_version": "1.0",
-    "probe_version": "3.1.0",
-    "captured_at": "2026-08-21T08:49:45.525993+08:00",
+    "schema_version": "1.1",
+    "probe_version": "3.2.0",
+    "captured_at": "2026-08-21T09:28:45.376754+08:00",
     "easy_tdx_version": "1.20.7",
     "sample_symbol": "SH600000",
     "discovered_board": {
-      "id": "881234",
-      "name": "生物制品"
+      "id": "881075",
+      "name": "贵金属"
     },
     "source_outcomes": {
       "security_catalog": [
         {
-          "source": "tdx.normal.security-list-all",
+          "source": "tdx.normal.security-list-all-network",
           "attempted": true,
           "status": "failed",
           "evidence": [],
-          "error": "TdxNodePoolError: all normal TDX nodes are unavailable"
+          "error": "SourceHardDeadlineExceeded: source call exceeded its wall-clock hard deadline"
         }
       ],
       "board_list": [
@@ -120,7 +120,7 @@
           "attempted": true,
           "status": "failed",
           "evidence": [],
-          "error": "CapabilityUnavailable: protocol response was empty"
+          "error": "CapabilityUnavailable: transaction response was empty"
         }
       ],
       "minute_data": [
@@ -194,15 +194,15 @@
   "capabilities": {
     "security_catalog": {
       "available": false,
-      "source": "tdx.normal.security-list-all",
-      "latency_ms": 91906.0,
+      "source": "tdx.normal.security-list-all-network",
+      "latency_ms": 20000.0,
       "sample_fields": [],
-      "error": "TdxNodePoolError: all normal TDX nodes are unavailable"
+      "error": "SourceHardDeadlineExceeded: source call exceeded its wall-clock hard deadline"
     },
     "board_list": {
       "available": true,
       "source": "tdx.enhanced.board-list",
-      "latency_ms": 219.0,
+      "latency_ms": 922.0,
       "sample_fields": [
         "market",
         "code",
@@ -222,7 +222,7 @@
     "board_members": {
       "available": true,
       "source": "tdx.enhanced.board-members",
-      "latency_ms": 47.0,
+      "latency_ms": 875.0,
       "sample_fields": [
         "market",
         "code",
@@ -242,7 +242,7 @@
     "official_funds": {
       "available": true,
       "source": "tdx.enhanced.capital-flow",
-      "latency_ms": 31.0,
+      "latency_ms": 922.0,
       "sample_fields": [
         "date",
         "main_in",
@@ -262,7 +262,7 @@
     "quotes": {
       "available": true,
       "source": "tdx.enhanced.quotes",
-      "latency_ms": 235.0,
+      "latency_ms": 1812.0,
       "sample_fields": [
         "market",
         "code",
@@ -282,14 +282,14 @@
     "transactions": {
       "available": false,
       "source": "tdx.normal.transactions",
-      "latency_ms": 31.0,
+      "latency_ms": 907.0,
       "sample_fields": [],
-      "error": "CapabilityUnavailable: protocol response was empty"
+      "error": "CapabilityUnavailable: transaction response was empty"
     },
     "minute_data": {
       "available": true,
       "source": "tdx.normal.minute-data",
-      "latency_ms": 47.0,
+      "latency_ms": 1109.0,
       "sample_fields": [
         "datetime",
         "price",
@@ -300,7 +300,7 @@
     "bars": {
       "available": true,
       "source": "tdx.enhanced.kline",
-      "latency_ms": 78.0,
+      "latency_ms": 1906.0,
       "sample_fields": [
         "datetime",
         "open",
@@ -316,7 +316,7 @@
     "order_book": {
       "available": false,
       "source": "tdx.normal.order-book+tdx.enhanced.order-book",
-      "latency_ms": 78.0,
+      "latency_ms": 1828.0,
       "sample_fields": [],
       "error": "CapabilityUnavailable: all attempted sources failed"
     }
