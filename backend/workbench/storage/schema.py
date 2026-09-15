@@ -4,7 +4,7 @@ import sqlite3
 def configure_hot_connection(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA synchronous=NORMAL")
-    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute("PRAGMA busy_timeout=15000")
 
 
 META_SCHEMA = """
@@ -128,4 +128,21 @@ CREATE TABLE IF NOT EXISTS data_gap (
     resolved INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (entity_type, entity_id, trade_date, minute)
 );
+
+CREATE TABLE IF NOT EXISTS stock_gray_minute (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    code TEXT NOT NULL,
+    open_cum REAL NOT NULL,
+    dark_cum REAL NOT NULL,
+    total_cum REAL NOT NULL,
+    observed_at TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_gray_series
+ON stock_gray_minute(trade_date, symbol, minute);
 """

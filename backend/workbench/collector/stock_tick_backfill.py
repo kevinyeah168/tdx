@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 from easy_tdx import MacClient
 
 from workbench.collector.priority_targets import refresh_priority_stock_targets
-from workbench.collector.trading_clock import should_include_closing_minute, trading_minutes_for_day
+from workbench.collector.tick_backfill_selection import (
+    compute_full_day_threshold,
+    select_pending_tick_backfill,
+)
+from workbench.collector.trading_clock import should_include_closing_minute
 from workbench.config import WorkbenchSettings
 from workbench.providers.tdx.stock_tick_flow import build_stock_minutes_from_tick
 from workbench.storage.hot_store import HotStore
@@ -24,6 +28,7 @@ class StockTickBackfillBatchResult:
     skipped: int
     failed: list[str]
     minutes_written: int
+    unavailable: int = 0
 
 
 class _MacStockTickAdapter:
@@ -45,9 +50,7 @@ class StockTickBackfillService:
         self._enhanced_client: object | None = None
 
     def full_day_threshold(self) -> int:
-        expected = len(trading_minutes_for_day())
-        ratio = self._settings.intraday_full_minute_ratio
-        return max(30, int(expected * ratio))
+        return compute_full_day_threshold(self._settings)
 
     def resolve_targets(self) -> list[str]:
         return refresh_priority_stock_targets(
@@ -65,33 +68,37 @@ class StockTickBackfillService:
         *,
         symbols: list[str] | None = None,
         max_symbols: int | None = None,
+        force: bool = False,
     ) -> StockTickBackfillBatchResult:
-        today = datetime.now(SHANGHAI).date()
-        if trade_date != today:
-            return StockTickBackfillBatchResult(
-                trade_date=trade_date.isoformat(),
-                attempted=0,
-                backfilled=0,
-                skipped=0,
-                failed=["tick backfill only supports current trading day"],
-                minutes_written=0,
-            )
-
         targets = symbols or self.resolve_targets()
-        limit = max_symbols if max_symbols is not None else self._settings.tick_backfill_batch_size
+        today = datetime.now(SHANGHAI).date()
+        if max_symbols is not None:
+            limit = max_symbols
+        elif trade_date < today:
+            limit = len(targets)
+        else:
+            limit = self._settings.tick_backfill_batch_size
         threshold = self.full_day_threshold()
-        pending: list[str] = []
-        skipped = 0
-        for symbol in targets:
-            existing = self._hot.count_stock_minutes(trade_date.isoformat(), symbol)
-            if existing >= threshold:
-                skipped += 1
-                continue
-            pending.append(symbol)
-            if len(pending) >= limit:
-                break
+        trade_date_str = trade_date.isoformat()
+
+        def _stock_progress(symbol: str) -> int:
+            meaningful_tick = self._hot.count_stock_tick_backfill_minutes(trade_date_str, symbol)
+            if meaningful_tick:
+                return meaningful_tick
+            # Priority quote minutes already form the stock curve when tick momentum is empty.
+            return self._hot.count_stock_minutes(trade_date_str, symbol)
+
+        pending, skipped = select_pending_tick_backfill(
+            targets,
+            limit=limit,
+            threshold=threshold,
+            count_total_minutes=lambda symbol: self._hot.count_stock_minutes(trade_date_str, symbol),
+            count_tick_minutes=_stock_progress,
+            force=force,
+        )
 
         backfilled = 0
+        unavailable = 0
         failed: list[str] = []
         minutes_written = 0
         trade_date_int = int(trade_date.strftime("%Y%m%d"))
@@ -104,6 +111,7 @@ class StockTickBackfillService:
                 skipped=skipped,
                 failed=failed,
                 minutes_written=0,
+                unavailable=0,
             )
 
         with MacClient.from_best_host() as client:
@@ -119,8 +127,10 @@ class StockTickBackfillService:
                         include_closing_minute=include_closing,
                     )
                     if not records:
-                        failed.append(f"{symbol}: tick chart unavailable")
+                        # Zero-momentum stock ticks are expected; do not wipe priority data.
+                        unavailable += 1
                         continue
+                    self._hot.delete_stock_day(trade_date.isoformat(), symbol)
                     self._hot.write_stocks(records)
                     if not include_closing:
                         self._hot.delete_stock_minutes(
@@ -137,7 +147,8 @@ class StockTickBackfillService:
             trade_date=trade_date.isoformat(),
             attempted=len(pending),
             backfilled=backfilled,
-            skipped=skipped,
+            skipped=skipped + unavailable,
             failed=failed,
             minutes_written=minutes_written,
+            unavailable=unavailable,
         )

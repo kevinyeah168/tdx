@@ -35,6 +35,7 @@ def test_real_tdx_settings_load_from_workbench_prefixed_environment(
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
 
+    monkeypatch.setattr("workbench.config.merge_user_config", lambda settings: settings)
     settings = workbench_settings_from_environment()
 
     assert settings.tdx_home == Path("D:/tdx-custom")

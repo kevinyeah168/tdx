@@ -12,12 +12,14 @@ import {
   enrichBoardItems,
   loadAutoSectorCount,
   loadLinkageTopK,
-  loadSectorSourceMode,
   loadSelectedBoards,
-  loadSelectedStocks,
   loadStockSourceMode,
+  MAX_CHART_SECTORS,
+  normalizeChartVisibility,
+  chartVisibleCount,
   saveAutoSectorCount,
   saveLinkageTopK,
+  saveSelectedBoardsLocal,
   saveSectorSourceMode,
   saveStockSourceMode,
   syncLinkageSector,
@@ -26,6 +28,7 @@ import {
   type StockSourceMode,
 } from '@/api/workbenchBoard'
 import { WORKBENCH_REFRESH_SECONDS } from '@/constants/refresh'
+import { todayTradeDate } from '@/utils/tradeDate'
 import type {
   BoardCatalogType,
   BoardItem,
@@ -72,12 +75,17 @@ export const useBoardStore = defineStore('board', () => {
   const highlightedSector = ref<string | null>(null)
   const highlightedStock = ref<string | null>(null)
 
-  const sectorSourceMode = ref<SectorSourceMode>(loadSectorSourceMode())
-  const stockSourceMode = ref<StockSourceMode>(loadStockSourceMode())
+  const sectorSourceMode = ref<SectorSourceMode>('selected')
+  const stockSourceMode = ref<StockSourceMode>('linkage')
+  saveSectorSourceMode('selected')
+  if (loadStockSourceMode() !== 'linkage') {
+    saveStockSourceMode('linkage')
+  }
   const linkageSectorId = ref<string | null>(null)
   const linkageSectorName = ref<string | null>(null)
   const autoSectorCount = ref(loadAutoSectorCount())
-  const linkageTopK = ref(loadLinkageTopK())
+  const linkageTopK = ref(Math.min(loadLinkageTopK(), 20) || 20)
+  saveLinkageTopK(linkageTopK.value)
   const replayMinute = ref<string | null>(null)
 
   let stockLoadSeq = 0
@@ -85,9 +93,11 @@ export const useBoardStore = defineStore('board', () => {
   let boardLoadChain: Promise<void> = Promise.resolve()
 
   const isPanelBusy = computed(() => stockLoading.value || sectorLoading.value || loading.value)
+  /** @deprecated alias — some callers still use isBoardBusy */
+  const isBoardBusy = isPanelBusy
 
   const pickerOpen = ref(false)
-  const pickerType = ref<BoardCatalogType>('HY')
+  const pickerType = ref<BoardCatalogType>('ALL')
   const pickerQuery = ref('')
   const pickerCatalog = ref<BoardItem[]>([])
   const pickerSearchHint = ref<string | null>(null)
@@ -102,18 +112,11 @@ export const useBoardStore = defineStore('board', () => {
   const stockViewDate = ref<string | null>(null)
   const sectorViewDate = ref<string | null>(null)
 
-  const sectorModeLabel = computed(() =>
-    sectorSourceMode.value === 'selected'
-      ? '自选板块'
-      : `主力流入 · 前${autoSectorCount.value}`,
-  )
+  const sectorModeLabel = computed(() => '自选板块')
 
   const stockModeLabel = computed(() => {
-    if (stockSourceMode.value === 'linkage') {
-      const linked = board.value.sector_series.find((item) => item.id === linkageSectorId.value)
-      return linked ? `联动 · ${linked.name}` : '联动模式'
-    }
-    return board.value.stock_mode === 'selected' ? '自选个股' : '未选个股'
+    const linked = board.value.sector_series.find((item) => item.id === linkageSectorId.value)
+    return linked ? `联动 · ${linked.name}` : '联动成分股'
   })
 
   const currentTimeline = computed(() =>
@@ -145,14 +148,41 @@ export const useBoardStore = defineStore('board', () => {
     })
     const previous = boardLoadChain
     boardLoadChain = slot
+    // Snapshot seq before await/fetch so a later linkage click can invalidate stock/sector writes.
+    const stockSeqAtStart = opts?.stockSeq ?? stockLoadSeq
+    const sectorSeqAtStart = opts?.sectorSeq ?? sectorLoadSeq
     await previous
     try {
       const data = await fetchBoard(boardFetchOptions())
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
       if (opts?.sectorSeq != null && opts.sectorSeq !== sectorLoadSeq) return
-      board.value = { ...data, error: data.error ?? null }
-      if (data.stock_view_date) stockViewDate.value = data.stock_view_date
-      if (data.sector_view_date) sectorViewDate.value = data.sector_view_date
+
+      // Dedicated stock/sector loads may finish first; never clobber them with a stale full board.
+      const keepStock = stockLoadSeq !== stockSeqAtStart
+      const keepSector = sectorLoadSeq !== sectorSeqAtStart
+      board.value = {
+        ...data,
+        error: data.error ?? null,
+        sector_view_date: sectorViewDate.value ?? data.sector_view_date,
+        stock_view_date: stockViewDate.value ?? data.stock_view_date,
+        ...(keepStock
+          ? {
+              stock_series: board.value.stock_series,
+              stock_timeline: board.value.stock_timeline,
+              watchlist: board.value.watchlist,
+              stock_mode: board.value.stock_mode,
+              selected_stocks: board.value.selected_stocks,
+            }
+          : {}),
+        ...(keepSector
+          ? {
+              sector_series: board.value.sector_series,
+              timeline: board.value.timeline,
+              selected_boards: board.value.selected_boards,
+            }
+          : {}),
+      }
+      // View dates are controlled by panel pickers / TopBar — do not clobber from a stale response.
     } catch (error) {
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
       if (opts?.sectorSeq != null && opts.sectorSeq !== sectorLoadSeq) return
@@ -177,9 +207,8 @@ export const useBoardStore = defineStore('board', () => {
         watchlist: data.watchlist,
         stock_mode: data.stock_mode,
         selected_stocks: data.selected_stocks,
-        stock_view_date: data.stock_view_date,
+        stock_view_date: stockViewDate.value ?? data.stock_view_date,
       }
-      if (data.stock_view_date) stockViewDate.value = data.stock_view_date
     } catch (error) {
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
       board.value = {
@@ -245,8 +274,11 @@ export const useBoardStore = defineStore('board', () => {
       await withStockLoading('切换交易日…', async (seq) => {
         const data = await fetchBoard({ ...boardFetchOptions(), stockDate: date })
         if (seq !== stockLoadSeq) return
-        board.value = data
-        if (data.stock_view_date) stockViewDate.value = data.stock_view_date
+        board.value = {
+          ...data,
+          stock_view_date: date,
+          sector_view_date: sectorViewDate.value ?? data.sector_view_date,
+        }
       })
     } finally {
       loading.value = false
@@ -260,8 +292,11 @@ export const useBoardStore = defineStore('board', () => {
       await withSectorLoading('切换交易日…', async (seq) => {
         const data = await fetchBoard({ ...boardFetchOptions(), sectorDate: date })
         if (seq !== sectorLoadSeq) return
-        board.value = data
-        if (data.sector_view_date) sectorViewDate.value = data.sector_view_date
+        board.value = {
+          ...data,
+          sector_view_date: date,
+          stock_view_date: stockViewDate.value ?? data.stock_view_date,
+        }
       })
     } finally {
       loading.value = false
@@ -269,59 +304,76 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   async function setSectorSourceMode(mode: SectorSourceMode) {
-    if (sectorSourceMode.value === mode && mode === 'selected' && !loadSelectedBoards().length) {
+    // Home page is watchlist-only; ignore auto mode switches.
+    if (mode !== 'selected') {
+      mode = 'selected'
+    }
+    if (!loadSelectedBoards().length) {
       await openPicker()
       return
     }
-    sectorSourceMode.value = mode
-    saveSectorSourceMode(mode)
+    sectorSourceMode.value = 'selected'
+    saveSectorSourceMode('selected')
     loading.value = true
     try {
-      const hint = mode === 'auto' ? '加载主力流入榜…' : '加载自选板块…'
-      await withSectorLoading(hint, (seq) => loadBoard({ sectorSeq: seq }))
-      if (mode === 'selected' && !loadSelectedBoards().length) {
-        await openPicker()
-      }
+      await withSectorLoading('加载自选板块…', (seq) => loadBoard({ sectorSeq: seq }))
     } finally {
       loading.value = false
     }
   }
 
   async function setStockSourceMode(mode: StockSourceMode) {
-    if (stockSourceMode.value === mode && mode === 'selected' && !loadSelectedStocks().length) {
+    // Right panel defaults to linkage (top members of clicked sector).
+    stockSourceMode.value = 'linkage'
+    saveStockSourceMode('linkage')
+    if (mode === 'selected') {
       await openStockPicker()
       return
     }
-    stockSourceMode.value = mode
-    saveStockSourceMode(mode)
-    if (mode === 'selected') {
-      linkageSectorId.value = null
-      linkageSectorName.value = null
-    }
     loading.value = true
     try {
-      const hint = mode === 'linkage' ? '切换至联动模式…' : '加载自选个股…'
-      await withStockLoading(hint, (seq) => loadBoard({ stockSeq: seq }))
-      if (mode === 'selected' && !loadSelectedStocks().length) {
-        await openStockPicker()
-      }
+      await withStockLoading('切换至联动模式…', (seq) => loadBoard({ stockSeq: seq }))
     } finally {
       loading.value = false
     }
   }
 
   async function setReplayContext(tradeDate: string, minute: string | null) {
+    // Top-bar global date: sync both panels only when the global date actually changes.
+    const sectorChanged = sectorViewDate.value !== tradeDate
+    const stockChanged = stockViewDate.value !== tradeDate
     sectorViewDate.value = tradeDate
     stockViewDate.value = tradeDate
     replayMinute.value = minute
+    if (sectorChanged || stockChanged || !board.value.sector_series.length) {
+      await loadBoard()
+    }
+  }
+
+  /** Live-mode minute tick: never overwrite panel-selected historical dates. */
+  async function syncReplayMinute(minute: string | null) {
+    replayMinute.value = minute
+    if (isHistoricalSectorView() && isHistoricalStockView()) return
+    if (isHistoricalSectorView()) {
+      if (!isHistoricalStockView()) await loadStockPanel()
+      return
+    }
     await loadBoard()
   }
 
+  function isHistoricalSectorView(): boolean {
+    const date = sectorViewDate.value
+    return Boolean(date && date !== todayTradeDate())
+  }
+
+  function isHistoricalStockView(): boolean {
+    const date = stockViewDate.value
+    return Boolean(date && date !== todayTradeDate())
+  }
+
   async function selectSectorForLinkage(sectorId: string) {
-    if (stockSourceMode.value !== 'linkage') {
-      toggleHighlight(sectorId, 'sector')
-      return
-    }
+    stockSourceMode.value = 'linkage'
+    saveStockSourceMode('linkage')
 
     const sameLinkage = linkageSectorId.value === sectorId
     const sectorSoloActive = highlightedSector.value === sectorId
@@ -337,18 +389,30 @@ export const useBoardStore = defineStore('board', () => {
     highlightedSector.value = sectorId
 
     const sectorName =
-      board.value.sector_series.find((item) => item.id === sectorId)?.name || sectorId
+      board.value.sector_series.find((item) => item.id === sectorId)?.name ||
+      board.value.selected_boards.find((item) => item.id === sectorId)?.name ||
+      sectorId
 
     const linkageChanged = !sameLinkage
     linkageSectorId.value = sectorId
     linkageSectorName.value = sectorName
+
+    // Bump seq first so any in-flight loadBoard keeps its older snapshot and won't wipe stocks.
+    const seq = ++stockLoadSeq
+    stockLoading.value = true
+    stockLoadingHint.value = `加载 ${sectorName} 前 ${linkageTopK.value} 成分股…`
+
+    // Switching sector: clear old curves immediately (avoid flash of previous members).
     if (linkageChanged) {
+      board.value = {
+        ...board.value,
+        stock_series: [],
+        stock_timeline: [],
+        watchlist: [],
+      }
       void syncLinkageSector(sectorId, sectorName)
     }
 
-    const seq = ++stockLoadSeq
-    stockLoading.value = true
-    stockLoadingHint.value = `加载 ${sectorName} 成分股…`
     try {
       await loadStockPanel({ stockSeq: seq })
     } finally {
@@ -360,25 +424,81 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   async function loadCatalog() {
-    const query = pickerQuery.value.trim()
+    const query = String(pickerQuery.value ?? '').trim()
     if (isClassicIndexCodeQuery(query) && pickerType.value !== 'IDX') {
       pickerType.value = 'IDX'
       return
     }
-    const data = await fetchBoardCatalog(pickerType.value, query)
-    pickerCatalog.value = data.boards || []
-    pickerSearchHint.value = data.searchHint ?? null
+    try {
+      const data = await fetchBoardCatalog(pickerType.value, query)
+      pickerCatalog.value = data.boards || []
+      pickerSearchHint.value = data.searchHint ?? null
+    } catch (error) {
+      pickerCatalog.value = []
+      pickerSearchHint.value =
+        error instanceof Error ? `加载板块目录失败：${error.message}` : '加载板块目录失败'
+    }
   }
 
   async function openPicker() {
     pickerOpen.value = true
-    const data = await fetchSelectedBoards()
+    pickerSearchHint.value = null
     try {
-      const { fetchSectors } = await import('@/api/sectors')
-      const sectors = await fetchSectors()
-      pickerSelected.value = enrichBoardItems(data.boards || [], sectors.items)
+      // Prefer in-memory board selection, then local, then server seed.
+      let boards = [...(board.value.selected_boards || [])]
+      if (!boards.length) {
+        const local = await fetchSelectedBoards()
+        boards = [...(local.boards || [])]
+      }
+      if (!boards.length) {
+        try {
+          const response = await fetch('/api/v1/settings/ui-selected-boards')
+          if (response.ok) {
+            const payload = (await response.json()) as { boards?: BoardItem[] }
+            boards = (payload.boards || [])
+              .map((item) => ({
+                id: String(item.id || '').trim(),
+                name: String(item.name || item.id || '').trim(),
+              }))
+              .filter((item) => item.id)
+          }
+        } catch {
+          /* optional */
+        }
+      }
+      if (!boards.length) {
+        try {
+          const { fetchCollectionTargets } = await import('@/api/settings')
+          const { fetchSectors } = await import('@/api/sectors')
+          const [targets, sectors] = await Promise.all([fetchCollectionTargets(), fetchSectors()])
+          const byId = new Map(sectors.items.map((item) => [item.sector_id, item]))
+          boards = targets.sector_ids
+            .map((sectorId) => {
+              const hit = byId.get(sectorId)
+              return hit
+                ? { id: hit.sector_id, name: hit.name, sector_type: hit.sector_type }
+                : { id: sectorId, name: sectorId }
+            })
+            .filter((item) => item.id)
+        } catch {
+          /* optional */
+        }
+      }
+
+      try {
+        const { fetchSectors } = await import('@/api/sectors')
+        const sectors = await fetchSectors()
+        pickerSelected.value = normalizeChartVisibility(enrichBoardItems(boards, sectors.items))
+      } catch {
+        pickerSelected.value = normalizeChartVisibility(boards)
+      }
+      if (pickerSelected.value.length) {
+        const { saveSelectedBoardsLocal, saveSectorSourceMode } = await import('@/api/workbenchBoard')
+        saveSelectedBoardsLocal(pickerSelected.value)
+        saveSectorSourceMode('selected')
+      }
     } catch {
-      pickerSelected.value = [...(data.boards || [])]
+      pickerSelected.value = []
     }
     await loadCatalog()
   }
@@ -390,26 +510,64 @@ export const useBoardStore = defineStore('board', () => {
   function togglePick(item: BoardItem) {
     const idx = pickerSelected.value.findIndex((b) => b.id === item.id)
     if (idx >= 0) pickerSelected.value.splice(idx, 1)
-    else pickerSelected.value.push({ id: item.id, name: item.name, sector_type: item.sector_type })
+    else {
+      const visibleCount = chartVisibleCount(pickerSelected.value)
+      pickerSelected.value.push({
+        id: item.id,
+        name: item.name,
+        sector_type: item.sector_type,
+        chart_visible: visibleCount < MAX_CHART_SECTORS,
+      })
+    }
   }
 
   function isPicked(id: string) {
     return pickerSelected.value.some((b) => b.id === id)
   }
 
+  function isChartVisible(id: string) {
+    return pickerSelected.value.some((b) => b.id === id && b.chart_visible)
+  }
+
+  function toggleChartVisible(item: BoardItem) {
+    const target = pickerSelected.value.find((b) => b.id === item.id)
+    if (!target) return
+    if (target.chart_visible) {
+      target.chart_visible = false
+      return
+    }
+    if (chartVisibleCount(pickerSelected.value) >= MAX_CHART_SECTORS) {
+      return
+    }
+    target.chart_visible = true
+  }
+
+  async function toggleSectorChartVisible(sectorId: string, visible: boolean) {
+    const boards = normalizeChartVisibility([...(board.value.selected_boards ?? [])])
+    const target = boards.find((item) => item.id === sectorId)
+    if (!target) return
+    if (visible) {
+      if (chartVisibleCount(boards) >= MAX_CHART_SECTORS) return
+      target.chart_visible = true
+    } else {
+      target.chart_visible = false
+    }
+    const normalized = normalizeChartVisibility(boards)
+    board.value.selected_boards = normalized
+    saveSelectedBoardsLocal(normalized)
+    await saveSelectedBoards(normalized)
+    await withSectorLoading('更新图表…', (seq) => loadBoard({ sectorSeq: seq }))
+  }
+
   async function savePicker() {
     pickerSaving.value = true
     try {
-      await saveSelectedBoards(pickerSelected.value)
+      const normalized = normalizeChartVisibility(pickerSelected.value)
+      pickerSelected.value = normalized
+      await saveSelectedBoards(normalized)
       pickerOpen.value = false
-      if (!pickerSelected.value.length) {
-        await setSectorSourceMode('auto')
-        return
-      }
-      if (sectorSourceMode.value !== 'selected') {
-        await setSectorSourceMode('selected')
-        return
-      }
+      sectorSourceMode.value = 'selected'
+      saveSectorSourceMode('selected')
       await withSectorLoading('刷新自选板块…', (seq) => loadBoard({ sectorSeq: seq }))
     } finally {
       pickerSaving.value = false
@@ -420,7 +578,9 @@ export const useBoardStore = defineStore('board', () => {
     pickerSelected.value = []
     await saveSelectedBoards([])
     pickerOpen.value = false
-    await setSectorSourceMode('auto')
+    sectorSourceMode.value = 'selected'
+    saveSectorSourceMode('selected')
+    await withSectorLoading('清空自选…', (seq) => loadBoard({ sectorSeq: seq }))
   }
 
   async function loadStockCatalog() {
@@ -571,6 +731,7 @@ export const useBoardStore = defineStore('board', () => {
     currentTimeline,
     currentSeries,
     isPanelBusy,
+    isBoardBusy,
     loadBoard,
     loadStockPanel,
     loadCatalog,
@@ -578,6 +739,9 @@ export const useBoardStore = defineStore('board', () => {
     closePicker,
     togglePick,
     isPicked,
+    isChartVisible,
+    toggleChartVisible,
+    toggleSectorChartVisible,
     savePicker,
     clearPicker,
     loadStockCatalog,
@@ -592,6 +756,9 @@ export const useBoardStore = defineStore('board', () => {
     setSectorSourceMode,
     setStockSourceMode,
     setReplayContext,
+    syncReplayMinute,
+    isHistoricalSectorView,
+    isHistoricalStockView,
     selectSectorForLinkage,
     manualRefresh,
     setTab,

@@ -4,6 +4,13 @@ export function fmtPct(v: number | null | undefined): string {
   return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`
 }
 
+/** 主力净比（数值已是百分比口径，展示不加 %） */
+export function fmtNetRatio(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
+  return `${n > 0 ? '+' : ''}${n.toFixed(2)}`
+}
+
 export function fmtMoney(v: number | null | undefined): string {
   const n = Number(v || 0)
   const abs = Math.abs(n)
@@ -15,7 +22,8 @@ export function fmtMoney(v: number | null | undefined): string {
 
 /** 表格窄列展示：万/亿单位不保留多余小数，避免换行 */
 export function fmtMoneyCompact(v: number | null | undefined): string {
-  const n = Number(v || 0)
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
   const abs = Math.abs(n)
   const sign = n > 0 ? '+' : n < 0 ? '-' : ''
   if (abs >= 1e8) return `${sign}${(abs / 1e8).toFixed(2)}亿`
@@ -104,8 +112,9 @@ export function boardTypeLabel(board: {
   sector_mode?: string
   selected_boards?: unknown[]
 }): string {
-  if (board.sector_mode === 'selected') {
-    return `自选 ${(board.selected_boards || []).length} 个`
+  const selectedCount = (board.selected_boards || []).length
+  if (board.sector_mode === 'selected' || selectedCount > 0) {
+    return `自选 ${selectedCount} 个`
   }
   const type = board.board_type || 'HY'
   return `自动 · ${BOARD_TYPE_LABELS[type] || type}`

@@ -292,6 +292,19 @@ class StockMinute(NormalizedModel):
     batch_id: NonBlankText
 
 
+class StockGrayMinute(NormalizedModel):
+    trade_date: date
+    minute: Minute
+    symbol: NonBlankText
+    code: NonBlankText
+    open_cum: FiniteFloat
+    dark_cum: FiniteFloat
+    total_cum: FiniteFloat
+    observed_at: datetime
+    batch_id: NonBlankText
+    source: NonBlankText = "eastmoney:graymarket:darktrade"
+
+
 class SectorMinute(NormalizedModel):
     trade_date: date
     minute: Minute

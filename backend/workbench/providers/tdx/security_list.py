@@ -12,6 +12,7 @@ from easy_tdx.transport.sync import ping_all
 
 from workbench.config import WorkbenchSettings
 from workbench.providers.tdx.symbols import is_a_share, market_label, normalize_code, to_symbol
+from workbench.providers.tdx.text_clean import clean_tdx_text
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def _fetch_market_rows(
             code = normalize_code(str(row.get("code", "")))
             if not is_a_share(label, code):
                 continue
-            name = str(row.get("name") or code).strip()
+            name = clean_tdx_text(row.get("name") or code, fallback=code)
             market_rows.append({"market": label, "code": code, "name": name, "active": True})
         time.sleep(page_pause_seconds)
     return market_rows

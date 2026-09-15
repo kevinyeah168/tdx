@@ -16,7 +16,7 @@ def test_configure_hot_connection_applies_connection_scoped_pragmas(tmp_path: Pa
 
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 1
-        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 15000
     finally:
         connection.close()
 

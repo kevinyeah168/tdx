@@ -23,6 +23,29 @@ def test_fetch_board_quote_map_reads_price_and_pre_close() -> None:
     assert quote_map["881319"] == (100.0, 103.13)
 
 
+def test_build_official_sector_minutes_prefers_yuntu_main_when_available() -> None:
+    previous: dict[str, float] = {"880656": 0.0}
+    observed_at = datetime(2026, 8, 24, 15, 0, tzinfo=timezone.utc)
+    yuntu_main = {"880656": -47_000_000_000.0}
+
+    sectors, errors = build_official_sector_minutes(
+        trade_date=date(2026, 8, 24),
+        minute="15:00",
+        sectors=[Sector(sector_id="880656", name="CPO", sector_type="concept")],
+        member_counts={"880656": 42},
+        quote_map={"880656": (100.0, 98.0)},
+        summaries={"880656": {"main_net_amount": -21_000_000_000.0, "member_count": 42}},
+        previous_main_cum=previous,
+        observed_at=observed_at,
+        batch_id="2026-08-24T15:00",
+        yuntu_main=yuntu_main,
+    )
+
+    assert errors == []
+    assert sectors[0].funds.main.cumulative == -47_000_000_000.0
+    assert sectors[0].funds.main.source == "tdx.yuntu.real_hq"
+
+
 def test_build_official_sector_minutes_uses_mac_main_and_board_change_pct() -> None:
     previous: dict[str, float] = {"881319": -100.0}
     observed_at = datetime(2026, 8, 24, 15, 0, tzinfo=timezone.utc)

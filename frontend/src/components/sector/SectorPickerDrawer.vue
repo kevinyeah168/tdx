@@ -2,6 +2,7 @@
 import { useDebounceFn, useWindowSize } from '@vueuse/core'
 import {
   NButton,
+  NCheckbox,
   NDrawer,
   NDrawerContent,
   NEmpty,
@@ -10,6 +11,7 @@ import {
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { MAX_CHART_SECTORS, chartVisibleCount } from '@/api/workbenchBoard'
 import { useBoardStore } from '@/stores/boardStore'
 import type { BoardCatalogType, BoardItem } from '@/types/board'
 import { sectorTypeShort } from '@/utils/format'
@@ -30,6 +32,7 @@ const {
 } = storeToRefs(boardStore)
 
 const typeTabs: { label: string; value: BoardCatalogType }[] = [
+  { label: '全部', value: 'ALL' },
   { label: '行业', value: 'HY' },
   { label: '概念', value: 'GN' },
   { label: '二级行业', value: 'HY2' },
@@ -38,10 +41,13 @@ const typeTabs: { label: string; value: BoardCatalogType }[] = [
 
 const { width: windowWidth } = useWindowSize()
 const drawerWidth = computed(() => Math.round(windowWidth.value * 0.5))
-const selectedExpanded = ref(false)
+const selectedExpanded = ref(true)
+
+const chartCount = computed(() => chartVisibleCount(pickerSelected.value))
+const chartLimitReached = computed(() => chartCount.value >= MAX_CHART_SECTORS)
 
 const showSelectedToggle = computed(
-  () => pickerSelected.value.length > 6 || selectedExpanded.value,
+  () => pickerSelected.value.length > 8 || !selectedExpanded.value,
 )
 
 const debouncedSearch = useDebounceFn(() => {
@@ -57,7 +63,7 @@ watch(pickerQuery, () => {
 })
 
 watch(pickerOpen, (open) => {
-  if (!open) selectedExpanded.value = false
+  if (open) selectedExpanded.value = true
 })
 
 function setType(value: BoardCatalogType) {
@@ -75,6 +81,11 @@ function toneClass(item: BoardItem) {
 function tabToneClass(tab: BoardCatalogType) {
   return `sector-tone-${BOARD_TAB_TONE[tab] ?? 'default'}`
 }
+
+function onChartToggle(item: BoardItem, checked: boolean) {
+  if (checked === Boolean(item.chart_visible)) return
+  boardStore.toggleChartVisible(item)
+}
 </script>
 
 <template>
@@ -91,7 +102,9 @@ function tabToneClass(tab: BoardCatalogType) {
         <div class="drawer-head">
           <div>
             <div class="drawer-title">自选板块</div>
-            <div class="drawer-sub">勾选后保存，首页「自选」模式将展示这些板块</div>
+            <div class="drawer-sub">
+              勾选采集目标；「展示曲线」最多 {{ MAX_CHART_SECTORS }} 条出现在首页图表
+            </div>
           </div>
         </div>
       </template>
@@ -113,11 +126,12 @@ function tabToneClass(tab: BoardCatalogType) {
           </div>
 
           <NInput
-            v-model:value="pickerQuery"
+            :value="pickerQuery ?? ''"
             clearable
             size="medium"
             placeholder="搜索名称或代码"
             class="search-input"
+            @update:value="(v) => (pickerQuery = v ?? '')"
           />
         </div>
 
@@ -126,13 +140,14 @@ function tabToneClass(tab: BoardCatalogType) {
             <div class="selected-head">
               <div class="selected-title-row">
                 <span class="selected-label">已选 {{ pickerSelected.length }}</span>
+                <span class="chart-meta">图表 {{ chartCount }}/{{ MAX_CHART_SECTORS }}</span>
                 <button
                   v-if="showSelectedToggle"
                   type="button"
                   class="expand-btn"
                   @click="selectedExpanded = !selectedExpanded"
                 >
-                  {{ selectedExpanded ? '收起' : `查看更多 (${pickerSelected.length})` }}
+                  {{ selectedExpanded ? '收起' : `查看全部 (${pickerSelected.length})` }}
                 </button>
               </div>
             </div>
@@ -146,16 +161,26 @@ function tabToneClass(tab: BoardCatalogType) {
             </button>
           </div>
 
-          <div v-if="pickerSelected.length" class="selected-chips">
-            <div class="chip-wrap" :class="{ collapsed: !selectedExpanded }">
-              <div
-                v-for="b in pickerSelected"
-                :key="b.id"
-                class="sector-chip"
-                :class="toneClass(b)"
-              >
-                <span class="sector-chip-name" :title="b.name">{{ b.name }}</span>
+          <div v-if="pickerSelected.length" class="selected-list" :class="{ collapsed: !selectedExpanded }">
+            <div
+              v-for="b in pickerSelected"
+              :key="b.id"
+              class="selected-row"
+              :class="toneClass(b)"
+            >
+              <div class="selected-row-main">
+                <span class="selected-row-name" :title="b.name">{{ b.name }}</span>
                 <span class="sector-type-badge">{{ typeLabel(b) }}</span>
+                <span class="selected-row-code num">{{ b.id }}</span>
+              </div>
+              <div class="selected-row-actions">
+                <NCheckbox
+                  :checked="Boolean(b.chart_visible)"
+                  :disabled="!b.chart_visible && chartLimitReached"
+                  @update:checked="(v) => onChartToggle(b, Boolean(v))"
+                >
+                  展示曲线
+                </NCheckbox>
                 <button
                   type="button"
                   class="sector-chip-close"
@@ -213,7 +238,7 @@ function tabToneClass(tab: BoardCatalogType) {
       <template #footer>
         <div class="drawer-foot">
           <NButton quaternary size="medium" @click="boardStore.clearPicker">
-            清空并回主力榜
+            清空自选
           </NButton>
           <NButton
             type="primary"
@@ -222,7 +247,7 @@ function tabToneClass(tab: BoardCatalogType) {
             :disabled="!pickerSelected.length"
             @click="boardStore.savePicker"
           >
-            保存自选 ({{ pickerSelected.length }})
+            保存自选 ({{ pickerSelected.length }}) · 曲线 {{ chartCount }}
           </NButton>
         </div>
       </template>
@@ -286,7 +311,7 @@ function tabToneClass(tab: BoardCatalogType) {
   flex: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
   padding: 4px;
   border-radius: 12px;
@@ -380,6 +405,12 @@ function tabToneClass(tab: BoardCatalogType) {
   color: var(--text);
 }
 
+.chart-meta {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .link-btn {
   flex-shrink: 0;
   border: none;
@@ -394,24 +425,60 @@ function tabToneClass(tab: BoardCatalogType) {
   color: var(--accent);
 }
 
-.selected-chips {
+.selected-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
 }
 
-.chip-wrap {
+.selected-list.collapsed {
+  max-height: 148px;
+}
+
+.selected-row {
   display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 8px;
-  --chip-row-h: 30px;
-  --chip-gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--sector-tone-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sector-tone-soft) 45%, var(--panel));
 }
 
-.chip-wrap.collapsed {
-  max-height: calc(var(--chip-row-h) * 2 + var(--chip-gap));
+.selected-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.selected-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-row-code {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.selected-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.selected-row-actions :deep(.n-checkbox) {
+  font-size: 12px;
 }
 
 .expand-btn {
@@ -432,6 +499,20 @@ function tabToneClass(tab: BoardCatalogType) {
   font-size: 12px;
   color: var(--muted);
   padding: 2px 0 4px;
+}
+
+.sector-chip-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.sector-chip-close:hover {
+  color: var(--danger, #d03050);
 }
 
 .grid-wrap {

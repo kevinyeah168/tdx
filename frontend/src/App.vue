@@ -21,6 +21,9 @@ import TopBar from '@/components/layout/TopBar.vue'
 import DashboardPage from '@/components/pages/DashboardPage.vue'
 
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
+import { shouldPollLiveWorkbench } from '@/utils/tradingSession'
+import { todayTradeDate } from '@/utils/tradeDate'
+import { useReplayStore } from '@/stores/replayStore'
 
 import { useNaiveTheme } from '@/composables/useNaiveTheme'
 
@@ -35,6 +38,8 @@ const { naiveTheme, themeOverrides } = useNaiveTheme()
 const themeStore = useThemeStore()
 
 const boardStore = useBoardStore()
+
+const replayStore = useReplayStore()
 
 
 
@@ -68,6 +73,15 @@ onMounted(async () => {
 
   pollTimer = setInterval(async () => {
     if (boardStore.isPanelBusy) return
+    if (
+      replayStore.mode === 'live' &&
+      !shouldPollLiveWorkbench({
+        mode: replayStore.mode,
+        tradeDate: replayStore.tradeDate || todayTradeDate(),
+      })
+    ) {
+      return
+    }
     await boardStore.loadBoard()
     boardStore.resetCountdown()
   }, WORKBENCH_REFRESH_MS)

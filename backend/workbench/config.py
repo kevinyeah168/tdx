@@ -13,12 +13,16 @@ class WorkbenchSettings(BaseModel):
     retention_trading_days: int = Field(default=30, ge=1, le=2500)
     quote_interval_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
     priority_interval_seconds: float = Field(default=5.0, ge=1.0, le=15.0)
+    yuntu_collect_interval_seconds: float = Field(default=18.0, ge=5.0, le=60.0)
+    gray_collect_interval_seconds: float = Field(default=15.0, ge=5.0, le=60.0)
     full_collect_interval_seconds: float = Field(default=45.0, ge=15.0, le=300.0)
-    priority_rank_pool: int = Field(default=80, ge=0, le=200)
-    priority_max_sectors: int = Field(default=80, ge=1, le=200)
-    priority_max_stocks: int = Field(default=1000, ge=1, le=1500)
-    priority_sector_members: int = Field(default=30, ge=1, le=100)
-    priority_linkage_members: int = Field(default=30, ge=1, le=100)
+    priority_rank_pool: int = Field(default=0, ge=0, le=200)
+    # Selected watchlist is the source of truth; caps are high enough for ~100 sectors
+    # and their full membership (no practical "自选上限").
+    priority_max_sectors: int = Field(default=500, ge=1, le=2000)
+    priority_max_stocks: int = Field(default=30000, ge=1, le=50000)
+    priority_sector_members: int = Field(default=5000, ge=1, le=10000)
+    priority_linkage_members: int = Field(default=5000, ge=1, le=10000)
     minute_budget_seconds: float = Field(default=45.0, gt=0.0, le=55.0)
     normal_node_timeout_seconds: float = Field(default=3.0, gt=0.0, le=60.0)
     enhanced_node_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
@@ -29,10 +33,11 @@ class WorkbenchSettings(BaseModel):
     # 采集优先主力分钟资金；日 K 与分笔五层推算默认关闭
     sync_history_bars_on_collect: bool = False
     estimate_transaction_tiers: bool = False
-    # 板块主力/涨跌与旧版板块脉搏一致：MAC get_board_summary + 板块列表涨跌幅
-    sector_official_main_enabled: bool = True
+    # 盘中主力/涨跌来自通达信板块云图 real_hq（15s 轮询，分钟快照入库）
+    sector_official_main_enabled: bool = False
+    sector_yuntu_main_enabled: bool = True
     intraday_full_minute_ratio: float = Field(default=0.85, ge=0.5, le=1.0)
-    tick_backfill_batch_size: int = Field(default=8, ge=1, le=40)
+    tick_backfill_batch_size: int = Field(default=32, ge=1, le=80)
 
     @property
     def meta_db(self) -> Path:

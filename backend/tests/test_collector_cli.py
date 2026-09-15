@@ -135,8 +135,8 @@ def test_fixture_real_provider_collects_one_minute(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (["--date", "2026-08-20"], "--once or --serve is required"),
-        ([], "--once or --serve is required"),
+        (["--date", "2026-08-20"], "--once, --serve, or --backfill-classic-indices is required"),
+        ([], "--once, --serve, or --backfill-classic-indices is required"),
         (["--once", "--date", "2026-08-99", "--minute", "09:31"], "invalid ISO date"),
         (["--once", "--date", "2026-08-20", "--minute", "9:31"], "invalid HH:MM minute"),
         (["--fake", "--once", "--date", "2026-08-20", "--minute", "09:31", "--stocks", "1.5"], "stocks must be an integer"),
@@ -155,7 +155,7 @@ def test_cli_rejects_invalid_phase_or_inputs_without_traceback(
         "--data-dir",
         str(tmp_path / "data"),
     ]
-    if message == "--once or --serve is required":
+    if message == "--once, --serve, or --backfill-classic-indices is required":
         base_arguments = ["--data-dir", str(tmp_path / "data")]
     completed = run_collector(*base_arguments, *arguments)
 

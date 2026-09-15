@@ -6,15 +6,17 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from workbench.api.routes_market import (
     create_market_router,
     create_sector_router,
     create_settings_router,
 )
+from workbench.api.tdx_hot import get_hot_enhanced_client
+from workbench.providers.tdx.board_sectors import supplement_classic_index_quotes
 from workbench.api.routes_replay import create_replay_router
 from workbench.api.routes_stocks import create_stock_router
 from workbench.collector.heartbeat import seed_demo_history
@@ -43,6 +45,7 @@ class CurvePoint(BaseModel):
     values: dict[str, CurveValue]
     close: float | None = None
     change_pct: float | None = None
+    amount_delta: float | None = None
 
 
 class CurvePayload(BaseModel):
@@ -60,6 +63,52 @@ class StockFundFlowPayload(CurvePayload):
 class SectorFundFlowPayload(CurvePayload):
     sector_id: str
     change_pct: float | None = None
+    pre_close: float | None = None
+
+
+class GrayCurvePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    minute: str
+    dark_cumulative: float
+    open_cumulative: float | None = None
+    total_cumulative: float | None = None
+    source: str | None = None
+
+
+class StockGrayFlowPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    latest_complete_minute: str
+    points: list[GrayCurvePoint]
+
+
+class IdsBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+class SectorFundFlowBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    items: list[SectorFundFlowPayload]
+
+
+class StockFundFlowBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    items: list[StockFundFlowPayload]
+
+
+class StockGrayFlowBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    items: list[StockGrayFlowPayload]
 
 
 def _parse_tiers(tiers: str | None) -> tuple[str, ...]:
@@ -82,6 +131,115 @@ def _hot_store(settings: WorkbenchSettings, trade_date: date) -> HotStore:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="fund-flow data not found")
     return HotStore(path)
+
+
+def _optional_hot_store(settings: WorkbenchSettings, trade_date: date) -> HotStore | None:
+    path = settings.hot_db_for(trade_date.isoformat())
+    if not path.is_file():
+        return None
+    store = HotStore(path)
+    store.initialize()
+    return store
+
+
+def _serialize_gray_curve(*, symbol: str, curve: Any) -> StockGrayFlowPayload:
+    if not curve.rows or curve.latest_complete_minute is None:
+        return StockGrayFlowPayload.model_validate(
+            {
+                "symbol": symbol,
+                "latest_complete_minute": "",
+                "points": [],
+            }
+        )
+    points: list[dict[str, Any]] = []
+    for row in curve.rows:
+        point: dict[str, Any] = {
+            "minute": row["minute"],
+            "dark_cumulative": float(row["dark_cum"]),
+        }
+        if row.get("open_cum") is not None:
+            point["open_cumulative"] = float(row["open_cum"])
+        if row.get("total_cum") is not None:
+            point["total_cumulative"] = float(row["total_cum"])
+        if row.get("source") is not None:
+            point["source"] = str(row["source"])
+        points.append(point)
+    return StockGrayFlowPayload.model_validate(
+        {
+            "symbol": symbol,
+            "latest_complete_minute": curve.latest_complete_minute,
+            "points": points,
+        }
+    )
+
+
+def _point_extras(row: dict[str, Any]) -> dict[str, float]:
+    extras: dict[str, float] = {}
+    if row.get("close") is not None:
+        extras["close"] = float(row["close"])
+    if row.get("change_pct") is not None:
+        extras["change_pct"] = float(row["change_pct"])
+    if row.get("amount_delta") is not None:
+        extras["amount_delta"] = float(row["amount_delta"])
+    return extras
+
+
+def _fetch_sector_pre_close(sector_id: str, enhanced_client: object | None) -> float | None:
+    if enhanced_client is None:
+        return None
+    get_stock_quotes = getattr(enhanced_client, "get_stock_quotes", None)
+    quote_map: dict[str, tuple[float, float]] = {}
+    if callable(get_stock_quotes):
+        try:
+            supplement_classic_index_quotes(
+                quote_map,
+                sector_ids=[sector_id],
+                get_stock_quotes=get_stock_quotes,
+            )
+            response = get_stock_quotes([(1, sector_id)])
+            rows = response if isinstance(response, list) else getattr(response, "data", response)
+            if rows:
+                for row in rows or []:
+                    code = str(
+                        row.get("code") if isinstance(row, dict) else getattr(row, "code", "")
+                    ).strip()
+                    if code != sector_id:
+                        continue
+                    if isinstance(row, dict):
+                        pre_close = float(row.get("pre_close") or 0.0)
+                    else:
+                        pre_close = float(getattr(row, "pre_close", 0.0) or 0.0)
+                    if pre_close > 0:
+                        quote_map[sector_id] = (pre_close, pre_close)
+        except (RuntimeError, OSError, TypeError, ValueError, AttributeError):
+            pass
+    get_board_list = getattr(enhanced_client, "get_board_list", None)
+    if sector_id not in quote_map and callable(get_board_list):
+        try:
+            from easy_tdx.mac.enums import BoardType
+
+            for board_type in (BoardType.HY, BoardType.GN, BoardType.HY2, BoardType.FG, BoardType.DQ):
+                response = get_board_list(board_type=board_type, count=500)
+                rows = response if isinstance(response, list) else getattr(response, "data", response)
+                for row in rows or []:
+                    code = str(
+                        row.get("code") if isinstance(row, dict) else getattr(row, "code", "")
+                    ).strip()
+                    if code != sector_id:
+                        continue
+                    if isinstance(row, dict):
+                        pre_close = float(row.get("pre_close") or 0.0)
+                    else:
+                        pre_close = float(getattr(row, "pre_close", 0.0) or 0.0)
+                    if pre_close > 0:
+                        return pre_close
+        except (RuntimeError, OSError, TypeError, ValueError, AttributeError, ImportError):
+            pass
+    hit = quote_map.get(sector_id)
+    if hit is None:
+        return None
+    _price, pre_close = hit
+    return pre_close if pre_close > 0 else None
 
 
 def _serialize_series(
@@ -113,14 +271,7 @@ def _serialize_series(
                     }
                     for tier in tiers
                 },
-                **(
-                    {
-                        "close": float(row["close"]),
-                        "change_pct": float(row["change_pct"]),
-                    }
-                    if row.get("close") is not None
-                    else {}
-                ),
+                **_point_extras(row),
             }
             for row in rows
         ],
@@ -128,6 +279,41 @@ def _serialize_series(
     if payload_model is SectorFundFlowPayload and rows:
         payload["change_pct"] = float(rows[-1].get("change_pct", 0.0))
     return payload_model.model_validate(payload)
+
+
+def _serialize_series_optional(
+    *,
+    entity_key: str,
+    entity_id: str,
+    latest_complete_minute: str | None,
+    rows: list[dict[str, Any]],
+    tiers: tuple[str, ...],
+    payload_model: type[StockFundFlowPayload] | type[SectorFundFlowPayload],
+) -> StockFundFlowPayload | SectorFundFlowPayload | None:
+    if not rows or latest_complete_minute is None:
+        return None
+    return _serialize_series(
+        entity_key=entity_key,
+        entity_id=entity_id,
+        latest_complete_minute=latest_complete_minute,
+        rows=rows,
+        tiers=tiers,
+        payload_model=payload_model,
+    )
+
+
+def _normalize_batch_ids(ids: list[str], *, limit: int = 200) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in ids:
+        code = str(raw).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        merged.append(code)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def _unavailable_storage() -> HTTPException:
@@ -203,15 +389,30 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
             raise _unavailable_storage() from error
 
+    @application.get("/api/v1/stocks/{symbol}/gray-flow", response_model=StockGrayFlowPayload)
+    def stock_gray_flow(symbol: str, trade_date: date = Query(alias="date")) -> StockGrayFlowPayload:
+        normalized_symbol = symbol.upper()
+        try:
+            store = _hot_store(active_settings, trade_date)
+            curve = store.stock_gray_curve(trade_date.isoformat(), normalized_symbol)
+            return _serialize_gray_curve(symbol=normalized_symbol, curve=curve)
+        except HTTPException:
+            raise
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
+            raise _unavailable_storage() from error
+
     @application.get("/api/v1/sectors/{sector_id}/minutes", response_model=SectorFundFlowPayload)
     def sector_minutes(
-        sector_id: str, trade_date: date = Query(alias="date"), tiers: str | None = None
+        sector_id: str,
+        request: Request,
+        trade_date: date = Query(alias="date"),
+        tiers: str | None = None,
     ) -> SectorFundFlowPayload:
         selected_tiers = _parse_tiers(tiers)
         try:
             store = _hot_store(active_settings, trade_date)
             curve = store.complete_sector_fund_curve(trade_date.isoformat(), sector_id)
-            return _serialize_series(
+            payload = _serialize_series(
                 entity_key="sector_id",
                 entity_id=sector_id,
                 latest_complete_minute=curve.latest_complete_minute,
@@ -219,8 +420,97 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
                 tiers=selected_tiers,
                 payload_model=SectorFundFlowPayload,
             )
+            enhanced_client = None
+            try:
+                enhanced_client = get_hot_enhanced_client(request)
+            except RuntimeError:
+                enhanced_client = None
+            pre_close = _fetch_sector_pre_close(sector_id, enhanced_client)
+            if pre_close is None:
+                return payload
+            body = payload.model_dump()
+            body["pre_close"] = pre_close
+            return SectorFundFlowPayload.model_validate(body)
         except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
             raise _unavailable_storage() from error
+
+    @application.post("/api/v1/sectors/fund-flow/batch", response_model=SectorFundFlowBatchResponse)
+    def sector_fund_flow_batch(
+        payload: IdsBatchRequest,
+        trade_date: date = Query(alias="date"),
+        tiers: str | None = None,
+    ) -> SectorFundFlowBatchResponse:
+        selected_tiers = _parse_tiers(tiers)
+        store = _optional_hot_store(active_settings, trade_date)
+        if store is None:
+            return SectorFundFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
+        trade_date_str = trade_date.isoformat()
+        items: list[SectorFundFlowPayload] = []
+        for sector_id in _normalize_batch_ids(payload.ids):
+            try:
+                curve = store.complete_sector_fund_curve(trade_date_str, sector_id)
+                serialized = _serialize_series_optional(
+                    entity_key="sector_id",
+                    entity_id=sector_id,
+                    latest_complete_minute=curve.latest_complete_minute,
+                    rows=curve.rows,
+                    tiers=selected_tiers,
+                    payload_model=SectorFundFlowPayload,
+                )
+            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+                continue
+            if serialized is not None:
+                items.append(serialized)
+        return SectorFundFlowBatchResponse(trade_date=trade_date_str, items=items)
+
+    @application.post("/api/v1/stocks/fund-flow/batch", response_model=StockFundFlowBatchResponse)
+    def stock_fund_flow_batch(
+        payload: IdsBatchRequest,
+        trade_date: date = Query(alias="date"),
+        tiers: str | None = None,
+    ) -> StockFundFlowBatchResponse:
+        selected_tiers = _parse_tiers(tiers)
+        store = _optional_hot_store(active_settings, trade_date)
+        if store is None:
+            return StockFundFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
+        trade_date_str = trade_date.isoformat()
+        items: list[StockFundFlowPayload] = []
+        for raw_symbol in _normalize_batch_ids(payload.ids):
+            symbol = raw_symbol.upper()
+            try:
+                curve = store.live_stock_fund_curve(trade_date_str, symbol)
+                serialized = _serialize_series_optional(
+                    entity_key="symbol",
+                    entity_id=symbol,
+                    latest_complete_minute=curve.latest_complete_minute,
+                    rows=curve.rows,
+                    tiers=selected_tiers,
+                    payload_model=StockFundFlowPayload,
+                )
+            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+                continue
+            if serialized is not None:
+                items.append(serialized)
+        return StockFundFlowBatchResponse(trade_date=trade_date_str, items=items)
+
+    @application.post("/api/v1/stocks/gray-flow/batch", response_model=StockGrayFlowBatchResponse)
+    def stock_gray_flow_batch(
+        payload: IdsBatchRequest,
+        trade_date: date = Query(alias="date"),
+    ) -> StockGrayFlowBatchResponse:
+        store = _optional_hot_store(active_settings, trade_date)
+        if store is None:
+            return StockGrayFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
+        trade_date_str = trade_date.isoformat()
+        items: list[StockGrayFlowPayload] = []
+        for raw_symbol in _normalize_batch_ids(payload.ids):
+            symbol = raw_symbol.upper()
+            try:
+                curve = store.stock_gray_curve(trade_date_str, symbol)
+                items.append(_serialize_gray_curve(symbol=symbol, curve=curve))
+            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+                continue
+        return StockGrayFlowBatchResponse(trade_date=trade_date_str, items=items)
 
     return application
 

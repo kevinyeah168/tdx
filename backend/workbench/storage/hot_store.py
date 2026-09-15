@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,11 +16,20 @@ from workbench.collector.trading_clock import (
     filter_minutes_for_live_session,
     should_include_closing_minute,
 )
-from workbench.domain import CollectionStatus, SectorMinute, StockMinute
+from workbench.domain import CollectionStatus, SectorMinute, StockGrayMinute, StockMinute
+from workbench.storage.migrations import ensure_hot_schema
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
 
 LEGACY_CATALOG_VERSION = "legacy-unknown"
+TICK_BACKFILL_BATCH_MARKER = "backfill-tick"
+YUNTU_BATCH_MARKER = "yuntu"
+_INIT_CACHE_LOCK = threading.Lock()
+_INITIALIZED_PATHS: set[str] = set()
+_INIT_RETRY_ATTEMPTS = 8
+# Flat MAC stock-tick curves (all-zero momentum) are treated as missing.
+_FLAT_TICK_ABS_EPS = 1e6  # 100万
+
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,23 @@ INSERT INTO sector_minute(
     tier_meta_json=excluded.tier_meta_json,
     observed_at=excluded.observed_at,
     batch_id=excluded.batch_id
+"""
+
+STOCK_GRAY_UPSERT = """
+INSERT INTO stock_gray_minute(
+    trade_date, minute, symbol, code, open_cum, dark_cum, total_cum,
+    observed_at, batch_id, source
+) VALUES(
+    :trade_date, :minute, :symbol, :code, :open_cum, :dark_cum, :total_cum,
+    :observed_at, :batch_id, :source
+) ON CONFLICT(trade_date, minute, symbol) DO UPDATE SET
+    code=excluded.code,
+    open_cum=excluded.open_cum,
+    dark_cum=excluded.dark_cum,
+    total_cum=excluded.total_cum,
+    observed_at=excluded.observed_at,
+    batch_id=excluded.batch_id,
+    source=excluded.source
 """
 
 STATUS_UPSERT = """
@@ -174,6 +201,21 @@ def _sector_params(record: SectorMinute) -> dict[str, Any]:
     }
 
 
+def _stock_gray_params(record: StockGrayMinute) -> dict[str, Any]:
+    return {
+        "trade_date": record.trade_date.isoformat(),
+        "minute": record.minute,
+        "symbol": record.symbol.upper(),
+        "code": record.code,
+        "open_cum": record.open_cum,
+        "dark_cum": record.dark_cum,
+        "total_cum": record.total_cum,
+        "observed_at": record.observed_at.isoformat(),
+        "batch_id": record.batch_id,
+        "source": record.source,
+    }
+
+
 class HotStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -199,8 +241,37 @@ class HotStore:
             connection.close()
 
     def initialize(self) -> None:
+        key = str(self.path.resolve())
+        with _INIT_CACHE_LOCK:
+            if key in _INITIALIZED_PATHS:
+                return
+
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(_INIT_RETRY_ATTEMPTS):
+            try:
+                self._initialize_once()
+            except sqlite3.OperationalError as error:
+                message = str(error).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                last_error = error
+                time.sleep(min(0.1 * (2**attempt), 2.0))
+                continue
+            with _INIT_CACHE_LOCK:
+                _INITIALIZED_PATHS.add(key)
+            return
+        if last_error is not None:
+            raise last_error
+
+    def _initialize_once(self) -> None:
         with self._session() as connection:
             connection.executescript(HOT_SCHEMA)
+            ensure_hot_schema(connection)
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(collection_status)")
+            }
+            if "catalog_version" in columns:
+                return
             connection.execute("BEGIN IMMEDIATE")
             try:
                 columns = {
@@ -221,11 +292,45 @@ class HotStore:
         with self._session() as connection:
             connection.executemany(STOCK_UPSERT, [_stock_params(record) for record in records])
 
+    def write_stock_gray(self, records: list[StockGrayMinute]) -> None:
+        if not records:
+            return
+        with self._session() as connection:
+            connection.executemany(STOCK_GRAY_UPSERT, [_stock_gray_params(record) for record in records])
+
     def write_sectors(self, records: list[SectorMinute]) -> None:
         if not records:
             return
         with self._session() as connection:
             connection.executemany(SECTOR_UPSERT, [_sector_params(record) for record in records])
+
+    def delete_sector_day(self, trade_date: str, sector_id: str) -> int:
+        with self._session() as connection:
+            deleted = connection.execute(
+                "DELETE FROM sector_minute WHERE trade_date=? AND sector_id=?",
+                (trade_date, sector_id),
+            ).rowcount
+        return int(deleted or 0)
+
+    def delete_sector_tick_backfill(self, trade_date: str, sector_id: str) -> int:
+        pattern = f"%{TICK_BACKFILL_BATCH_MARKER}%"
+        with self._session() as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM sector_minute
+                WHERE trade_date=? AND sector_id=? AND batch_id LIKE ?
+                """,
+                (trade_date, sector_id, pattern),
+            ).rowcount
+        return int(deleted or 0)
+
+    def delete_stock_day(self, trade_date: str, symbol: str) -> int:
+        with self._session() as connection:
+            deleted = connection.execute(
+                "DELETE FROM stock_minute WHERE trade_date=? AND symbol=?",
+                (trade_date, symbol.upper()),
+            ).rowcount
+        return int(deleted or 0)
 
     def delete_sector_minutes(self, trade_date: str, sector_id: str, minutes: tuple[str, ...]) -> None:
         if not minutes:
@@ -301,6 +406,63 @@ class HotStore:
                 (trade_date, symbol.upper()),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def count_sector_tick_backfill_minutes(self, trade_date: str, sector_id: str) -> int:
+        pattern = f"%{TICK_BACKFILL_BATCH_MARKER}%"
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM sector_minute
+                WHERE trade_date=? AND sector_id=? AND batch_id LIKE ?
+                """,
+                (trade_date, sector_id, pattern),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def latest_sector_tick_backfill_minute(self, trade_date: str, sector_id: str) -> str | None:
+        pattern = f"%{TICK_BACKFILL_BATCH_MARKER}%"
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(minute) FROM sector_minute
+                WHERE trade_date=? AND sector_id=? AND batch_id LIKE ?
+                """,
+                (trade_date, sector_id, pattern),
+            ).fetchone()
+        minute = str(row[0]) if row and row[0] else None
+        return clip_minute_for_live_session(date_type.fromisoformat(trade_date), minute)
+
+    def count_stock_tick_backfill_minutes(self, trade_date: str, symbol: str) -> int:
+        pattern = f"%{TICK_BACKFILL_BATCH_MARKER}%"
+        with self._session(readonly=True) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM stock_minute
+                WHERE trade_date=? AND symbol=? AND batch_id LIKE ?
+                  AND ABS(main_cum) >= ?
+                """,
+                (trade_date, symbol.upper(), pattern, _FLAT_TICK_ABS_EPS),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def delete_flat_stock_tick_backfill(self, trade_date: str) -> int:
+        """Remove useless all-zero stock tick curves that create chart cliffs."""
+        pattern = f"%{TICK_BACKFILL_BATCH_MARKER}%"
+        with self._session() as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM stock_minute
+                WHERE trade_date=? AND batch_id LIKE ?
+                  AND symbol IN (
+                    SELECT symbol FROM stock_minute
+                    WHERE trade_date=? AND batch_id LIKE ?
+                    GROUP BY symbol
+                    HAVING MAX(ABS(main_cum)) < ?
+                  )
+                """,
+                (trade_date, pattern, trade_date, pattern, _FLAT_TICK_ABS_EPS),
+            ).rowcount
+        return int(deleted or 0)
 
     def write_complete_batch(
         self,
@@ -380,7 +542,10 @@ class HotStore:
                 (trade_date, symbol),
             ).fetchall()
         parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
-        return self._filter_live_rows(trade_date, parsed)
+        return self._filter_live_rows(
+            trade_date,
+            self._published_snapshot_rows(trade_date, parsed),
+        )
 
     def sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:
@@ -389,7 +554,25 @@ class HotStore:
                 (trade_date, sector_id),
             ).fetchall()
         parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
-        return self._filter_live_rows(trade_date, parsed)
+        return self._filter_live_rows(
+            trade_date,
+            self._published_snapshot_rows(trade_date, parsed),
+        )
+
+    def sector_fund_tip(
+        self,
+        trade_date: str,
+        sector_id: str,
+        minute: str | None = None,
+    ) -> dict[str, Any] | None:
+        series = self.sector_fund_series(trade_date, sector_id)
+        if not series:
+            return None
+        if minute:
+            for row in reversed(series):
+                if str(row["minute"]) <= minute:
+                    return row
+        return series[-1]
 
     def complete_stock_fund_series(self, trade_date: str, symbol: str) -> list[dict[str, Any]]:
         return self.complete_stock_fund_curve(trade_date, symbol).rows
@@ -402,10 +585,12 @@ class HotStore:
 
     def complete_sector_fund_curve(self, trade_date: str, sector_id: str) -> CompleteFundCurve:
         rows = self.sector_fund_series(trade_date, sector_id)
-        latest = rows[-1]["minute"] if rows else self.latest_sector_minute(trade_date)
+        latest = self.latest_available_minute(trade_date)
+        if latest is None and rows:
+            latest = str(rows[-1]["minute"])
         latest = clip_minute_for_live_session(
             date_type.fromisoformat(trade_date),
-            str(latest) if latest else None,
+            latest,
         )
         return CompleteFundCurve(
             latest_complete_minute=latest,
@@ -413,34 +598,107 @@ class HotStore:
         )
 
     def live_stock_fund_curve(self, trade_date: str, symbol: str) -> CompleteFundCurve:
-        complete = self._complete_fund_curve("stock_minute", "symbol", trade_date, symbol)
         with self._session(readonly=True) as connection:
-            priority_rows = connection.execute(
-                """
-                SELECT * FROM stock_minute
-                WHERE trade_date=? AND symbol=? AND batch_id LIKE '%-priority'
-                ORDER BY minute
-                """,
-                (trade_date, symbol),
+            latest_row = connection.execute(
+                "SELECT MAX(minute) FROM collection_status WHERE trade_date=? AND status='complete'",
+                (trade_date,),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT * FROM stock_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
+                (trade_date, symbol.upper()),
             ).fetchall()
-        merged: dict[str, dict[str, Any]] = {
-            str(row["minute"]): dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])}
-            for row in complete.rows
-        }
-        for row in priority_rows:
-            merged[str(row["minute"])] = dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])}
+        parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        latest = str(latest_row[0]) if latest_row and latest_row[0] else None
         ordered = self._filter_live_rows(
             trade_date,
-            [merged[minute] for minute in sorted(merged)],
+            self._published_snapshot_rows(trade_date, parsed),
         )
-        latest = ordered[-1]["minute"] if ordered else complete.latest_complete_minute
-        if latest is None:
-            latest = self.latest_stock_minute(trade_date)
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            latest,
+        )
+        if latest is not None:
+            ordered = [row for row in ordered if str(row["minute"]) <= latest]
+        elif ordered:
+            latest = str(ordered[-1]["minute"])
+        return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+
+    def stock_gray_curve(self, trade_date: str, symbol: str) -> CompleteFundCurve:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM stock_gray_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
+                (trade_date, symbol.upper()),
+            ).fetchall()
+        ordered = [dict(row) for row in rows]
+        ordered = self._filter_live_rows(trade_date, ordered)
+        latest = ordered[-1]["minute"] if ordered else None
         latest = clip_minute_for_live_session(
             date_type.fromisoformat(trade_date),
             str(latest) if latest else None,
         )
         return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+
+    @staticmethod
+    def _is_tick_backfill_batch(batch_id: object) -> bool:
+        return TICK_BACKFILL_BATCH_MARKER in str(batch_id or "")
+
+    @staticmethod
+    def _is_yuntu_batch(batch_id: object) -> bool:
+        batch = str(batch_id or "")
+        return YUNTU_BATCH_MARKER in batch
+
+    @classmethod
+    def _snapshot_fund_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return minute snapshots from yuntu/official rows; drop legacy MAC tick backfill."""
+        if not rows:
+            return rows
+        filtered = [
+            row for row in rows if not cls._is_tick_backfill_batch(row.get("batch_id"))
+        ]
+        by_minute: dict[str, dict[str, Any]] = {}
+        for row in sorted(filtered, key=lambda item: str(item["minute"])):
+            minute = str(row["minute"])
+            batch_id = str(row.get("batch_id") or "")
+            existing = by_minute.get(minute)
+            if existing is None:
+                by_minute[minute] = row
+                continue
+            if cls._is_yuntu_batch(batch_id) and not cls._is_yuntu_batch(existing.get("batch_id")):
+                by_minute[minute] = row
+        return [by_minute[minute] for minute in sorted(by_minute)]
+
+    def _complete_status_batches(self, trade_date: str) -> dict[str, str]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT minute, batch_id FROM collection_status "
+                "WHERE trade_date=? AND status='complete'",
+                (trade_date,),
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    def _published_snapshot_rows(
+        self, trade_date: str, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        snapshots = self._snapshot_fund_rows(rows)
+        if any(self._is_yuntu_batch(row.get("batch_id")) for row in snapshots):
+            return snapshots
+        status_batches = self._complete_status_batches(trade_date)
+        if status_batches:
+            return [
+                row
+                for row in snapshots
+                if str(row["minute"]) in status_batches
+                and str(row.get("batch_id")) == status_batches[str(row["minute"])]
+            ]
+        return snapshots
+
+    @classmethod
+    def _prefer_sector_fund_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return cls._snapshot_fund_rows(rows)
+
+    @classmethod
+    def _prefer_tick_fund_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return cls._snapshot_fund_rows(rows)
 
     def latest_stock_minute(self, trade_date: str) -> str | None:
         with self._session(readonly=True) as connection:

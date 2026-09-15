@@ -39,10 +39,6 @@ class ClassicIndexBackfillService:
         min_existing_minutes: int = 10,
         overwrite: bool = False,
     ) -> ClassicIndexBackfillResult:
-        today = datetime.now(SHANGHAI).date()
-        if trade_date != today:
-            raise ValueError("classic index tick backfill only supports the current trading day")
-
         targets = self._resolve_targets(sector_ids)
         backfilled = 0
         skipped = 0

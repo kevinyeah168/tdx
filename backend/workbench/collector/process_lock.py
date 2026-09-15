@@ -12,9 +12,14 @@ def _lock_path(data_dir: Path, role: str) -> Path:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    # Windows can raise SystemError for stale/invalid PIDs via os.kill(pid, 0).
     try:
         os.kill(pid, 0)
     except OSError:
+        return False
+    except SystemError:
+        return False
+    except Exception:
         return False
     return True
 
@@ -27,6 +32,8 @@ def acquire_collector_lock(data_dir: Path, role: str) -> None:
         raw = path.read_text(encoding="utf-8").strip()
         if raw.isdigit() and _pid_alive(int(raw)):
             raise RuntimeError(f"collector-{role} already running (pid={raw})")
+        # Stale or unreadable lock from a crashed process — replace it.
+        path.unlink(missing_ok=True)
     path.write_text(str(os.getpid()), encoding="utf-8")
 
     def _release() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -32,6 +33,7 @@ from workbench.query.models import (
     SectorListResponse,
     SectorMemberRankResponse,
     SectorRankResponse,
+    SectorSnapshotResponse,
 )
 from workbench.query.sector_resolve import resolve_member_sector_id
 from workbench.query.sectors import SectorQueryService
@@ -179,11 +181,26 @@ def create_settings_router() -> APIRouter:
             enhanced = get_hot_enhanced_client(request)
         except RuntimeError:
             enhanced = None
+        selected_sector_ids = list(payload.selected_sector_ids)
+        ui_path = settings.data_dir / "run" / "ui_selected_boards.json"
+        if ui_path.is_file():
+            try:
+                ui_payload = json.loads(ui_path.read_text(encoding="utf-8"))
+                ui_ids = [
+                    str(item.get("id") or "").strip()
+                    for item in ui_payload
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                ]
+                # Prefer seeded/server watchlist whenever it differs and is non-empty.
+                if ui_ids and ui_ids != selected_sector_ids:
+                    selected_sector_ids = ui_ids
+            except Exception:
+                pass
         result = apply_hot_target_sync(
             settings,
             meta,
-            selected_sector_ids=payload.selected_sector_ids,
-            rank_sector_ids=payload.rank_sector_ids,
+            selected_sector_ids=selected_sector_ids,
+            rank_sector_ids=[] if len(selected_sector_ids) >= 80 else payload.rank_sector_ids,
             selected_stock_symbols=payload.symbols,
             linkage_sector_id=payload.linkage_sector_id or None,
             linkage_sector_name=payload.linkage_sector_name or None,
@@ -204,6 +221,35 @@ def create_settings_router() -> APIRouter:
             "priority_sector_members": settings.priority_sector_members,
             "priority_linkage_members": settings.priority_linkage_members,
         }
+
+    @router.get("/ui-selected-boards")
+    def read_ui_selected_boards(
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        path = settings.data_dir / "run" / "ui_selected_boards.json"
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, list) and payload:
+                    boards = [
+                        {"id": str(item.get("id") or "").strip(), "name": str(item.get("name") or "").strip()}
+                        for item in payload
+                        if isinstance(item, dict) and str(item.get("id") or "").strip()
+                    ]
+                    return {"boards": boards, "source": "ui_selected_boards"}
+            except Exception:
+                pass
+        sector_ids = read_priority_sector_ids(settings.data_dir)
+        boards: list[dict[str, str]] = []
+        with meta.connect() as connection:
+            for sector_id in sector_ids:
+                row = connection.execute(
+                    "SELECT name FROM sector_master WHERE sector_id=?",
+                    (sector_id,),
+                ).fetchone()
+                boards.append({"id": sector_id, "name": str(row[0]) if row else sector_id})
+        return {"boards": boards, "source": "priority_sectors"}
 
     @router.put("/collection-targets")
     def save_collection_targets(
@@ -289,6 +335,21 @@ def create_sector_router() -> APIRouter:
             limit=limit,
         )
 
+    @router.get("/snapshot", response_model=SectorSnapshotResponse)
+    def sector_snapshot(
+        trade_date: date = Query(alias="date"),
+        minute: str = Query(default="15:00"),
+        ids: str = Query(default=""),
+        meta: MetaStore = Depends(get_meta_store),
+        hot: HotStore = Depends(get_hot_store),
+    ) -> SectorSnapshotResponse:
+        sector_ids = [item.strip() for item in ids.split(",") if item.strip()]
+        return SectorQueryService(meta, hot).sector_snapshot(
+            sector_ids,
+            trade_date=trade_date.isoformat(),
+            minute=minute,
+        )
+
     @router.get("/{sector_id}/catalog-members", response_model=SectorCatalogMembersResponse)
     def sector_catalog_members(
         sector_id: str,
@@ -335,8 +396,10 @@ def create_sector_router() -> APIRouter:
         catalog_members = meta.memberships_for(effective_sector_id)
 
         live_members = None
+        quote_client = None
         try:
             enhanced = get_hot_enhanced_client(request)
+            quote_client = enhanced
             live_members = fetch_live_board_members_cached(
                 enhanced,
                 effective_sector_id,
@@ -352,6 +415,7 @@ def create_sector_router() -> APIRouter:
             minute=minute,
             limit=limit,
             live_members=live_members,
+            quote_client=quote_client,
         )
 
     @router.get("/{sector_id}/breadth", response_model=SectorBreadthResponse)

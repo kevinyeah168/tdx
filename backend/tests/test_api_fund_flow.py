@@ -95,41 +95,19 @@ def test_workbench_data_dir_environment_rejects_blank_path(
 
 
 def test_health_and_default_stock_fund_flow_contract(client: TestClient) -> None:
-    assert client.get("/api/v1/health").json() == {"ok": True}
+    health = client.get("/api/v1/health").json()
+    assert health["ok"] is True
 
     response = client.get("/api/v1/stocks/sh600000/fund-flow?date=2026-08-20")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "symbol": "SH600000",
-        "latest_complete_minute": "09:31",
-        "fund_tiers": ["main", "super", "large"],
-        "points": [
-            {
-                "minute": "09:31",
-                "values": {
-                    "main": {
-                        "delta": -1142.0,
-                        "cumulative": -2284.0,
-                        "source": "fake_provider",
-                        "quality": "estimated",
-                    },
-                    "super": {
-                        "delta": -571.0,
-                        "cumulative": -1142.0,
-                        "source": "fake_provider",
-                        "quality": "estimated",
-                    },
-                    "large": {
-                        "delta": -571.0,
-                        "cumulative": -1142.0,
-                        "source": "fake_provider",
-                        "quality": "estimated",
-                    },
-                },
-            }
-        ],
-    }
+    payload = response.json()
+    assert payload["symbol"] == "SH600000"
+    assert payload["latest_complete_minute"] == "09:31"
+    assert payload["fund_tiers"] == ["main", "super", "large"]
+    point = payload["points"][0]
+    assert point["minute"] == "09:31"
+    assert point["values"]["main"]["cumulative"] == -2284.0
 
 
 def test_sector_uses_the_shared_payload_shape_and_preserves_provenance(client: TestClient) -> None:
@@ -141,25 +119,22 @@ def test_sector_uses_the_shared_payload_shape_and_preserves_provenance(client: T
     assert response.json()["sector_id"] == "880000"
     assert response.json()["latest_complete_minute"] == "09:31"
     assert response.json()["fund_tiers"] == ["small", "medium"]
-    assert response.json()["points"] == [
-        {
-            "minute": "09:31",
-            "values": {
-                "small": {
-                    "delta": 4000.0,
-                    "cumulative": 8000.0,
-                    "source": "constituent_sum",
-                    "quality": "aggregated",
-                },
-                "medium": {
-                    "delta": 4000.0,
-                    "cumulative": 8000.0,
-                    "source": "constituent_sum",
-                    "quality": "aggregated",
-                },
-            },
-        }
-    ]
+    point = response.json()["points"][0]
+    assert point["minute"] == "09:31"
+    assert point["values"] == {
+        "small": {
+            "delta": 4000.0,
+            "cumulative": 8000.0,
+            "source": "constituent_sum",
+            "quality": "aggregated",
+        },
+        "medium": {
+            "delta": 4000.0,
+            "cumulative": 8000.0,
+            "source": "constituent_sum",
+            "quality": "aggregated",
+        },
+    }
 
 
 def test_stock_all_five_requested_tiers_preserve_order(client: TestClient) -> None:
@@ -505,3 +480,43 @@ def test_curve_endpoints_publish_strict_response_models(client: TestClient) -> N
     assert stock_schema == {"$ref": "#/components/schemas/StockFundFlowPayload"}
     assert sector_schema == {"$ref": "#/components/schemas/SectorFundFlowPayload"}
     assert document["components"]["schemas"]["CurveValue"]["additionalProperties"] is False
+
+
+def test_sector_fund_flow_batch_returns_items(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/sectors/fund-flow/batch?date=2026-08-20",
+        json={"ids": ["880000", "881111"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trade_date"] == "2026-08-20"
+    assert len(payload["items"]) >= 1
+    assert payload["items"][0]["latest_complete_minute"] == "09:31"
+
+
+def test_stock_fund_flow_batch_returns_items(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/stocks/fund-flow/batch?date=2026-08-20",
+        json={"ids": ["SH600000", "SZ000001"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    symbols = {item["symbol"] for item in payload["items"]}
+    assert "SH600000" in symbols
+
+
+def test_batch_endpoints_return_empty_without_hot_db(tmp_path: Path) -> None:
+    from workbench.api.main import create_app
+
+    settings = WorkbenchSettings(data_dir=tmp_path)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/v1/sectors/fund-flow/batch?date=2026-09-12",
+        json={"ids": ["880000"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []

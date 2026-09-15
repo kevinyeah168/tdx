@@ -9,8 +9,12 @@ from workbench.query.models import (
     SectorMemberRankResponse,
     SectorRankItem,
     SectorRankResponse,
+    SectorSnapshotItem,
+    SectorSnapshotResponse,
     SectorSummary,
 )
+from workbench.providers.tdx.sector_float_cap import build_symbol_free_float_cap_details
+from workbench.providers.tdx.text_clean import clean_tdx_text
 from workbench.storage.hot_store import HotStore
 from workbench.storage.meta_store import MetaStore
 
@@ -40,11 +44,46 @@ class SectorQueryService:
         self._meta = meta
         self._hot = hot
 
-    def _resolve_member_symbols(self, sector_id: str, *, limit: int) -> list[str]:
-        symbols = self._meta.memberships_for(sector_id)
-        if symbols:
-            return symbols[: limit * 3]
-        return []
+    def _resolve_member_symbols(self, sector_id: str) -> list[str]:
+        return self._meta.memberships_for(sector_id)
+
+    def _rank_members_from_hot(
+        self,
+        symbols: list[str],
+        *,
+        trade_date: str,
+        minute: str,
+        limit: int,
+    ) -> tuple[str, list[tuple[str, float, float]]]:
+        if not symbols:
+            return minute, []
+        effective_minute = minute
+        rows: list[tuple[str, float, float]] = []
+        with self._hot.connect(readonly=True) as connection:  # type: ignore[union-attr]
+            for candidate in (
+                minute,
+                self._hot.latest_stock_minute(trade_date),  # type: ignore[union-attr]
+                self._hot.latest_complete_minute(trade_date),  # type: ignore[union-attr]
+            ):
+                if not candidate:
+                    continue
+                placeholders = ",".join("?" for _ in symbols)
+                rows = connection.execute(
+                    f"""
+                    SELECT stock.symbol, stock.main_cum, stock.change_pct
+                    FROM stock_minute AS stock
+                    WHERE stock.trade_date = ?
+                        AND stock.minute = ?
+                        AND stock.symbol IN ({placeholders})
+                    ORDER BY stock.main_cum DESC, stock.symbol
+                    LIMIT ?
+                    """,
+                    (trade_date, candidate, *symbols, limit),
+                ).fetchall()
+                if rows:
+                    effective_minute = str(candidate)
+                    break
+        return effective_minute, [(str(row[0]), float(row[1]), float(row[2])) for row in rows]
 
     def list_sectors(self) -> SectorListResponse:
         snapshot = self._meta.catalog_snapshot()
@@ -143,6 +182,56 @@ class SectorQueryService:
             ),
         )
 
+    def sector_snapshot(
+        self,
+        sector_ids: list[str],
+        *,
+        trade_date: str,
+        minute: str,
+    ) -> SectorSnapshotResponse:
+        if self._hot is None:
+            raise ValueError("hot store is required for sector snapshot")
+        snapshot = self._meta.catalog_snapshot()
+        unique_ids = list(dict.fromkeys(sector_id.strip() for sector_id in sector_ids if sector_id.strip()))
+        if not unique_ids:
+            return SectorSnapshotResponse(
+                trade_date=trade_date,
+                minute=minute,
+                items=[],
+                metadata=QueryMetadata(
+                    catalog_version=snapshot.catalog_version,
+                    stale=snapshot.stale,
+                    source=snapshot.source,
+                ),
+            )
+
+        effective_minute = minute
+        items: list[SectorSnapshotItem] = []
+        for sector_id in unique_ids:
+            tip = self._hot.sector_fund_tip(trade_date, sector_id, minute)
+            if tip is None:
+                continue
+            effective_minute = str(tip["minute"])
+            items.append(
+                SectorSnapshotItem(
+                    sector_id=sector_id,
+                    main_cumulative=float(tip["main_cum"]),
+                    change_pct=float(tip.get("change_pct") or 0.0),
+                )
+            )
+
+        return SectorSnapshotResponse(
+            trade_date=trade_date,
+            minute=effective_minute,
+            items=items,
+            metadata=QueryMetadata(
+                catalog_version=snapshot.catalog_version,
+                stale=snapshot.stale,
+                source=snapshot.source,
+                batch_id=f"{trade_date}T{effective_minute}",
+            ),
+        )
+
     def member_ranking(
         self,
         sector_id: str,
@@ -151,13 +240,12 @@ class SectorQueryService:
         minute: str,
         limit: int = 20,
         live_members: list[dict[str, object]] | None = None,
+        quote_client: object | None = None,
     ) -> SectorMemberRankResponse:
         if self._hot is None:
             raise ValueError("hot store is required for member ranking")
         snapshot = self._meta.catalog_snapshot()
-        symbols = self._resolve_member_symbols(sector_id, limit=limit)
-        if live_members:
-            symbols = list(dict.fromkeys([*symbols, *[str(item["symbol"]) for item in live_members]]))
+        symbols = self._resolve_member_symbols(sector_id)
         if not symbols and not live_members:
             return SectorMemberRankResponse(
                 sector_id=sector_id,
@@ -170,18 +258,78 @@ class SectorQueryService:
                     source=snapshot.source,
                 ),
             )
+
+        effective_minute, hot_rows = self._rank_members_from_hot(
+            symbols,
+            trade_date=trade_date,
+            minute=minute,
+            limit=limit,
+        )
+        if hot_rows:
+            ranked_symbols = [symbol for symbol, _, _ in hot_rows]
+            names = self._security_names(ranked_symbols)
+            symbol_caps = (
+                build_symbol_free_float_cap_details(quote_client, ranked_symbols)
+                if quote_client is not None
+                else {}
+            )
+            items = [
+                self._member_rank_item(
+                    symbol=symbol,
+                    name=names.get(symbol, symbol),
+                    main_cum=main_cum,
+                    change_pct=change_pct,
+                    free_cap=symbol_caps[symbol].live if symbol in symbol_caps else None,
+                    free_cap_avg=symbol_caps[symbol].avg if symbol in symbol_caps else None,
+                )
+                for symbol, main_cum, change_pct in hot_rows
+            ]
+            return SectorMemberRankResponse(
+                sector_id=sector_id,
+                trade_date=trade_date,
+                minute=effective_minute,
+                items=items,
+                metadata=QueryMetadata(
+                    catalog_version=snapshot.catalog_version,
+                    stale=snapshot.stale,
+                    source=snapshot.source,
+                    batch_id=f"{trade_date}T{effective_minute}",
+                ),
+            )
+
         if live_members:
             ranked = sorted(
                 live_members,
                 key=lambda item: (-float(item["main_cumulative"]), str(item["symbol"])),
             )[:limit]
-            names = self._security_names([str(item["symbol"]) for item in ranked])
+            ranked_symbols = [str(item["symbol"]) for item in ranked]
+            names = self._security_names(ranked_symbols)
+            symbol_caps = (
+                build_symbol_free_float_cap_details(quote_client, ranked_symbols)
+                if quote_client is not None
+                else {}
+            )
             items = [
-                SectorMemberRankItem(
+                self._member_rank_item(
                     symbol=str(item["symbol"]),
-                    name=str(item.get("name") or names.get(str(item["symbol"]), str(item["symbol"]))),
-                    main_cumulative=float(item["main_cumulative"]),
+                    name=clean_tdx_text(
+                        names.get(str(item["symbol"]))
+                        or item.get("name")
+                        or item["symbol"],
+                        fallback=str(item["symbol"]),
+                    ),
+                    main_cum=float(item["main_cumulative"]),
                     change_pct=float(item.get("change_pct") or 0.0),
+                    free_cap=(
+                        symbol_caps[str(item["symbol"])].live
+                        if str(item["symbol"]) in symbol_caps
+                        else None
+                    ),
+                    free_cap_avg=(
+                        symbol_caps[str(item["symbol"])].avg
+                        if str(item["symbol"]) in symbol_caps
+                        else None
+                    ),
                 )
                 for item in ranked
             ]
@@ -198,61 +346,43 @@ class SectorQueryService:
                 ),
             )
 
-        names = self._security_names(symbols)
-        effective_minute = minute
-        rows = []
-        if symbols:
-            with self._hot.connect(readonly=True) as connection:
-                for candidate in (minute, self._hot.latest_stock_minute(trade_date), self._hot.latest_complete_minute(trade_date)):
-                    if not candidate:
-                        continue
-                    placeholders = ",".join("?" for _ in symbols)
-                    rows = connection.execute(
-                        f"""
-                        SELECT stock.symbol, stock.main_cum, stock.change_pct
-                        FROM stock_minute AS stock
-                        WHERE stock.trade_date = ?
-                            AND stock.minute = ?
-                            AND stock.symbol IN ({placeholders})
-                        ORDER BY stock.main_cum DESC, stock.symbol
-                        LIMIT ?
-                        """,
-                        (trade_date, candidate, *symbols, limit),
-                    ).fetchall()
-                    if rows:
-                        effective_minute = str(candidate)
-                        break
-        items = [
-            SectorMemberRankItem(
-                symbol=str(row[0]),
-                name=names.get(str(row[0]), str(row[0])),
-                main_cumulative=float(row[1]),
-                change_pct=float(row[2]),
-            )
-            for row in rows
-        ]
-        if not items and live_members:
-            effective_minute = minute
-            items = [
-                SectorMemberRankItem(
-                    symbol=str(item["symbol"]),
-                    name=str(item.get("name") or item["symbol"]),
-                    main_cumulative=float(item["main_cumulative"]),
-                    change_pct=float(item.get("change_pct") or 0.0),
-                )
-                for item in live_members[:limit]
-            ]
         return SectorMemberRankResponse(
             sector_id=sector_id,
             trade_date=trade_date,
-            minute=effective_minute,
-            items=items,
+            minute=minute,
+            items=[],
             metadata=QueryMetadata(
                 catalog_version=snapshot.catalog_version,
                 stale=snapshot.stale,
-                source=snapshot.source if items else "tdx.live.members",
-                batch_id=f"{trade_date}T{effective_minute}" if items else None,
+                source=snapshot.source,
             ),
+        )
+
+    @staticmethod
+    def _member_rank_item(
+        *,
+        symbol: str,
+        name: str,
+        main_cum: float,
+        change_pct: float,
+        free_cap: float | None,
+        free_cap_avg: float | None = None,
+    ) -> SectorMemberRankItem:
+        ratio = None
+        if free_cap is not None and free_cap > 0:
+            ratio = round(main_cum / free_cap * 100.0, 4)
+        ratio_avg = None
+        if free_cap_avg is not None and free_cap_avg > 0:
+            ratio_avg = round(main_cum / free_cap_avg * 100.0, 4)
+        return SectorMemberRankItem(
+            symbol=symbol,
+            name=name,
+            main_cumulative=main_cum,
+            change_pct=change_pct,
+            free_float_market_cap=free_cap if free_cap else None,
+            main_net_ratio=ratio,
+            free_float_market_cap_avg=free_cap_avg if free_cap_avg else None,
+            main_net_ratio_avg=ratio_avg,
         )
 
     def member_breadth(
@@ -359,4 +489,7 @@ class SectorQueryService:
                 f"SELECT symbol, name FROM security_master WHERE symbol IN ({placeholders})",
                 symbols,
             ).fetchall()
-        return {str(row[0]): str(row[1]) for row in rows}
+        return {
+            str(row[0]): clean_tdx_text(row[1], fallback=str(row[0]))
+            for row in rows
+        }

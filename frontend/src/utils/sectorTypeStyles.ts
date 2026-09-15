@@ -44,6 +44,7 @@ export const SECTOR_TYPE_LEGEND: { tone: SectorTypeTone; label: string }[] = [
 ]
 
 export const BOARD_TAB_TONE: Record<string, SectorTypeTone> = {
+  ALL: 'default',
   HY: 'industry',
   GN: 'concept',
   HY2: 'industry2',

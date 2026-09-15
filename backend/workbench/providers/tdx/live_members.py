@@ -7,6 +7,7 @@ from easy_tdx import Market
 
 from workbench.providers.tdx.catalog import _iter_response_rows
 from workbench.providers.tdx.symbols import market_label, normalize_code, to_symbol
+from workbench.providers.tdx.text_clean import clean_tdx_text
 
 
 def _main_net_from_row(row: object) -> float:
@@ -71,7 +72,10 @@ def fetch_live_board_members(
         symbol = _symbol_from_member_row(row)
         if not symbol:
             continue
-        name = str(getattr(row, "name", None) or (row.get("name") if isinstance(row, dict) else symbol))
+        name = clean_tdx_text(
+            getattr(row, "name", None) or (row.get("name") if isinstance(row, dict) else None),
+            fallback=symbol,
+        )
         ranked.append(
             {
                 "symbol": symbol,

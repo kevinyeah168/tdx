@@ -109,8 +109,10 @@ class ReplayQueryService:
         dates: list[str] = []
         for path in sorted(hot_dir.glob("*.sqlite")):
             try:
-                date.fromisoformat(path.stem)
+                trade_day = date.fromisoformat(path.stem)
             except ValueError:
+                continue
+            if trade_day.weekday() >= 5:
                 continue
             dates.append(path.stem)
         return dates

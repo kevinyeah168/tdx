@@ -18,6 +18,8 @@ from workbench.providers.tdx.symbols import market_from_label, parse_symbol
 
 TICK_MOMENTUM_SOURCE = "tdx.enhanced.tick_momentum"
 _MARKET_INT = {"SH": 1, "SZ": 0, "BJ": 2}
+# Individual stock MAC tick charts expose price/vol but momentum is typically all zeros.
+_MIN_USEFUL_MOMENTUM = 1e-9
 
 
 class StockTickClient(Protocol):
@@ -52,6 +54,16 @@ def _quote_row(quotes: object) -> dict[str, Any]:
     return {}
 
 
+def tick_has_useful_momentum(tick_df: object) -> bool:
+    if tick_df is None or len(tick_df) == 0:
+        return False
+    try:
+        momentum = tick_df["momentum"].astype(float)
+    except Exception:
+        return False
+    return bool(float(momentum.abs().max()) > _MIN_USEFUL_MOMENTUM)
+
+
 def build_stock_minutes_from_tick(
     *,
     trade_date: date,
@@ -65,6 +77,9 @@ def build_stock_minutes_from_tick(
     tick = client.get_tick_chart(market=market, code=code, date=trade_date_int)
     if tick is None or len(tick) == 0:
         return []
+    # Stock tick momentum is usually empty; writing zeros creates flat curves + tip cliffs.
+    if not tick_has_useful_momentum(tick):
+        return []
 
     quotes = client.get_stock_quotes([(market, code)])
     quote_payload = _quote_row(quotes)
@@ -72,7 +87,7 @@ def build_stock_minutes_from_tick(
     pre_close = float(quote_payload.get("pre_close") or 0.0)
     closing_price = float(quote_payload.get("close") or quote_payload.get("price") or 0.0)
 
-    flow = momentum_to_main_flow(tick, official_main)
+    flow = momentum_to_main_flow(tick, official_main, anchor_to_official=True)
     if include_closing_minute is None:
         include_closing_minute = should_include_closing_minute(trade_date)
     if include_closing_minute:

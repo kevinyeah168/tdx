@@ -10,8 +10,8 @@ import sqlite3
 import sys
 from typing import Sequence
 
-from workbench.collector.priority_collector import PrioritySectorCollector
-from workbench.collector.priority_stock_collector import PriorityStockCollector
+from workbench.collector.gray_stock_collector import GrayStockCollector
+from workbench.collector.yuntu_snapshot_collector import YuntuSnapshotCollector
 from workbench.collector.classic_index_backfill import ClassicIndexBackfillService
 from workbench.collector.catalog_sync import CatalogSyncService
 from workbench.collector.heartbeat import write_collector_heartbeat
@@ -21,8 +21,6 @@ from workbench.collector.process_lock import acquire_collector_lock, release_col
 from workbench.collector.retention import purge_expired_hot_databases
 from workbench.collector.scheduler import CollectFn, MinuteScheduler
 from workbench.collector.session_backfill import SessionBackfillService
-from workbench.collector.sector_tick_backfill import SectorTickBackfillService
-from workbench.collector.stock_tick_backfill import StockTickBackfillService
 from workbench.config import WorkbenchSettings, merge_user_config
 from workbench.providers.fake import FakeMarketProvider
 from workbench.providers.tdx.provider import TdxMarketProvider
@@ -98,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backfill-classic-indices",
         action="store_true",
-        help="backfill classic 880 index sectors from MAC tick momentum (today only)",
+        help="backfill classic 880 index sectors from MAC tick momentum (any trade date)",
     )
     parser.add_argument(
         "--sector",
@@ -212,32 +210,15 @@ def serve(arguments: argparse.Namespace) -> int:
     write_collector_heartbeat(settings.data_dir, role=collector_role)
     hot = HotStore(settings.hot_db_for(date.today().isoformat()))
     hot.initialize()
-    priority_sectors = PrioritySectorCollector(
-        provider,
-        meta,
-        hot,
-        data_dir=settings.data_dir,
-        rank_pool=settings.priority_rank_pool,
-        max_sectors=settings.priority_max_sectors,
-    )
-    priority_stocks = PriorityStockCollector(
-        provider,
+    yuntu_snapshots = YuntuSnapshotCollector(
         meta,
         hot,
         settings=settings,
     )
-    sector_tick_backfill = SectorTickBackfillService(
-        provider,
-        meta,
+    gray_stocks = GrayStockCollector(
         hot,
-        settings,
-        data_dir=settings.data_dir,
-        rank_pool=settings.priority_rank_pool,
-        max_sectors=settings.priority_max_sectors,
+        settings=settings,
     )
-    stock_tick_backfill = StockTickBackfillService(meta, hot, settings)
-    stock_tick_backfill.bind_enhanced_client(getattr(provider, "_enhanced_client", None))
-
     def collect(trade_date: date, minute: str) -> dict[str, object]:
         return collect_once(
             trade_date=trade_date,
@@ -248,48 +229,40 @@ def serve(arguments: argparse.Namespace) -> int:
             close_provider=False,
         )
 
-    def collect_priority(trade_date: date, minute: str) -> dict[str, object]:
+    def collect_yuntu(trade_date: date, minute: str) -> dict[str, object]:
         hot_path = settings.hot_db_for(trade_date.isoformat())
-        priority_sectors.hot = HotStore(hot_path)
-        priority_sectors.hot.initialize()
-        priority_stocks.hot = HotStore(hot_path)
-        priority_stocks.hot.initialize()
-        sector_tick_backfill._hot = HotStore(hot_path)
-        sector_tick_backfill._hot.initialize()
-        stock_tick_backfill._hot = HotStore(hot_path)
-        stock_tick_backfill._hot.initialize()
-        sector_result = priority_sectors.collect(trade_date, minute)
-        stock_result = priority_stocks.collect(trade_date, minute)
-        tick_sector_result = sector_tick_backfill.backfill_batch(trade_date, minute=minute)
-        tick_stock_result = stock_tick_backfill.backfill_batch(trade_date)
-        sector_tick_backfill._hot.purge_intraday_closing_minutes(trade_date.isoformat())
-        collected_sectors = int(sector_result.get("priority_sectors", 0) or 0)
-        collected_stocks = int(stock_result.get("priority_stocks", 0) or 0)
-        duration_ms = int(sector_result.get("duration_ms", 0) or 0) + int(stock_result.get("duration_ms", 0) or 0)
+        yuntu_snapshots.hot = HotStore(hot_path)
+        yuntu_snapshots.hot.initialize()
+        result = yuntu_snapshots.collect(trade_date, minute)
+        collected_sectors = int(result.get("yuntu_sectors", 0) or 0)
+        collected_stocks = int(result.get("yuntu_stocks", 0) or 0)
+        duration_ms = int(result.get("duration_ms", 0) or 0)
         if collected_sectors or collected_stocks:
             catalog = meta.catalog_snapshot()
-            priority_sectors.hot.upsert_priority_minute_status(
+            yuntu_snapshots.hot.upsert_priority_minute_status(
                 trade_date=trade_date.isoformat(),
                 minute=minute,
-                batch_id=f"{trade_date.isoformat()}T{minute}-priority",
+                batch_id=f"{trade_date.isoformat()}T{minute}-yuntu",
                 catalog_version=catalog.catalog_version or "unknown",
                 collected_sectors=collected_sectors,
                 collected_stocks=collected_stocks,
-                expected_sectors=settings.priority_max_sectors,
-                expected_stocks=settings.priority_max_stocks,
+                expected_sectors=meta.sector_count(),
+                expected_stocks=meta.security_count(),
                 duration_ms=duration_ms,
             )
-        return {
-            "priority_sectors": collected_sectors,
-            "priority_stocks": collected_stocks,
-            "tick_sectors": tick_sector_result.backfilled,
-            "tick_stocks": tick_stock_result.backfilled,
-            "tick_minutes": tick_sector_result.minutes_written + tick_stock_result.minutes_written,
-            "minute": minute,
-            "duration_ms": int(sector_result.get("duration_ms", 0) or 0)
-            + int(stock_result.get("duration_ms", 0) or 0),
-            "errors": sector_result.get("errors", 0),
-        }
+        return result
+
+    def finalize_yuntu(trade_date: date) -> dict[str, object] | None:
+        hot_path = settings.hot_db_for(trade_date.isoformat())
+        yuntu_snapshots.hot = HotStore(hot_path)
+        yuntu_snapshots.hot.initialize()
+        return yuntu_snapshots.finalize_pending(trade_date)
+
+    def collect_gray(trade_date: date, minute: str) -> dict[str, object]:
+        hot_path = settings.hot_db_for(trade_date.isoformat())
+        gray_stocks.hot = HotStore(hot_path)
+        gray_stocks.hot.initialize()
+        return gray_stocks.collect(trade_date, minute)
 
     def collect_once_for_backfill(trade_date: date, minute: str) -> dict[str, object]:
         hot_path = settings.hot_db_for(trade_date.isoformat())
@@ -314,49 +287,39 @@ def serve(arguments: argparse.Namespace) -> int:
     def archive_backfill_collect(trade_date: date, minute: str) -> dict[str, object]:
         if use_full_archive_backfill:
             return collect_once_for_backfill(trade_date, minute)
-        return collect_priority(trade_date, minute)
+        return collect_yuntu(trade_date, minute)
 
     backfill = SessionBackfillService(hot, archive_backfill_collect)
 
     def run_session_backfill(trade_date: date, now: datetime) -> dict[str, object] | None:
         write_collector_heartbeat(settings.data_dir, role=collector_role)
-        result = backfill.next_missing_minute(trade_date, now)
-        if result is not None and result.get("backfill") == "done":
-            sector_tick_backfill._hot = HotStore(settings.hot_db_for(trade_date.isoformat()))
-            sector_tick_backfill._hot.initialize()
-            stock_tick_backfill._hot = sector_tick_backfill._hot
-            tick_sector = sector_tick_backfill.backfill_batch(
-                trade_date,
-                max_sectors=settings.priority_max_sectors,
-            )
-            tick_stock = stock_tick_backfill.backfill_batch(
-                trade_date,
-                max_symbols=min(settings.priority_max_stocks, 80),
-            )
-            return {
-                **result,
-                "tick_sectors": tick_sector.backfilled,
-                "tick_stocks": tick_stock.backfilled,
-                "tick_minutes": tick_sector.minutes_written + tick_stock.minutes_written,
-            }
-        return result
+        return backfill.next_missing_minute(trade_date, now)
 
     if collector_role == "hot":
-        priority_fn: CollectFn | None = collect_priority
+        priority_fn: CollectFn | None = collect_yuntu
+        gray_fn: CollectFn | None = collect_gray
         backfill_fn = None
+        yuntu_finalize_fn = finalize_yuntu
     elif collector_role == "archive":
         priority_fn = None
+        gray_fn = None
         backfill_fn = run_session_backfill
+        yuntu_finalize_fn = None
     else:
-        priority_fn = collect_priority
+        priority_fn = collect_yuntu
+        gray_fn = collect_gray
         backfill_fn = run_session_backfill
+        yuntu_finalize_fn = finalize_yuntu
 
     scheduler = MinuteScheduler(
         collect=collect,
         priority_collect=priority_fn,
+        gray_collect=gray_fn,
+        gray_interval_seconds=settings.gray_collect_interval_seconds,
+        yuntu_finalize=yuntu_finalize_fn,
         session_backfill=backfill_fn,
         quote_interval_seconds=settings.quote_interval_seconds,
-        priority_interval_seconds=settings.priority_interval_seconds,
+        priority_interval_seconds=settings.yuntu_collect_interval_seconds,
         full_collect_interval_seconds=settings.full_collect_interval_seconds,
         on_tick=lambda: write_collector_heartbeat(settings.data_dir, role=collector_role),
         mode=collector_role,

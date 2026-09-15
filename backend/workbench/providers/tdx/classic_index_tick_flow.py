@@ -11,6 +11,8 @@ from workbench.collector.trading_clock import (
 from workbench.domain import DataQuality, FundFlow, SectorMinute, TierPoint
 
 TICK_MOMENTUM_SOURCE = "tdx.enhanced.tick_momentum"
+# Cap single-minute momentum outliers before cumsum; keeps shape but kills cliffs.
+_MOMENTUM_DELTA_CLIP_Z = 6.0
 
 
 def fmt_minute(value: object) -> str:
@@ -26,16 +28,45 @@ def change_pct(price: float, pre_close: float) -> float:
     return round((price - pre_close) / pre_close * 100, 2)
 
 
-def momentum_to_main_flow(tick_df: object, official_main_net: float) -> list[dict[str, Any]]:
-    """Convert board index tick momentum into scaled main-force minute curve."""
+def clip_momentum_deltas(deltas: object, *, z: float = _MOMENTUM_DELTA_CLIP_Z) -> object:
+    """Winsorize raw tick momentum deltas with a median/MAD fence."""
+    values = deltas.astype(float)
+    if len(values) < 8:
+        return values
+    median = float(values.median())
+    mad = float((values - median).abs().median())
+    if mad <= 1e-12:
+        abs_med = float(values.abs().median())
+        if abs_med <= 1e-12:
+            return values
+        mad = abs_med
+    fence = z * 1.4826 * mad
+    return values.clip(median - fence, median + fence)
+
+
+def momentum_to_main_flow(
+    tick_df: object,
+    official_main_net: float,
+    *,
+    anchor_to_official: bool = True,
+) -> list[dict[str, Any]]:
+    """Convert board index tick momentum into scaled main-force minute curve.
+
+    Shape follows tick ``momentum`` (outlier-clipped); magnitude is anchored to
+    the official ``main_net_amount`` (same unit as priority/明盘) so tick backfill
+    and live quote minutes stay on one scale. Closing minute is carried forward
+    from 14:59 and is not forced to a separate summary override.
+    """
     if tick_df is None or len(tick_df) == 0:
         return []
 
-    cum_raw = tick_df["momentum"].astype(float).cumsum()
+    clipped = clip_momentum_deltas(tick_df["momentum"])
+    cum_raw = clipped.cumsum()
     last_raw = float(cum_raw.iloc[-1]) if len(cum_raw) else 0.0
-    if official_main_net and abs(last_raw) > 1e-9:
+    if anchor_to_official and official_main_net and abs(last_raw) > 1e-9:
         scale = float(official_main_net) / last_raw
     elif abs(last_raw) > 1e-9:
+        # Fallback only when official main is unavailable.
         scale = 1e8
     else:
         scale = 0.0
@@ -66,18 +97,16 @@ def append_closing_minute(
     if not flow:
         return flow
     last = flow[-1]
+    prev_cum = float(last["main_cum"])
     if last["minute"] == "15:00":
-        last["main_cum"] = official_main_net
-        last["main_delta"] = official_main_net - (flow[-2]["main_cum"] if len(flow) > 1 else 0.0)
         last["price"] = closing_price or last.get("price", 0.0)
         return flow
-    prev_cum = float(last["main_cum"])
     return [
         *flow,
         {
             "minute": "15:00",
-            "main_delta": official_main_net - prev_cum,
-            "main_cum": official_main_net,
+            "main_delta": 0.0,
+            "main_cum": prev_cum,
             "price": closing_price or float(last.get("price") or 0.0),
         },
     ]
@@ -130,12 +159,16 @@ def build_sector_minutes_from_tick(
         quote_payload = {}
     _close, pre_close, _ = _quote_fields(quote_payload)
 
-    flow = momentum_to_main_flow(tick, official_main)
+    flow = momentum_to_main_flow(tick, official_main, anchor_to_official=True)
     closing_price = _close
     if include_closing_minute is None:
         include_closing_minute = should_include_closing_minute(trade_date)
     if include_closing_minute:
-        flow = append_closing_minute(flow, official_main_net=official_main, closing_price=closing_price)
+        flow = append_closing_minute(
+            flow,
+            official_main_net=official_main,
+            closing_price=closing_price,
+        )
 
     by_minute = {row["minute"]: row for row in flow}
     batch_id = f"{trade_date.isoformat()}Tbackfill-tick"

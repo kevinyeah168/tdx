@@ -1,4 +1,4 @@
-import { apiGet } from '@/api/client'
+import { apiGet, apiPost, isApiNotFound } from '@/api/client'
 import type { SectorListResponse } from '@/types/api'
 
 export interface CurveValue {
@@ -13,6 +13,7 @@ export interface CurvePoint {
   values: Record<string, CurveValue>
   close?: number | null
   change_pct?: number | null
+  amount_delta?: number | null
 }
 
 export interface SectorFundFlowPayload {
@@ -21,6 +22,7 @@ export interface SectorFundFlowPayload {
   fund_tiers: string[]
   points: CurvePoint[]
   change_pct?: number | null
+  pre_close?: number | null
 }
 
 export interface SectorMemberRankItem {
@@ -28,6 +30,10 @@ export interface SectorMemberRankItem {
   name: string
   main_cumulative: number
   change_pct: number
+  free_float_market_cap?: number | null
+  main_net_ratio?: number | null
+  free_float_market_cap_avg?: number | null
+  main_net_ratio_avg?: number | null
 }
 
 export interface SectorMemberRankResponse {
@@ -49,6 +55,18 @@ export interface SectorRankResponse {
   trade_date: string
   minute: string
   items: SectorRankItem[]
+}
+
+export interface SectorSnapshotItem {
+  sector_id: string
+  main_cumulative: number
+  change_pct: number
+}
+
+export interface SectorSnapshotResponse {
+  trade_date: string
+  minute: string
+  items: SectorSnapshotItem[]
 }
 
 export interface SectorBreadthCounts {
@@ -103,6 +121,21 @@ export function fetchSectorRank(
   return apiGet<SectorRankResponse>('/api/v1/sectors/rank', params)
 }
 
+export function fetchSectorSnapshot(
+  sectorIds: string[],
+  tradeDate: string,
+  minute: string,
+): Promise<SectorSnapshotResponse> {
+  if (!sectorIds.length) {
+    return Promise.resolve({ trade_date: tradeDate, minute, items: [] })
+  }
+  return apiGet<SectorSnapshotResponse>('/api/v1/sectors/snapshot', {
+    date: tradeDate,
+    minute,
+    ids: sectorIds.join(','),
+  })
+}
+
 export function fetchSectorMembers(
   sectorId: string,
   tradeDate: string,
@@ -121,6 +154,41 @@ export function fetchSectorMembers(
 
 export function fetchSectorFundFlow(sectorId: string, tradeDate: string): Promise<SectorFundFlowPayload> {
   return apiGet<SectorFundFlowPayload>(`/api/v1/sectors/${sectorId}/minutes`, { date: tradeDate })
+}
+
+export interface SectorFundFlowBatchResponse {
+  trade_date: string
+  items: SectorFundFlowPayload[]
+}
+
+export async function fetchSectorFundFlowBatch(
+  sectorIds: string[],
+  tradeDate: string,
+): Promise<SectorFundFlowBatchResponse> {
+  if (!sectorIds.length) {
+    return { trade_date: tradeDate, items: [] }
+  }
+  try {
+    return await apiPost<SectorFundFlowBatchResponse>(
+      '/api/v1/sectors/fund-flow/batch',
+      { ids: sectorIds },
+      { date: tradeDate },
+    )
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error
+    const items = (
+      await Promise.all(
+        sectorIds.map(async (sectorId) => {
+          try {
+            return await fetchSectorFundFlow(sectorId, tradeDate)
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).filter((item): item is SectorFundFlowPayload => item != null)
+    return { trade_date: tradeDate, items }
+  }
 }
 
 export function fetchSectorBreadth(

@@ -56,15 +56,14 @@ const selectedSectorIds = ref<string[]>([])
 const stockRows = ref<StockRow[]>([])
 const auditItems = ref<Array<Record<string, unknown>>>([])
 
-const maxSectors = computed(() => settings.value?.priority_max_sectors ?? 80)
-const maxStocks = computed(() => settings.value?.priority_max_stocks ?? 1000)
-const sectorMemberLimit = computed(() => settings.value?.priority_sector_members ?? 30)
+const maxSectors = computed(() => settings.value?.priority_max_sectors ?? 500)
+const maxStocks = computed(() => settings.value?.priority_max_stocks ?? 30000)
 
 const selectedStockCount = computed(() => stockRows.value.filter((row) => row.checked).length)
 
 const stockColumns: DataTableColumns<StockRow> = [
   {
-    title: '采集',
+    title: '关注',
     key: 'checked',
     width: 64,
     render: (row) =>
@@ -220,7 +219,7 @@ async function saveGeneralSettings() {
       collect_mode: collectMode.value,
       archive_full_enabled: archiveFullEnabled.value,
     })
-    message.value = '通用设置已保存。修改通达信目录或采集模式后建议重启采集器。'
+    message.value = '通用设置已保存。修改通达信目录后建议重启采集器。'
     const audit = await fetchSettingsAuditLog()
     auditItems.value = audit.items
   } catch (saveError) {
@@ -238,7 +237,7 @@ async function saveCollection() {
   const symbols = stockRows.value.filter((row) => row.checked).map((row) => row.symbol).slice(0, maxStocks.value)
   try {
     await saveCollectionTargets({ sector_ids: sectorIds, symbols })
-    message.value = `采集目标已保存：${sectorIds.length} 板块，手动个股 ${symbols.length} 只；Hot 将按每板块 Top ${sectorMemberLimit.value} 成分股自动展开（总上限 ${maxStocks.value}）。`
+    message.value = `自选展示已保存：${sectorIds.length} 个默认板块，额外关注个股 ${symbols.length} 只。盘中云图仍采集全市场快照，此处仅影响首页/榜单默认展示。`
     const audit = await fetchSettingsAuditLog()
     auditItems.value = audit.items
   } catch (saveError) {
@@ -297,7 +296,19 @@ onMounted(() => {
       <NAlert v-if="message" type="success" class="mb-3" :title="message" />
 
       <div class="page-grid">
-        <NCard title="通达信数据源" size="small">
+        <NCard title="盘中采集（云图快照）" size="small">
+          <NSpace vertical :size="8">
+            <p class="hint">
+              Hot 每约 18 秒拉取通达信板块云图 <code>real_hq</code> 全量数据，按交易分钟入库：全市场板块 +
+              个股主力快照（约 1000+ 板块、5200+ 个股）。同一分钟内多次拉取会覆盖，整分钟失败会写入 GAP 占位。
+            </p>
+            <p class="hint">
+              暗盘仍由东财单独采集（仅个股，约 15 秒）。云图采集不依赖下方自选板块数量，也不需要通达信客户端在线。
+            </p>
+          </NSpace>
+        </NCard>
+
+        <NCard title="通达信目录（Catalog）" size="small">
           <NSpace vertical :size="12">
             <div class="field-row">
               <label class="field-label">安装目录</label>
@@ -313,39 +324,39 @@ onMounted(() => {
               </NTag>
             </div>
             <p class="hint">
-              板块主力与成分股排行依赖 MAC 接口，通常需要通达信客户端运行。本地日 K 与名称缓存只需目录正确。
+              用于同步板块成分股、证券代码与名称缓存。云图主力数据走 HTTP，不经过 MAC；MAC/客户端状态仅影响旧版回补或本地行情辅助功能。
             </p>
           </NSpace>
         </NCard>
 
-        <NCard title="采集策略" size="small">
+        <NCard title="Archive 回补（可选）" size="small">
           <NRadioGroup v-model:value="collectMode">
             <NSpace vertical>
-              <NRadio value="selective">精选采集（推荐）— 仅采集选定板块与个股</NRadio>
-              <NRadio value="full">全量采集 — Archive 在非交易时段回补全市场</NRadio>
+              <NRadio value="selective">默认 — 非交易时段用云图快照回补缺失分钟</NRadio>
+              <NRadio value="full">旧版全量 — Archive 用 MAC 分笔回补全市场（慢，一般不必开）</NRadio>
             </NSpace>
           </NRadioGroup>
           <NAlert
             v-if="collectMode === 'full'"
             type="warning"
             class="mt-3"
-            title="风险提示"
+            title="不推荐"
           >
-            全量回补单次可达数分钟。盘中 Hot 仍只跑精选目标；Archive 在午休/收盘后执行全量。
+            单次可达数分钟，与当前云图快路径重复。仅在需要 MAC 分笔五档曲线时启用。
           </NAlert>
           <div v-if="collectMode === 'full'" class="mt-3">
-            <NCheckbox v-model:checked="archiveFullEnabled">启用 Archive 全量回补（5216 股级）</NCheckbox>
+            <NCheckbox v-model:checked="archiveFullEnabled">启用 Archive MAC 全量回补</NCheckbox>
           </div>
         </NCard>
 
-        <NCard title="精选采集目标" size="small">
+        <NCard title="自选板块与关注个股（界面）" size="small">
           <NSpace class="mb-3" :size="8">
             <NButton size="small" @click="importRankSectors">从榜单 Top20 导入</NButton>
             <NButton size="small" @click="selectAllStocks">全选个股</NButton>
             <NButton size="small" @click="clearStocks">清空个股</NButton>
           </NSpace>
           <div class="field-row mb-3">
-            <label class="field-label">板块（最多 {{ maxSectors }}）</label>
+            <label class="field-label">默认板块</label>
             <NSelect
               v-model:value="selectedSectorIds"
               multiple
@@ -357,9 +368,8 @@ onMounted(() => {
             />
           </div>
           <p class="hint mb-2">
-            已选 {{ selectedSectorIds.length }} 板块；保存后 Hot 自动采集每板块主力 Top
-            {{ sectorMemberLimit }} 成分股（联动板块 Top {{ settings?.priority_linkage_members ?? 30 }}），总上限
-            {{ maxStocks }}。下方表格为额外手动勾选个股（{{ selectedStockCount }}）。
+            已选 {{ selectedSectorIds.length }} / {{ maxSectors }} 个板块，用于首页榜单与联动默认展示；点击板块时联动成分股上限
+            {{ settings?.priority_linkage_members ?? 30 }}。下方表格为额外关注个股（{{ selectedStockCount }}），不影响云图全量入库。
           </p>
           <NDataTable
             :columns="stockColumns"
@@ -369,7 +379,7 @@ onMounted(() => {
             :bordered="false"
           />
           <NSpace class="mt-3">
-            <NButton type="primary" :loading="saving" @click="saveCollection">保存采集目标</NButton>
+            <NButton type="primary" :loading="saving" @click="saveCollection">保存自选展示</NButton>
           </NSpace>
         </NCard>
 

@@ -43,3 +43,15 @@ def test_filter_minutes_excludes_closing_point_during_live_session() -> None:
         ["09:30", "09:50", "15:00"],
         now,
     ) == ["09:30", "09:50"]
+
+
+def test_past_session_keeps_full_day_including_close() -> None:
+    trade_date = date(2026, 8, 31)
+    now = datetime(2026, 9, 1, 10, 0)
+
+    assert live_session_minute_cap(trade_date, now) == "15:00"
+    assert filter_minutes_for_live_session(
+        trade_date,
+        ["09:30", "14:59", "15:00"],
+        now,
+    ) == ["09:30", "14:59", "15:00"]

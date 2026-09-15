@@ -55,16 +55,18 @@ def sector_member_symbols(
 
     resolved = resolve_member_sector_id(meta, sector_id, sector_name=sector_name)
     catalog = meta.memberships_for(resolved)
+    limit = max(1, int(per_sector_limit))
+    # Prefer full catalog membership when available so "自选板块" keeps every constituent.
+    if catalog:
+        return catalog[:limit]
     if enhanced_client is not None:
         live_rows = fetch_live_board_members(
             enhanced_client,
             resolved,
-            limit=per_sector_limit,
-            member_count=len(catalog) or None,
+            limit=limit,
+            member_count=limit,
         )
         return [str(row["symbol"]) for row in live_rows]
-    if catalog:
-        return catalog[:per_sector_limit]
     return []
 
 

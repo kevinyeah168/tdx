@@ -11,6 +11,7 @@ import {
 import { storeToRefs } from 'pinia'
 import { computed, ref } from 'vue'
 import { useBoardStore } from '@/stores/boardStore'
+import { isWeekdayDate } from '@/utils/tradingSession'
 
 const props = defineProps<{
   mode: 'sector' | 'stock'
@@ -33,14 +34,14 @@ const savedDates = computed(() => {
     props.mode === 'stock'
       ? board.value.stock_intraday_dates || []
       : board.value.sector_intraday_dates || []
-  return [...new Set(raw)]
+  return [...new Set(raw.filter((d) => isWeekdayDate(d)))]
 })
 
 const selectableDates = computed(() => {
   const dates = new Set(savedDates.value)
   const today = tradeDate.value
   const session = board.value.trading_session
-  if (today && session?.isTradingDay) dates.add(today)
+  if (today && session?.isTradingDay && isWeekdayDate(today)) dates.add(today)
   return [...dates].sort((a, b) => b.localeCompare(a))
 })
 

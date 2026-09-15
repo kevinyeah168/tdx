@@ -9,12 +9,15 @@ export function isLegacyBlockCode(code: string): boolean {
 
 /** 完整或前缀搜索，如 880 / 88049 / 880490 */
 export function isClassicIndexCodeQuery(query: string): boolean {
-  return /^880\d{0,3}$/.test(query.trim())
+  const normalized = String(query ?? '').trim()
+  if (!normalized) return false
+  // Require a real 880 prefix query (880 / 8804 / 880490), never match empty.
+  return /^880\d{0,3}$/.test(normalized)
 }
 
 export function legacySectorSearchHint(
   query: string,
-  currentType?: 'HY' | 'GN' | 'HY2' | 'IDX',
+  currentType?: 'ALL' | 'HY' | 'GN' | 'HY2' | 'IDX',
 ): string | null {
   const normalized = query.trim()
   if (!isClassicIndexCodeQuery(normalized) && !isLegacyBlockCode(normalized)) {

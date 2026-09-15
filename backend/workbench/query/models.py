@@ -64,6 +64,10 @@ class SectorMemberRankItem(BaseModel):
     name: str
     main_cumulative: float
     change_pct: float
+    free_float_market_cap: float | None = None
+    main_net_ratio: float | None = None
+    free_float_market_cap_avg: float | None = None
+    main_net_ratio_avg: float | None = None
 
 
 class SectorMemberRankResponse(BaseModel):
@@ -107,6 +111,23 @@ class SectorRankResponse(BaseModel):
     trade_date: str
     minute: str
     items: list[SectorRankItem]
+    metadata: QueryMetadata
+
+
+class SectorSnapshotItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sector_id: str
+    main_cumulative: float
+    change_pct: float
+
+
+class SectorSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    minute: str
+    items: list[SectorSnapshotItem]
     metadata: QueryMetadata
 
 

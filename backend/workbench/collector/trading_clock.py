@@ -48,9 +48,15 @@ def should_include_closing_minute(trade_date: date, now: datetime | None = None)
 
 
 def live_session_minute_cap(trade_date: date, now: datetime | None = None) -> str | None:
-    """Upper bound for minutes exposed during an in-progress trading day."""
+    """Upper bound for minutes exposed during an in-progress trading day.
+
+    Completed (past) sessions return ``15:00`` so historical backfills keep the
+    full day including the closing point. Future dates return ``None``.
+    """
     current = now or datetime.now(SHANGHAI)
-    if trade_date != current.date():
+    if trade_date < current.date():
+        return "15:00"
+    if trade_date > current.date():
         return None
     clock = current.time().replace(second=0, microsecond=0)
     if clock < time(9, 30):

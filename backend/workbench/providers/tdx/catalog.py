@@ -18,6 +18,7 @@ from workbench.providers.tdx.security_list import (
     ensure_security_cache,
     load_workbench_security_cache,
 )
+from workbench.providers.tdx.text_clean import clean_tdx_text
 from workbench.providers.tdx.symbols import is_a_share, market_label, normalize_code, to_symbol
 
 
@@ -87,11 +88,11 @@ def _parse_security_row(row: dict[str, Any], *, tdx_home: Path | None) -> Securi
         return None
     if not is_a_share(market, code):
         return None
-    name = str(row.get("name") or code).strip()
+    name = clean_tdx_text(row.get("name") or code, fallback=code)
     if tdx_home is not None:
         local_names = read_tnf_names(tdx_home, market)
         if code in local_names:
-            name = local_names[code]
+            name = clean_tdx_text(local_names[code], fallback=code)
     return Security(symbol=to_symbol(market, code), code=code, name=name, market=market)
 
 
@@ -110,7 +111,7 @@ def _parse_board_rows(rows: list[dict[str, Any]]) -> list[Sector]:
         sectors.append(
             Sector(
                 sector_id=sector_id,
-                name=str(row["name"]).strip(),
+                name=clean_tdx_text(row["name"], fallback=sector_id),
                 sector_type=sector_type,
             )
         )

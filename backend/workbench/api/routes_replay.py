@@ -63,10 +63,10 @@ class SettingsPayload(BaseModel):
     tdx_home: str
     collect_mode: Literal["selective", "full"]
     archive_full_enabled: bool
-    priority_max_sectors: int = Field(ge=1, le=200)
-    priority_max_stocks: int = Field(ge=1, le=1500)
-    priority_sector_members: int = Field(ge=1, le=100)
-    priority_linkage_members: int = Field(ge=1, le=100)
+    priority_max_sectors: int = Field(ge=1, le=2000)
+    priority_max_stocks: int = Field(ge=1, le=50000)
+    priority_sector_members: int = Field(ge=1, le=10000)
+    priority_linkage_members: int = Field(ge=1, le=10000)
     tdx_probe: TdxProbeSummary | None = None
 
 

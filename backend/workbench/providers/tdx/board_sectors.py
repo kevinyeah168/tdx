@@ -12,6 +12,7 @@ from easy_tdx.transport.sync import MAC_HOSTS
 
 from workbench.config import WorkbenchSettings
 from workbench.domain import DataQuality, FundFlow, Sector, SectorMinute, TierPoint
+from workbench.providers.tdx.yuntu_sector_flow import fetch_yuntu_sector_snapshots
 
 
 def change_pct(price: float, pre_close: float) -> float:
@@ -150,24 +151,41 @@ def build_official_sector_minutes(
     previous_main_cum: dict[str, float],
     observed_at: datetime,
     batch_id: str,
+    yuntu_main: dict[str, float] | None = None,
+    yuntu_change_pct: dict[str, float] | None = None,
 ) -> tuple[list[SectorMinute], list[str]]:
     records: list[SectorMinute] = []
     errors: list[str] = []
+    yuntu_values = yuntu_main or {}
+    yuntu_changes = yuntu_change_pct or {}
     for sector in sorted(sectors, key=lambda item: item.sector_id):
         summary = summaries.get(sector.sector_id)
-        if summary is None:
+        yuntu_cum = yuntu_values.get(sector.sector_id)
+        if summary is None and yuntu_cum is None:
             errors.append(f"missing official summary for {sector.sector_id}")
             continue
-        main_cum = _summary_main_net(summary)
+        if yuntu_cum is not None:
+            main_cum = yuntu_cum
+            main_source = "tdx.yuntu.real_hq"
+        else:
+            main_cum = _summary_main_net(summary)
+            main_source = "tdx.enhanced.board_summary"
         main_delta = main_cum - previous_main_cum.get(sector.sector_id, 0.0)
         previous_main_cum[sector.sector_id] = main_cum
         price, pre_close = quote_map.get(sector.sector_id, (0.0, 0.0))
-        member_count = _summary_member_count(summary) or member_counts.get(sector.sector_id, 0)
+        sector_change_pct = yuntu_changes.get(sector.sector_id)
+        if sector_change_pct is None:
+            sector_change_pct = change_pct(price, pre_close)
+        member_count = (
+            _summary_member_count(summary)
+            if summary is not None
+            else member_counts.get(sector.sector_id, 0)
+        ) or member_counts.get(sector.sector_id, 0)
         funds = FundFlow(
             main=TierPoint(
                 delta=main_delta,
                 cumulative=main_cum,
-                source="tdx.enhanced.board_summary",
+                source=main_source,
                 quality=DataQuality.OFFICIAL,
             ),
             super=TierPoint(
@@ -200,7 +218,7 @@ def build_official_sector_minutes(
                 trade_date=trade_date,
                 minute=minute,
                 sector_id=sector.sector_id,
-                change_pct=change_pct(price, pre_close),
+                change_pct=sector_change_pct,
                 member_count=member_count,
                 funds=funds,
                 observed_at=observed_at,
@@ -228,20 +246,47 @@ class OfficialSectorBatchBuilder:
         observed_at: datetime,
     ) -> tuple[list[SectorMinute], list[str]]:
         batch_id = f"{trade_date.isoformat()}T{minute}"
-        quote_map = fetch_board_quote_map(
-            get_board_list=self.get_board_list,
-            board_page_size=self.board_page_size,
+        sector_ids = [sector.sector_id for sector in sectors]
+        yuntu_main: dict[str, float] | None = None
+        yuntu_change_pct: dict[str, float] | None = None
+        if self.settings.sector_yuntu_main_enabled:
+            try:
+                snapshots = fetch_yuntu_sector_snapshots(
+                    sector_ids,
+                    timeout_seconds=self.settings.enhanced_node_timeout_seconds,
+                )
+                if snapshots:
+                    yuntu_main = {
+                        sector_id: snapshot.main_yuan for sector_id, snapshot in snapshots.items()
+                    }
+                    yuntu_change_pct = {
+                        sector_id: snapshot.change_pct for sector_id, snapshot in snapshots.items()
+                    }
+            except Exception:
+                yuntu_main = None
+                yuntu_change_pct = None
+
+        missing_summary_ids = [
+            sector_id for sector_id in sector_ids if not yuntu_main or sector_id not in yuntu_main
+        ]
+        summaries = (
+            fetch_sector_summaries_parallel(self.settings, missing_summary_ids)
+            if missing_summary_ids
+            else {}
         )
-        if self.get_stock_quotes is not None:
-            supplement_classic_index_quotes(
-                quote_map,
-                sector_ids=[sector.sector_id for sector in sectors],
-                get_stock_quotes=self.get_stock_quotes,
+
+        quote_map: dict[str, tuple[float, float]] = {}
+        if not yuntu_change_pct or missing_summary_ids:
+            quote_map = fetch_board_quote_map(
+                get_board_list=self.get_board_list,
+                board_page_size=self.board_page_size,
             )
-        summaries = fetch_sector_summaries_parallel(
-            self.settings,
-            [sector.sector_id for sector in sectors],
-        )
+            if self.get_stock_quotes is not None:
+                supplement_classic_index_quotes(
+                    quote_map,
+                    sector_ids=sector_ids,
+                    get_stock_quotes=self.get_stock_quotes,
+                )
         return build_official_sector_minutes(
             trade_date=trade_date,
             minute=minute,
@@ -252,6 +297,8 @@ class OfficialSectorBatchBuilder:
             previous_main_cum=self.previous_main_cum,
             observed_at=observed_at,
             batch_id=batch_id,
+            yuntu_main=yuntu_main,
+            yuntu_change_pct=yuntu_change_pct,
         )
 
 

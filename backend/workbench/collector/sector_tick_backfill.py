@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 from easy_tdx import MacClient
 
 from workbench.collector.priority_collector import PrioritySectorCollector
-from workbench.collector.trading_clock import should_include_closing_minute, trading_minutes_for_day
+from workbench.collector.tick_backfill_selection import (
+    compute_full_day_threshold,
+    select_pending_tick_backfill,
+)
+from workbench.collector.trading_clock import should_include_closing_minute
 from workbench.config import WorkbenchSettings
 from workbench.providers.tdx.classic_index_tick_flow import build_sector_minutes_from_tick
 from workbench.storage.hot_store import HotStore
@@ -69,9 +73,7 @@ class SectorTickBackfillService:
         )
 
     def full_day_threshold(self) -> int:
-        expected = len(trading_minutes_for_day())
-        ratio = self._settings.intraday_full_minute_ratio
-        return max(30, int(expected * ratio))
+        return compute_full_day_threshold(self._settings)
 
     def resolve_targets(self, trade_date: date, minute: str) -> list[str]:
         return self._priority_sectors._resolve_sector_ids_for_minute(trade_date, minute)
@@ -83,33 +85,47 @@ class SectorTickBackfillService:
         sector_ids: list[str] | None = None,
         minute: str | None = None,
         max_sectors: int | None = None,
-        overwrite_sparse: bool = True,
+        force: bool = False,
     ) -> TickBackfillBatchResult:
-        today = datetime.now(SHANGHAI).date()
-        if trade_date != today:
-            return TickBackfillBatchResult(
-                trade_date=trade_date.isoformat(),
-                attempted=0,
-                backfilled=0,
-                skipped=0,
-                failed=["tick backfill only supports current trading day"],
-                minutes_written=0,
-            )
-
         effective_minute = minute or datetime.now(SHANGHAI).strftime("%H:%M")
         targets = sector_ids or self.resolve_targets(trade_date, effective_minute)
-        limit = max_sectors if max_sectors is not None else self._settings.tick_backfill_batch_size
+        # Historical days: fill the full target set in one pass (no live batching).
+        today = datetime.now(SHANGHAI).date()
+        if max_sectors is not None:
+            limit = max_sectors
+        elif trade_date < today:
+            limit = len(targets)
+        else:
+            limit = self._settings.tick_backfill_batch_size
         threshold = self.full_day_threshold()
-        pending: list[str] = []
-        skipped = 0
-        for sector_id in targets:
-            existing = self._hot.count_sector_minutes(trade_date.isoformat(), sector_id)
-            if existing >= threshold and not overwrite_sparse:
-                skipped += 1
-                continue
-            pending.append(sector_id)
-            if len(pending) >= limit:
-                break
+        trade_date_str = trade_date.isoformat()
+        live_session = trade_date >= today
+        pending, skipped = select_pending_tick_backfill(
+            targets,
+            limit=limit,
+            threshold=threshold,
+            count_total_minutes=lambda sector_id: self._hot.count_sector_minutes(
+                trade_date_str, sector_id
+            ),
+            count_tick_minutes=lambda sector_id: self._hot.count_sector_tick_backfill_minutes(
+                trade_date_str, sector_id
+            ),
+            force=force,
+            latest_tick_minute=lambda sector_id: self._hot.latest_sector_tick_backfill_minute(
+                trade_date_str, sector_id
+            ),
+            session_minute=effective_minute,
+            allow_intraday_refresh=not live_session,
+        )
+        if live_session and not force:
+            # Live concept boards: MAC tick is shaped once per day; priority board_summary
+            # owns the moving tip. Re-pulling tick rescales the whole curve and causes
+            # multi-billion jumps (e.g. CPO -15亿 vs -47亿 within minutes).
+            pending = [
+                sector_id
+                for sector_id in pending
+                if self._hot.count_sector_tick_backfill_minutes(trade_date_str, sector_id) == 0
+            ]
 
         backfilled = 0
         failed: list[str] = []
@@ -142,6 +158,15 @@ class SectorTickBackfillService:
                     if not records:
                         failed.append(f"{sector_id}: tick chart unavailable")
                         continue
+                    # Historical days: replace the whole curve. Live session: keep priority
+                    # board_summary minutes and only refresh tick-backfill rows.
+                    if trade_date < today:
+                        self._hot.delete_sector_day(trade_date.isoformat(), sector_id)
+                    else:
+                        self._hot.delete_sector_tick_backfill(
+                            trade_date.isoformat(),
+                            sector_id,
+                        )
                     self._hot.write_sectors(records)
                     if not include_closing:
                         self._hot.delete_sector_minutes(

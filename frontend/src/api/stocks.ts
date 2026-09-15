@@ -1,4 +1,4 @@
-import { apiGet } from '@/api/client'
+import { apiGet, apiPost, isApiNotFound } from '@/api/client'
 import type { SectorFundFlowPayload } from '@/api/sectors'
 
 export interface BarPoint {
@@ -56,6 +56,96 @@ export function fetchStockFundFlow(symbol: string, tradeDate: string): Promise<S
   return apiGet<SectorFundFlowPayload & { symbol: string }>(`/api/v1/stocks/${symbol}/fund-flow`, {
     date: tradeDate,
   })
+}
+
+export interface StockGrayFlowPoint {
+  minute: string
+  dark_cumulative: number
+  open_cumulative?: number | null
+  total_cumulative?: number | null
+  source?: string | null
+}
+
+export interface StockGrayFlowPayload {
+  symbol: string
+  latest_complete_minute: string
+  points: StockGrayFlowPoint[]
+}
+
+export function fetchStockGrayFlow(symbol: string, tradeDate: string): Promise<StockGrayFlowPayload> {
+  return apiGet<StockGrayFlowPayload>(`/api/v1/stocks/${symbol}/gray-flow`, {
+    date: tradeDate,
+  })
+}
+
+export interface StockFundFlowBatchResponse {
+  trade_date: string
+  items: Array<SectorFundFlowPayload & { symbol: string }>
+}
+
+export interface StockGrayFlowBatchResponse {
+  trade_date: string
+  items: StockGrayFlowPayload[]
+}
+
+export async function fetchStockFundFlowBatch(
+  symbols: string[],
+  tradeDate: string,
+): Promise<StockFundFlowBatchResponse> {
+  if (!symbols.length) {
+    return { trade_date: tradeDate, items: [] }
+  }
+  try {
+    return await apiPost<StockFundFlowBatchResponse>(
+      '/api/v1/stocks/fund-flow/batch',
+      { ids: symbols },
+      { date: tradeDate },
+    )
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error
+    const items = (
+      await Promise.all(
+        symbols.map(async (symbol) => {
+          try {
+            return await fetchStockFundFlow(symbol, tradeDate)
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).filter((item): item is StockFundFlowBatchResponse['items'][number] => item != null)
+    return { trade_date: tradeDate, items }
+  }
+}
+
+export async function fetchStockGrayFlowBatch(
+  symbols: string[],
+  tradeDate: string,
+): Promise<StockGrayFlowBatchResponse> {
+  if (!symbols.length) {
+    return { trade_date: tradeDate, items: [] }
+  }
+  try {
+    return await apiPost<StockGrayFlowBatchResponse>(
+      '/api/v1/stocks/gray-flow/batch',
+      { ids: symbols },
+      { date: tradeDate },
+    )
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error
+    const items = (
+      await Promise.all(
+        symbols.map(async (symbol) => {
+          try {
+            return await fetchStockGrayFlow(symbol, tradeDate)
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).filter((item): item is StockGrayFlowPayload => item != null)
+    return { trade_date: tradeDate, items }
+  }
 }
 
 export function fetchStockIntraday(symbol: string, tradeDate: string): Promise<StockIntradayPayload> {

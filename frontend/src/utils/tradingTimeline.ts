@@ -1,3 +1,5 @@
+import { todayTradeDate } from '@/utils/tradeDate'
+
 /** A-share intraday minute buckets: 09:30–11:30, 13:00–15:00 */
 export const TRADING_MINUTES: string[] = (() => {
   const out: string[] = []
@@ -41,10 +43,9 @@ export function alignValuesToTradingMinutes(
 
 /** Hide synthetic 15:00 and future replay minutes while today's session is open. */
 export function filterLiveReplayMinutes(minutes: string[], tradeDate: string, now = new Date()): string[] {
-  const today = now.toISOString().slice(0, 10)
-  if (tradeDate !== today) return minutes
+  if (tradeDate !== todayTradeDate()) return minutes
   const clock = currentTradingClockMinute(now)
-  if (clock >= '15:00') return minutes
+  if (clock < '09:30' || clock >= '15:00') return minutes
   return minutes.filter((minute) => minute !== '15:00' && minute <= clock)
 }
 
@@ -62,9 +63,16 @@ export function currentTradingClockMinute(now = new Date()): string {
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
 }
 
-/** Drop synthetic 15:00 and future minutes while the session is still open. */
-export function withoutPrematureClosingPoint<T extends { minute: string }>(points: T[], now = new Date()): T[] {
+/** Drop synthetic 15:00 and future minutes while today's session is still open. */
+export function withoutPrematureClosingPoint<T extends { minute: string }>(
+  points: T[],
+  tradeDate?: string | null,
+  now = new Date(),
+): T[] {
+  const today = todayTradeDate()
+  if (tradeDate && tradeDate !== today) return points
   const clock = currentTradingClockMinute(now)
-  if (clock >= '15:00') return points
+  // Pre-open: keep historical/full payload as-is (caller decides empty vs loading).
+  if (clock < '09:30' || clock >= '15:00') return points
   return points.filter((point) => point.minute !== '15:00' && point.minute <= clock)
 }

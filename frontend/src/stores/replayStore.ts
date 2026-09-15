@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { fetchReplayDates } from '@/api/replay'
+import { isWeekdayDate } from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
 
 export const useReplayStore = defineStore('replay', {
@@ -19,7 +20,7 @@ export const useReplayStore = defineStore('replay', {
   actions: {
     async loadAvailableDates() {
       const response = await fetchReplayDates()
-      this.availableDates = response.dates
+      this.availableDates = response.dates.filter((d) => isWeekdayDate(d))
     },
     setLive() {
       this.mode = 'live'

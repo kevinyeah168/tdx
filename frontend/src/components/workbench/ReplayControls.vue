@@ -5,18 +5,26 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fetchReplayMinutes } from '@/api/replay'
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
 import { useReplayStore } from '@/stores/replayStore'
-import { currentTradingClockMinute, filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
-import { todayTradeDate } from '@/utils/tradeDate'
+import { isWeekdayDate } from '@/utils/tradingSession'
+import { filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
+import { localDateFromTimestamp, todayTradeDate } from '@/utils/tradeDate'
 
 const replayStore = useReplayStore()
 const minuteOptions = ref<{ label: string; value: string }[]>([])
 const loadingMinutes = ref(false)
 
 const selectableDates = computed(() => {
-  const dates = new Set(replayStore.availableDates)
-  dates.add(todayTradeDate())
+  const dates = new Set(replayStore.availableDates.filter((d) => isWeekdayDate(d)))
+  const today = todayTradeDate()
+  if (isWeekdayDate(today)) dates.add(today)
   return [...dates].sort((a, b) => b.localeCompare(a))
 })
+
+function isDateDisabled(ts: number): boolean {
+  const d = localDateFromTimestamp(ts)
+  if (!isWeekdayDate(d)) return true
+  return !selectableDates.value.includes(d)
+}
 
 async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
   const date = tradeDate || replayStore.tradeDate
@@ -55,7 +63,7 @@ async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
 }
 
 async function onDateChange(date: string | null) {
-  if (!date) return
+  if (!date || !isWeekdayDate(date) || !selectableDates.value.includes(date)) return
   replayStore.tradeDate = date
   await loadMinutes(date)
 }
@@ -105,10 +113,7 @@ defineExpose({ loadMinutes })
       size="small"
       :actions="null"
       class="replay-date"
-      :is-date-disabled="(ts: number) => {
-        const d = new Date(ts).toISOString().slice(0, 10)
-        return !selectableDates.includes(d)
-      }"
+      :is-date-disabled="isDateDisabled"
       @update:formatted-value="onDateChange"
     />
     <NSelect

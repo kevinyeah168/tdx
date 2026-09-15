@@ -157,6 +157,20 @@ try {
     $resolvedDataDir = (Join-Path $Root ($DataDir -replace '^\.\./', ''))
 }
 
+# Drop leftover collectors before launch (duplicate hot/archive writers corrupt hot DBs).
+foreach ($proc in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
+    $cmd = $proc.CommandLine
+    if ($cmd -and ($cmd -like "*workbench.collector.main*")) {
+        $null = Start-Process -FilePath "taskkill.exe" -ArgumentList @("/PID", "$($proc.ProcessId)", "/T", "/F") `
+            -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+        Write-Host "  cleaned leftover collector pid=$($proc.ProcessId)" -ForegroundColor DarkGray
+    }
+}
+Get-ChildItem -Path (Join-Path $Root "data\workbench-real\run") -Filter "collector-*.lock" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $RunDir -Filter "collector-*.lock" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 if (Test-PortListening -Port $ApiPort) {
     Write-Host "[ERROR] API port $ApiPort is already in use." -ForegroundColor Red
     Write-Host "        Workbench may already be running." -ForegroundColor Yellow

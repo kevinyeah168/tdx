@@ -9,6 +9,8 @@ import StockPickerDrawer from '@/components/stock/StockPickerDrawer.vue'
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
 import { useBoardStore } from '@/stores/boardStore'
 import { useReplayStore } from '@/stores/replayStore'
+import { shouldPollLiveWorkbench } from '@/utils/tradingSession'
+import { todayTradeDate } from '@/utils/tradeDate'
 
 const boardStore = useBoardStore()
 const replayStore = useReplayStore()
@@ -16,6 +18,7 @@ const replayStore = useReplayStore()
 let pollTimer: ReturnType<typeof setInterval> | undefined
 let tickTimer: ReturnType<typeof setInterval> | undefined
 let syncTimer: ReturnType<typeof setInterval> | undefined
+let pollInFlight = false
 
 async function syncFromReplay() {
   const minute = replayStore.mode === 'live' ? null : replayStore.minute
@@ -27,15 +30,46 @@ onMounted(async () => {
   void syncWorkbenchPriorityTargets()
 
   pollTimer = setInterval(async () => {
-    if (boardStore.isPanelBusy) return
-    if (replayStore.mode === 'live') {
-      boardStore.replayMinute = null
+    if (pollInFlight || boardStore.isPanelBusy) return
+    if (
+      replayStore.mode === 'live' &&
+      !shouldPollLiveWorkbench({
+        mode: replayStore.mode,
+        tradeDate: replayStore.tradeDate || todayTradeDate(),
+      })
+    ) {
+      return
     }
-    await boardStore.loadBoard()
-    boardStore.resetCountdown()
+    pollInFlight = true
+    try {
+      if (replayStore.mode === 'live') {
+        boardStore.replayMinute = null
+        // Panel historical dates must stick; do not pull them back to TopBar "today".
+        if (boardStore.isHistoricalSectorView()) {
+          if (!boardStore.isHistoricalStockView()) {
+            await boardStore.loadStockPanel()
+            boardStore.resetCountdown()
+          }
+          return
+        }
+      }
+      await boardStore.loadBoard()
+      boardStore.resetCountdown()
+    } finally {
+      pollInFlight = false
+    }
   }, WORKBENCH_REFRESH_MS)
 
   syncTimer = setInterval(() => {
+    if (
+      replayStore.mode !== 'live' ||
+      !shouldPollLiveWorkbench({
+        mode: replayStore.mode,
+        tradeDate: replayStore.tradeDate || todayTradeDate(),
+      })
+    ) {
+      return
+    }
     void syncWorkbenchPriorityTargets({
       linkageSectorId: boardStore.linkageSectorId,
       linkageSectorName: boardStore.linkageSectorName,
@@ -54,9 +88,17 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => [replayStore.tradeDate, replayStore.minute] as const,
+  () => replayStore.tradeDate,
   () => {
     void syncFromReplay()
+  },
+)
+
+watch(
+  () => replayStore.minute,
+  (minute) => {
+    if (replayStore.mode !== 'replay') return
+    void boardStore.syncReplayMinute(minute)
   },
 )
 </script>

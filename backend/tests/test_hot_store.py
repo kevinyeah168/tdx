@@ -383,9 +383,18 @@ def test_sector_fund_series_hides_closing_minute_during_live_session(
     trade_date = date.today().isoformat()
     store = HotStore(tmp_path / f"{trade_date}.sqlite")
     store.initialize()
+    monkeypatch.setattr(
+        "workbench.collector.trading_clock.live_session_minute_cap",
+        lambda _trade_date, _now=None: "09:50",
+    )
+    monkeypatch.setattr(
+        hot_store_module,
+        "should_include_closing_minute",
+        lambda _trade_date, _now=None: False,
+    )
 
     def sector_at(minute: str) -> SectorMinute:
-        record = sector_record(batch_id=f"{trade_date}Tbackfill-tick")
+        record = sector_record(batch_id=f"{trade_date}T{minute}-yuntu")
         return record.model_copy(update={"trade_date": date.today(), "minute": minute})
 
     store.write_sectors([sector_at("09:30"), sector_at("09:50"), sector_at("15:00")])
