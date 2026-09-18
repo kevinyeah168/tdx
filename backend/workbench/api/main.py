@@ -84,6 +84,19 @@ class StockGrayFlowPayload(BaseModel):
     points: list[GrayCurvePoint]
 
 
+class SectorGrayFlowPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sector_id: str
+    latest_complete_minute: str
+    member_count: int | None = None
+    gray_covered_count: int | None = None
+    coverage_pct: float | None = None
+    source: str | None = None
+    quality: str | None = None
+    points: list[GrayCurvePoint]
+
+
 class IdsBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -109,6 +122,13 @@ class StockGrayFlowBatchResponse(BaseModel):
 
     trade_date: str
     items: list[StockGrayFlowPayload]
+
+
+class SectorGrayFlowBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    items: list[SectorGrayFlowPayload]
 
 
 def _parse_tiers(tiers: str | None) -> tuple[str, ...]:
@@ -168,6 +188,51 @@ def _serialize_gray_curve(*, symbol: str, curve: Any) -> StockGrayFlowPayload:
         {
             "symbol": symbol,
             "latest_complete_minute": curve.latest_complete_minute,
+            "points": points,
+        }
+    )
+
+
+def _serialize_sector_gray_curve(*, sector_id: str, curve: Any) -> SectorGrayFlowPayload:
+    if not curve.rows or curve.latest_complete_minute is None:
+        return SectorGrayFlowPayload.model_validate(
+            {
+                "sector_id": sector_id,
+                "latest_complete_minute": "",
+                "points": [],
+            }
+        )
+    points: list[dict[str, Any]] = []
+    latest_row = curve.rows[-1]
+    for row in curve.rows:
+        point: dict[str, Any] = {
+            "minute": row["minute"],
+            "dark_cumulative": float(row["dark_cum"]),
+        }
+        if row.get("open_cum") is not None:
+            point["open_cumulative"] = float(row["open_cum"])
+        if row.get("total_cum") is not None:
+            point["total_cumulative"] = float(row["total_cum"])
+        if row.get("source") is not None:
+            point["source"] = str(row["source"])
+        points.append(point)
+    member_count = latest_row.get("member_count")
+    gray_covered_count = latest_row.get("gray_covered_count")
+    coverage_pct = None
+    if member_count and gray_covered_count is not None:
+        try:
+            coverage_pct = round(float(gray_covered_count) / float(member_count) * 100.0, 2)
+        except ZeroDivisionError:
+            coverage_pct = None
+    return SectorGrayFlowPayload.model_validate(
+        {
+            "sector_id": sector_id,
+            "latest_complete_minute": curve.latest_complete_minute,
+            "member_count": int(member_count) if member_count is not None else None,
+            "gray_covered_count": int(gray_covered_count) if gray_covered_count is not None else None,
+            "coverage_pct": coverage_pct,
+            "source": str(latest_row.get("source") or "") or None,
+            "quality": str(latest_row.get("quality") or "") or None,
             "points": points,
         }
     )
@@ -401,6 +466,17 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
             raise _unavailable_storage() from error
 
+    @application.get("/api/v1/sectors/{sector_id}/gray-flow", response_model=SectorGrayFlowPayload)
+    def sector_gray_flow(sector_id: str, trade_date: date = Query(alias="date")) -> SectorGrayFlowPayload:
+        try:
+            store = _hot_store(active_settings, trade_date)
+            curve = store.sector_gray_curve(trade_date.isoformat(), sector_id)
+            return _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)
+        except HTTPException:
+            raise
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as error:
+            raise _unavailable_storage() from error
+
     @application.get("/api/v1/sectors/{sector_id}/minutes", response_model=SectorFundFlowPayload)
     def sector_minutes(
         sector_id: str,
@@ -511,6 +587,26 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
             except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
                 continue
         return StockGrayFlowBatchResponse(trade_date=trade_date_str, items=items)
+
+    @application.post("/api/v1/sectors/gray-flow/batch", response_model=SectorGrayFlowBatchResponse)
+    def sector_gray_flow_batch(
+        payload: IdsBatchRequest,
+        trade_date: date = Query(alias="date"),
+    ) -> SectorGrayFlowBatchResponse:
+        store = _optional_hot_store(active_settings, trade_date)
+        if store is None:
+            return SectorGrayFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
+        trade_date_str = trade_date.isoformat()
+        items: list[SectorGrayFlowPayload] = []
+        for sector_id in _normalize_batch_ids(payload.ids):
+            try:
+                curve = store.sector_gray_curve(trade_date_str, sector_id)
+                serialized = _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)
+            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+                continue
+            if serialized.points:
+                items.append(serialized)
+        return SectorGrayFlowBatchResponse(trade_date=trade_date_str, items=items)
 
     return application
 

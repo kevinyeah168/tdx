@@ -13,6 +13,7 @@ export default defineConfig({
     'num': 'font-mono tabular-nums',
     'text-up': 'text-[var(--up)]',
     'text-down': 'text-[var(--down)]',
+    'text-flat': 'text-[var(--muted)]',
   },
   theme: {
     colors: {

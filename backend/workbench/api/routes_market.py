@@ -22,6 +22,7 @@ from workbench.collector.priority_stocks import (
 from workbench.collector.priority_targets import apply_hot_target_sync, resolve_priority_stock_symbols
 from workbench.config import WorkbenchSettings
 from workbench.providers.tdx.live_members import fetch_live_board_members_cached
+from workbench.providers.tdx.market_scope_records import MARKET_SCOPE_LABELS, MARKET_SCOPE_ORDER
 from workbench.query.market import MarketQueryService
 from workbench.query.models import (
     CatalogMemberItem,
@@ -71,6 +72,40 @@ def get_hot_store(
     return store
 
 
+class MarketScopeCurvePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    minute: str
+    main_cumulative: float
+    main_delta: float
+    change_pct: float | None = None
+
+
+class MarketScopeSeriesPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    scope: str
+    label: str
+    latest_complete_minute: str | None = None
+    change_pct: float | None = None
+    points: list[MarketScopeCurvePoint] = Field(default_factory=list)
+
+
+class MarketScopeSeriesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    items: list[MarketScopeSeriesPayload] = Field(default_factory=list)
+
+
+def _parse_market_scopes(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return MARKET_SCOPE_ORDER
+    allowed = set(MARKET_SCOPE_ORDER)
+    parsed = tuple(scope for scope in raw.split(",") if scope in allowed)
+    return parsed or MARKET_SCOPE_ORDER
+
+
 def create_market_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/market", tags=["market"])
 
@@ -94,6 +129,51 @@ def create_market_router() -> APIRouter:
         meta: MetaStore = Depends(get_meta_store),
     ) -> SearchResponse:
         return MarketQueryService(meta).search(q)
+
+    @router.get("/scopes/minutes", response_model=MarketScopeSeriesResponse)
+    def market_scope_minutes(
+        trade_date: date = Query(alias="date"),
+        scopes: str | None = Query(default=None),
+        minute: str | None = None,
+        settings: WorkbenchSettings = Depends(get_settings),
+    ) -> MarketScopeSeriesResponse:
+        hot_path = settings.hot_db_for(trade_date.isoformat())
+        if not hot_path.is_file():
+            return MarketScopeSeriesResponse(trade_date=trade_date.isoformat(), items=[])
+        store = HotStore(hot_path)
+        store.initialize()
+        trade_date_str = trade_date.isoformat()
+        items: list[MarketScopeSeriesPayload] = []
+        for scope in _parse_market_scopes(scopes):
+            curve = store.complete_market_scope_fund_curve(trade_date_str, scope)
+            rows = curve.rows
+            if minute:
+                rows = [row for row in rows if str(row["minute"]) <= minute]
+            if not rows:
+                continue
+            latest = (
+                minute
+                if minute and rows
+                else curve.latest_complete_minute or str(rows[-1]["minute"])
+            )
+            items.append(
+                MarketScopeSeriesPayload(
+                    scope=scope,
+                    label=MARKET_SCOPE_LABELS[scope],  # type: ignore[index]
+                    latest_complete_minute=latest,
+                    change_pct=float(rows[-1].get("change_pct", 0.0)),
+                    points=[
+                        MarketScopeCurvePoint(
+                            minute=str(row["minute"]),
+                            main_cumulative=float(row["main_cum"]),
+                            main_delta=float(row["main_delta"]),
+                            change_pct=float(row.get("change_pct", 0.0)),
+                        )
+                        for row in rows
+                    ],
+                )
+            )
+        return MarketScopeSeriesResponse(trade_date=trade_date_str, items=items)
 
     return router
 
@@ -689,7 +769,7 @@ def create_sector_router() -> APIRouter:
     def sector_rank(
         trade_date: date = Query(alias="date"),
         minute: str | None = None,
-        limit: int = Query(default=12, ge=1, le=50),
+        limit: int = Query(default=12, ge=1, le=100),
         meta: MetaStore = Depends(get_meta_store),
         hot: HotStore = Depends(get_hot_store),
     ) -> SectorRankResponse:
@@ -747,7 +827,7 @@ def create_sector_router() -> APIRouter:
         request: Request,
         trade_date: date = Query(alias="date"),
         minute: str = Query(default="09:31"),
-        limit: int = Query(default=20, ge=1, le=100),
+        limit: int = Query(default=60, ge=1, le=100),
         sector_name: str | None = Query(default=None, alias="name"),
         meta: MetaStore = Depends(get_meta_store),
         hot: HotStore = Depends(get_hot_store),

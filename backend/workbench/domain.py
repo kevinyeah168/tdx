@@ -305,12 +305,37 @@ class StockGrayMinute(NormalizedModel):
     source: NonBlankText = "eastmoney:graymarket:darktrade"
 
 
+class SectorGrayMinute(NormalizedModel):
+    trade_date: date
+    minute: Minute
+    sector_id: NonBlankText
+    member_count: int = Field(ge=0)
+    gray_covered_count: int = Field(ge=0)
+    open_cum: FiniteFloat
+    dark_cum: FiniteFloat
+    total_cum: FiniteFloat
+    observed_at: datetime
+    batch_id: NonBlankText
+    source: NonBlankText = "constituent_sum:eastmoney:graymarket:darktrade"
+    quality: DataQuality = DataQuality.AGGREGATED
+
+
 class SectorMinute(NormalizedModel):
     trade_date: date
     minute: Minute
     sector_id: NonBlankText
     change_pct: FiniteFloat
     member_count: int = Field(ge=0)
+    funds: FundFlow
+    observed_at: datetime
+    batch_id: NonBlankText
+
+
+class MarketScopeMinute(NormalizedModel):
+    trade_date: date
+    minute: Minute
+    scope: Literal["hs", "sh", "kc", "sz", "cy"]
+    change_pct: FiniteFloat
     funds: FundFlow
     observed_at: datetime
     batch_id: NonBlankText

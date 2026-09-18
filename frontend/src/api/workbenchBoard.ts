@@ -11,11 +11,13 @@ import {
 import {
   fetchSectorCatalogMembers,
   fetchSectorFundFlowBatch,
+  fetchSectorGrayFlowBatch,
   fetchSectorMembers,
   fetchSectorRank,
   fetchSectorSnapshot,
   fetchSectors,
   type CurvePoint,
+  type SectorGrayFlowPoint,
 } from '@/api/sectors'
 import {
   fetchStockFundFlow,
@@ -51,9 +53,9 @@ const LINKAGE_TOP_K_KEY = 'workbench-linkage-top-k'
 export type SectorSourceMode = 'auto' | 'selected'
 export type StockSourceMode = 'linkage' | 'selected'
 
-export const DEFAULT_AUTO_SECTOR_COUNT = 20
-export const DEFAULT_LINKAGE_TOP_K = 20
-export const MAX_CHART_SECTORS = 30
+export const DEFAULT_AUTO_SECTOR_COUNT = 60
+export const DEFAULT_LINKAGE_TOP_K = 60
+export const MAX_CHART_SECTORS = 60
 
 const BOARD_TYPE_FILTER: Partial<Record<BoardCatalogType, string>> = {
   HY: 'industry',
@@ -100,7 +102,7 @@ export function saveStockSourceMode(mode: StockSourceMode) {
 
 export function loadAutoSectorCount(): number {
   const value = readStorage<number>(AUTO_SECTOR_COUNT_KEY)
-  if (typeof value === 'number' && value >= 4 && value <= 50) return value
+  if (typeof value === 'number' && value >= 4 && value <= 60) return value
   return DEFAULT_AUTO_SECTOR_COUNT
 }
 
@@ -110,7 +112,7 @@ export function saveAutoSectorCount(count: number) {
 
 export function loadLinkageTopK(): number {
   const value = readStorage<number>(LINKAGE_TOP_K_KEY)
-  if (typeof value === 'number' && value >= 5 && value <= 100) return value
+  if (typeof value === 'number' && value >= 5 && value <= 60) return value
   return DEFAULT_LINKAGE_TOP_K
 }
 
@@ -398,7 +400,7 @@ function mergeTimeline(items: RawSeries[]): string[] {
 
 function attachGrayToFlowSeries(
   series: FlowSeries,
-  grayPoints: StockGrayFlowPoint[],
+  grayPoints: Array<StockGrayFlowPoint | SectorGrayFlowPoint>,
   boardTimeline: string[],
 ): FlowSeries {
   if (!grayPoints.length) return series
@@ -943,18 +945,24 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     }
   }
 
-  let sectorResults: Array<{ board: BoardItem; series: RawSeries | null }>
+  let sectorResults: Array<{ board: BoardItem; series: RawSeries | null; grayPoints: SectorGrayFlowPoint[] | null }>
   if (!fetchCurves || !sectorBoards.length) {
-    sectorResults = sectorBoards.map((board) => ({ board, series: null }))
+    sectorResults = sectorBoards.map((board) => ({ board, series: null, grayPoints: null }))
   } else {
-    const batch = await fetchSectorFundFlowBatch(
-      sectorBoards.map((board) => board.id),
-      sectorDate,
-    )
+    const sectorIds = sectorBoards.map((board) => board.id)
+    const [batch, grayBatch] = await Promise.all([
+      fetchSectorFundFlowBatch(sectorIds, sectorDate),
+      fetchSectorGrayFlowBatch(sectorIds, sectorDate).catch(() => ({
+        trade_date: sectorDate,
+        items: [],
+      })),
+    ])
     const payloadById = new Map(batch.items.map((item) => [item.sector_id, item]))
+    const grayById = new Map(grayBatch.items.map((item) => [item.sector_id, item.points]))
     sectorResults = sectorBoards.map((board) => {
       const payload = payloadById.get(board.id)
-      if (!payload) return { board, series: null }
+      if (!payload) return { board, series: null, grayPoints: null }
+      const grayPoints = grayById.get(board.id) ?? null
       return {
         board,
         series: buildRawSeries(board.id, board.name, payload.points, payload.change_pct ?? null, {
@@ -962,6 +970,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
           pre_close: payload.pre_close ?? null,
           trade_date: sectorDate,
         }),
+        grayPoints: grayPoints?.length ? grayPoints : null,
       }
     })
   }
@@ -985,14 +994,19 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   const snapshotBySectorId = new Map(
     enrichedSelectedBoards.map((board) => [board.id, board.cum_main ?? null]),
   )
-  const sectorSeries = rawSectorSeries.map((item) => {
-    const aligned = alignToTimeline(item, timeline)
-    const snapMain = snapshotBySectorId.get(aligned.id)
-    if (snapMain != null && Number.isFinite(snapMain)) {
-      return { ...aligned, cum_main: snapMain }
-    }
-    return aligned
-  })
+  const sectorSeries = sectorResults
+    .filter((item): item is typeof item & { series: RawSeries } => item.series != null)
+    .map((item) => {
+      const aligned = alignToTimeline(item.series, timeline)
+      const snapMain = snapshotBySectorId.get(aligned.id)
+      const withMain =
+        snapMain != null && Number.isFinite(snapMain)
+          ? { ...aligned, cum_main: snapMain }
+          : aligned
+      return item.grayPoints?.length
+        ? attachGrayToFlowSeries(withMain, item.grayPoints, timeline)
+        : withMain
+    })
 
   const seriesBySectorId = new Map(sectorSeries.map((item) => [item.id, item]))
   const finalSelectedBoards = enrichedSelectedBoards.map((board) => {
@@ -1001,6 +1015,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     return {
       ...board,
       cum_main: series.cum_main,
+      cum_gray: series.cum_gray ?? null,
       change_pct: series.change_pct ?? board.change_pct ?? null,
     }
   })
@@ -1037,7 +1052,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
 
   let stockHint: string | undefined
   if (stockSourceMode === 'linkage' && !linkageSectorId) {
-    stockHint = '点击左侧板块查看成分股主力（默认前 20）'
+    stockHint = '点击左侧板块查看成分股主力（默认前 60）'
   } else if (stockSourceMode === 'linkage' && linkageSectorId && !stockSeries.length) {
     stockHint = '该板块暂无成分股采样数据'
   } else if (stockSourceMode === 'selected' && !stockTargets.length) {

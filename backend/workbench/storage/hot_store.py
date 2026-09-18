@@ -16,7 +16,14 @@ from workbench.collector.trading_clock import (
     filter_minutes_for_live_session,
     should_include_closing_minute,
 )
-from workbench.domain import CollectionStatus, SectorMinute, StockGrayMinute, StockMinute
+from workbench.domain import (
+    CollectionStatus,
+    MarketScopeMinute,
+    SectorGrayMinute,
+    SectorMinute,
+    StockGrayMinute,
+    StockMinute,
+)
 from workbench.storage.migrations import ensure_hot_schema
 from workbench.storage.schema import HOT_SCHEMA, configure_hot_connection
 
@@ -97,6 +104,22 @@ INSERT INTO sector_minute(
     batch_id=excluded.batch_id
 """
 
+MARKET_SCOPE_UPSERT = """
+INSERT INTO market_scope_minute(
+    trade_date, minute, scope, change_pct,
+    main_delta, main_cum, tier_meta_json, observed_at, batch_id
+) VALUES(
+    :trade_date, :minute, :scope, :change_pct,
+    :main_delta, :main_cum, :tier_meta_json, :observed_at, :batch_id
+) ON CONFLICT(trade_date, minute, scope) DO UPDATE SET
+    change_pct=excluded.change_pct,
+    main_delta=excluded.main_delta,
+    main_cum=excluded.main_cum,
+    tier_meta_json=excluded.tier_meta_json,
+    observed_at=excluded.observed_at,
+    batch_id=excluded.batch_id
+"""
+
 STOCK_GRAY_UPSERT = """
 INSERT INTO stock_gray_minute(
     trade_date, minute, symbol, code, open_cum, dark_cum, total_cum,
@@ -112,6 +135,25 @@ INSERT INTO stock_gray_minute(
     observed_at=excluded.observed_at,
     batch_id=excluded.batch_id,
     source=excluded.source
+"""
+
+SECTOR_GRAY_UPSERT = """
+INSERT INTO sector_gray_minute(
+    trade_date, minute, sector_id, member_count, gray_covered_count,
+    open_cum, dark_cum, total_cum, observed_at, batch_id, source, quality
+) VALUES(
+    :trade_date, :minute, :sector_id, :member_count, :gray_covered_count,
+    :open_cum, :dark_cum, :total_cum, :observed_at, :batch_id, :source, :quality
+) ON CONFLICT(trade_date, minute, sector_id) DO UPDATE SET
+    member_count=excluded.member_count,
+    gray_covered_count=excluded.gray_covered_count,
+    open_cum=excluded.open_cum,
+    dark_cum=excluded.dark_cum,
+    total_cum=excluded.total_cum,
+    observed_at=excluded.observed_at,
+    batch_id=excluded.batch_id,
+    source=excluded.source,
+    quality=excluded.quality
 """
 
 STATUS_UPSERT = """
@@ -178,6 +220,20 @@ def _stock_params(record: StockMinute) -> dict[str, Any]:
     }
 
 
+def _market_scope_params(record: MarketScopeMinute) -> dict[str, Any]:
+    return {
+        "trade_date": record.trade_date.isoformat(),
+        "minute": record.minute,
+        "scope": record.scope,
+        "change_pct": record.change_pct,
+        "main_delta": record.funds.main.delta,
+        "main_cum": record.funds.main.cumulative,
+        "tier_meta_json": _tier_meta(record),
+        "observed_at": record.observed_at.isoformat(),
+        "batch_id": record.batch_id,
+    }
+
+
 def _sector_params(record: SectorMinute) -> dict[str, Any]:
     return {
         "trade_date": record.trade_date.isoformat(),
@@ -213,6 +269,23 @@ def _stock_gray_params(record: StockGrayMinute) -> dict[str, Any]:
         "observed_at": record.observed_at.isoformat(),
         "batch_id": record.batch_id,
         "source": record.source,
+    }
+
+
+def _sector_gray_params(record: SectorGrayMinute) -> dict[str, Any]:
+    return {
+        "trade_date": record.trade_date.isoformat(),
+        "minute": record.minute,
+        "sector_id": record.sector_id,
+        "member_count": record.member_count,
+        "gray_covered_count": record.gray_covered_count,
+        "open_cum": record.open_cum,
+        "dark_cum": record.dark_cum,
+        "total_cum": record.total_cum,
+        "observed_at": record.observed_at.isoformat(),
+        "batch_id": record.batch_id,
+        "source": record.source,
+        "quality": record.quality.value,
     }
 
 
@@ -298,11 +371,29 @@ class HotStore:
         with self._session() as connection:
             connection.executemany(STOCK_GRAY_UPSERT, [_stock_gray_params(record) for record in records])
 
+    def write_sector_gray(self, records: list[SectorGrayMinute]) -> None:
+        if not records:
+            return
+        with self._session() as connection:
+            connection.executemany(
+                SECTOR_GRAY_UPSERT,
+                [_sector_gray_params(record) for record in records],
+            )
+
     def write_sectors(self, records: list[SectorMinute]) -> None:
         if not records:
             return
         with self._session() as connection:
             connection.executemany(SECTOR_UPSERT, [_sector_params(record) for record in records])
+
+    def write_market_scopes(self, records: list[MarketScopeMinute]) -> None:
+        if not records:
+            return
+        with self._session() as connection:
+            connection.executemany(
+                MARKET_SCOPE_UPSERT,
+                [_market_scope_params(record) for record in records],
+            )
 
     def delete_sector_day(self, trade_date: str, sector_id: str) -> int:
         with self._session() as connection:
@@ -548,6 +639,32 @@ class HotStore:
             self._published_snapshot_rows(trade_date, parsed),
         )
 
+    def market_scope_fund_series(self, trade_date: str, scope: str) -> list[dict[str, Any]]:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM market_scope_minute WHERE trade_date=? AND scope=? ORDER BY minute",
+                (trade_date, scope),
+            ).fetchall()
+        parsed = [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+        return self._filter_live_rows(
+            trade_date,
+            self._published_snapshot_rows(trade_date, parsed),
+        )
+
+    def complete_market_scope_fund_curve(self, trade_date: str, scope: str) -> CompleteFundCurve:
+        rows = self.market_scope_fund_series(trade_date, scope)
+        latest = self.latest_available_minute(trade_date)
+        if latest is None and rows:
+            latest = str(rows[-1]["minute"])
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            latest,
+        )
+        return CompleteFundCurve(
+            latest_complete_minute=latest,
+            rows=rows,
+        )
+
     def sector_fund_series(self, trade_date: str, sector_id: str) -> list[dict[str, Any]]:
         with self._session(readonly=True) as connection:
             rows = connection.execute(
@@ -624,11 +741,39 @@ class HotStore:
             latest = str(ordered[-1]["minute"])
         return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
 
+    def stock_gray_rows_for_trade_date(self, trade_date: str) -> list[dict[str, Any]]:
+        with self._session(readonly=True) as connection:
+            table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_gray_minute'"
+            ).fetchone()
+            if table is None:
+                return []
+            rows = connection.execute(
+                "SELECT * FROM stock_gray_minute WHERE trade_date=? ORDER BY minute, symbol",
+                (trade_date,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def stock_gray_curve(self, trade_date: str, symbol: str) -> CompleteFundCurve:
         with self._session(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM stock_gray_minute WHERE trade_date=? AND symbol=? ORDER BY minute",
                 (trade_date, symbol.upper()),
+            ).fetchall()
+        ordered = [dict(row) for row in rows]
+        ordered = self._filter_live_rows(trade_date, ordered)
+        latest = ordered[-1]["minute"] if ordered else None
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            str(latest) if latest else None,
+        )
+        return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+
+    def sector_gray_curve(self, trade_date: str, sector_id: str) -> CompleteFundCurve:
+        with self._session(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM sector_gray_minute WHERE trade_date=? AND sector_id=? ORDER BY minute",
+                (trade_date, sector_id),
             ).fetchall()
         ordered = [dict(row) for row in rows]
         ordered = self._filter_live_rows(trade_date, ordered)

@@ -43,6 +43,10 @@ def test_yuntu_collector_writes_successful_snapshot(tmp_path: Path) -> None:
                     {"stockcode": "600519", "f_amo_sum_wan": 100.0, "dqzf": 0.01, "now": 10.0},
                     {"stockcode": "000001", "f_amo_sum_wan": 20.0, "dqzf": 0.02, "now": 11.0},
                     {"stockcode": "880656", "f_amo_sum_wan": -50.0, "dqzf": -0.01, "now": 0.0},
+                    {"stockcode": "880001", "f_amo_sum_wan": 900.0, "dqzf": 0.008, "now": 0.0},
+                    {"stockcode": "880011", "f_amo_sum_wan": 400.0, "dqzf": 0.005, "now": 0.0},
+                    {"stockcode": "880041", "f_amo_sum_wan": 300.0, "dqzf": 0.02, "now": 0.0},
+                    {"stockcode": "880031", "f_amo_sum_wan": 150.0, "dqzf": 0.015, "now": 0.0},
                 ]
             )
         ).decode("ascii")
@@ -68,6 +72,14 @@ def test_yuntu_collector_writes_successful_snapshot(tmp_path: Path) -> None:
     assert stock[0] == 1_000_000.0
     assert "official" in stock[1]
     assert sector is not None
+    market_rows = connection.execute(
+        "SELECT scope, main_cum FROM market_scope_minute WHERE minute=? ORDER BY scope",
+        ("09:31",),
+    ).fetchall()
+    by_scope = {str(row[0]): float(row[1]) for row in market_rows}
+    assert len(by_scope) == 5
+    assert by_scope["cy"] == 1_500_000.0
+    assert by_scope["sz"] == 200_000.0
 
 
 def test_yuntu_collector_writes_gap_minute_when_poll_fails(tmp_path: Path) -> None:

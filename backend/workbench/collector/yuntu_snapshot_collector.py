@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from workbench.config import WorkbenchSettings
+from workbench.providers.tdx.market_scope_records import (
+    build_gap_market_scope_minutes,
+    build_market_scope_minutes_from_yuntu,
+)
 from workbench.providers.tdx.yuntu_minute_records import (
     GAP_BATCH_MARKER,
     YUNTU_SOURCE,
@@ -29,6 +33,7 @@ class YuntuSnapshotCollector:
     _minutes_with_success: set[str] = field(default_factory=set, init=False)
     _previous_stock_main_cum: dict[str, float] = field(default_factory=dict, init=False)
     _previous_sector_main_cum: dict[str, float] = field(default_factory=dict, init=False)
+    _previous_market_scope_main_cum: dict[str, float] = field(default_factory=dict, init=False)
     _catalog_loaded: bool = field(default=False, init=False)
     _sector_ids: list[str] = field(default_factory=list, init=False)
     _stock_symbols: list[str] = field(default_factory=list, init=False)
@@ -88,11 +93,28 @@ class YuntuSnapshotCollector:
             self.hot.write_sectors(sectors)
             apply_written_main_cum(self._previous_sector_main_cum, sectors, key_attr="sector_id")
 
+        market_scopes = build_market_scope_minutes_from_yuntu(
+            trade_date=trade_date,
+            minute=minute,
+            rows=rows,
+            previous_main_cum=self._previous_market_scope_main_cum,
+            observed_at=observed_at,
+            batch_id=batch_id,
+        )
+        if market_scopes:
+            self.hot.write_market_scopes(market_scopes)
+            apply_written_main_cum(
+                self._previous_market_scope_main_cum,
+                market_scopes,
+                key_attr="scope",
+            )
+
         self._minutes_with_success.add(minute)
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         return {
             "yuntu_stocks": len(stocks),
             "yuntu_sectors": len(sectors),
+            "yuntu_market_scopes": len(market_scopes),
             "minute": minute,
             "duration_ms": duration_ms,
             "source": YUNTU_SOURCE,
@@ -133,6 +155,15 @@ class YuntuSnapshotCollector:
             self.hot.write_stocks(stocks)
         if sectors:
             self.hot.write_sectors(sectors)
+        market_scopes = build_gap_market_scope_minutes(
+            trade_date=trade_date,
+            minute=minute,
+            previous_main_cum=self._previous_market_scope_main_cum,
+            observed_at=observed_at,
+            batch_id=batch_id,
+        )
+        if market_scopes:
+            self.hot.write_market_scopes(market_scopes)
 
     def _ensure_catalog(self) -> None:
         if self._catalog_loaded:

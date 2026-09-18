@@ -2,10 +2,15 @@
 import { NDataTable, NEmpty } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed, h } from 'vue'
-import { MAX_CHART_SECTORS, chartVisibleCount } from '@/api/workbenchBoard'
+import {
+  DEFAULT_LINKAGE_TOP_K,
+  MAX_CHART_SECTORS,
+  chartVisibleCount,
+} from '@/api/workbenchBoard'
 import { useBoardStore } from '@/stores/boardStore'
 import type { BoardItem, FlowSeries } from '@/types/board'
 import { seriesColor } from '@/utils/chartColors'
+import { valueAtTradingMinute } from '@/utils/tradingTimeline'
 import {
   chgTone,
   fmtMoneyCompact,
@@ -24,7 +29,7 @@ const props = defineProps<{
 }>()
 
 const boardStore = useBoardStore()
-const { board, highlightedSector, highlightedStock, linkageSectorId, stockSourceMode } =
+const { board, highlightedSector, highlightedStock, linkageSectorId, stockSourceMode, chartHoverMinute, chartHoverSource } =
   storeToRefs(boardStore)
 
 const highlighted = computed(() => {
@@ -41,13 +46,53 @@ const chartSolo = computed(() =>
 
 const chartVisibleTotal = computed(() => chartVisibleCount(board.value.selected_boards ?? []))
 
-const sectorRows = computed(() =>
-  [...(board.value.selected_boards ?? [])].sort(
-    (a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0),
-  ),
+const linkedHoverMinute = computed(() =>
+  chartHoverSource.value === props.mode ? chartHoverMinute.value : null,
 )
 
-const stockRows = computed(() => [...board.value.stock_series])
+function stockValueAtHover(series: FlowSeries): FlowSeries {
+  const minute = linkedHoverMinute.value
+  if (!minute) return series
+  const timeline = board.value.stock_timeline || []
+  const main = valueAtTradingMinute(timeline, series.values || [], minute)
+  const gray = series.gray_values?.length
+    ? valueAtTradingMinute(timeline, series.gray_values, minute)
+    : null
+  return {
+    ...series,
+    cum_main: main ?? series.cum_main,
+    cum_gray: gray ?? series.cum_gray ?? null,
+  }
+}
+
+function sectorBoardAtHover(boardItem: BoardItem): BoardItem {
+  const minute = linkedHoverMinute.value
+  if (!minute) return boardItem
+  const series = board.value.sector_series.find((item) => item.id === boardItem.id)
+  if (!series) return boardItem
+  const timeline = board.value.timeline || []
+  const main = valueAtTradingMinute(timeline, series.values || [], minute)
+  const gray = series.gray_values?.length
+    ? valueAtTradingMinute(timeline, series.gray_values, minute)
+    : null
+  return {
+    ...boardItem,
+    ...(main != null ? { cum_main: main } : {}),
+    ...(gray != null ? { cum_gray: gray } : {}),
+  }
+}
+
+const sectorRows = computed(() =>
+  [...(board.value.selected_boards ?? [])]
+    .map((row) => sectorBoardAtHover(row))
+    .sort((a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0)),
+)
+
+const stockRows = computed(() =>
+  [...board.value.stock_series]
+    .map((row) => stockValueAtHover(row))
+    .sort((a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0)),
+)
 
 const rows = computed(() => (props.mode === 'stock' ? stockRows.value : sectorRows.value))
 
@@ -56,14 +101,18 @@ const panelTitle = computed(() =>
 )
 
 const panelHint = computed(() => {
+  const hoverSuffix = linkedHoverMinute.value ? ` · 光标 ${linkedHoverMinute.value}` : ''
   if (props.mode === 'stock') {
     if (!boardStore.linkageSectorId) {
-      return '点击左侧板块联动前 20 成分股'
+      return `点击左侧板块联动前 ${DEFAULT_LINKAGE_TOP_K} 成分股`
     }
-    return boardStore.linkageSectorName ? `联动 · ${boardStore.linkageSectorName}` : '联动成分股'
+    const base = boardStore.linkageSectorName
+      ? `联动 · ${boardStore.linkageSectorName}`
+      : '联动成分股'
+    return `${base}${hoverSuffix}`
   }
   const members = board.value.selected_boards?.length ?? 0
-  return `曲线 ${chartVisibleTotal.value}/${MAX_CHART_SECTORS} · 成员 ${members}`
+  return `曲线 ${chartVisibleTotal.value}/${MAX_CHART_SECTORS} · 成员 ${members}${hoverSuffix}`
 })
 
 function sectorDotColor(row: BoardItem): string {
@@ -173,7 +222,7 @@ const sectorColumns = computed(() => [
   {
     title: rankHeader('板块'),
     key: 'name',
-    width: 68,
+    width: 62,
     ellipsis: { tooltip: true },
     render(row: BoardItem) {
       const typeLabel = sectorTypeShort(row.sector_type, row.id)
@@ -193,8 +242,9 @@ const sectorColumns = computed(() => [
   {
     title: rankHeader('明盘'),
     key: 'cum_main',
-    width: 62,
+    width: 64,
     align: 'right' as const,
+    className: 'rank-col-main',
     sorter: (a: BoardItem, b: BoardItem) => Number(a.cum_main || 0) - Number(b.cum_main || 0),
     defaultSortOrder: 'descend' as const,
     render(row: BoardItem) {
@@ -202,10 +252,23 @@ const sectorColumns = computed(() => [
     },
   },
   {
-    title: rankHeader('涨幅'),
-    key: 'change_pct',
+    title: rankHeader('暗盘'),
+    key: 'cum_gray',
     width: 46,
     align: 'right' as const,
+    className: 'rank-col-gray',
+    sorter: (a: BoardItem, b: BoardItem) =>
+      Number(a.cum_gray || 0) - Number(b.cum_gray || 0),
+    render(row: BoardItem) {
+      return renderRankMetric(row.cum_gray, { bold: true })
+    },
+  },
+  {
+    title: rankHeader('涨幅'),
+    key: 'change_pct',
+    width: 48,
+    align: 'right' as const,
+    className: 'rank-col-change',
     sorter: (a: BoardItem, b: BoardItem) =>
       Number(a.change_pct || 0) - Number(b.change_pct || 0),
     render(row: BoardItem) {
@@ -261,7 +324,7 @@ function rowProps(row: BoardItem | FlowSeries) {
       class="py-8"
       :description="
         mode === 'stock' && !boardStore.linkageSectorId
-          ? '点击左侧板块查看前 20 成分股'
+          ? `点击左侧板块查看前 ${DEFAULT_LINKAGE_TOP_K} 成分股`
             : mode === 'stock'
             ? '暂无个股曲线'
             : board.active_sector_group_id && (board.selected_boards?.length ?? 0)
@@ -314,6 +377,19 @@ function rowProps(row: BoardItem | FlowSeries) {
   padding-right: 6px !important;
 }
 
+:deep(.rank-table--sector .rank-col-main) {
+  padding-right: 14px !important;
+}
+
+:deep(.rank-table--sector .rank-col-gray) {
+  padding-left: 10px !important;
+  padding-right: 16px !important;
+}
+
+:deep(.rank-table--sector .rank-col-change) {
+  padding-left: 10px !important;
+}
+
 :deep(.rank-row-name) {
   display: flex;
   min-width: 0;
@@ -347,5 +423,17 @@ function rowProps(row: BoardItem | FlowSeries) {
   text-align: right;
   font-size: 10px;
   line-height: 1.2;
+}
+
+:deep(.rank-metric.text-up) {
+  color: var(--up);
+}
+
+:deep(.rank-metric.text-down) {
+  color: var(--down);
+}
+
+:deep(.rank-metric.text-flat) {
+  color: var(--muted);
 }
 </style>

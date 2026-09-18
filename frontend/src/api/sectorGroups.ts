@@ -1,7 +1,7 @@
 import { apiGet } from '@/api/client'
 
-export const MAX_GROUP_MEMBERS = 30
-export const MAX_GROUP_CHART_VISIBLE = 30
+export const MAX_GROUP_MEMBERS = 60
+export const MAX_GROUP_CHART_VISIBLE = 60
 
 export interface SectorGroupMember {
   sector_id: string

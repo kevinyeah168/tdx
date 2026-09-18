@@ -59,6 +59,17 @@ export function countNonNullValues(values: (number | null)[] | undefined): numbe
   return (values || []).filter((v) => v != null).length
 }
 
+export function valueAtTradingMinute(
+  sourceTimeline: string[],
+  values: (number | null)[],
+  minute: string,
+): number | null {
+  const aligned = alignValuesToTradingMinutes(sourceTimeline, values)
+  const idx = TRADING_MINUTES.indexOf(minute)
+  if (idx < 0) return null
+  return aligned[idx] ?? null
+}
+
 export function currentTradingClockMinute(now = new Date()): string {
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
 }

@@ -28,7 +28,7 @@ import {
 } from '@/utils/stockSeries'
 import { todayTradeDate } from '@/utils/tradeDate'
 
-export const MAX_CHART_STOCKS = 12
+export const MAX_CHART_STOCKS = 60
 export const DEFAULT_CHART_STOCKS = 5
 
 export interface StockListItem {

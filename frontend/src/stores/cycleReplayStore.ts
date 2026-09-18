@@ -23,7 +23,7 @@ import { isWeekdayDate } from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
 
 export const MAX_CYCLE_SECTOR = MAX_GROUP_MEMBERS
-export const MAX_CYCLE_STOCK = 12
+export const MAX_CYCLE_STOCK = 60
 
 const PLAY_INTERVAL_MS = 1200
 const RANGE_LOAD_CONCURRENCY = 4

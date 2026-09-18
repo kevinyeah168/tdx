@@ -3,8 +3,10 @@ export interface BoardItem {
   name: string
   change_pct?: number | null
   cum_main?: number | null
+  /** 暗盘累计净流入（元），板块为成分股汇总 */
+  cum_gray?: number | null
   sector_type?: string | null
-  /** Whether this sector is drawn on the home chart (max 30). */
+  /** Whether this sector is drawn on the home chart (max 60). */
   chart_visible?: boolean
   /** 个股榜单用：净比(%) = 主力净流入 / 自由流通市值 * 100 */
   main_net_ratio?: number | null

@@ -208,3 +208,66 @@ export function fetchSectorBreadth(
     minute,
   })
 }
+
+export interface SectorGrayFlowPoint {
+  minute: string
+  dark_cumulative: number
+  open_cumulative?: number | null
+  total_cumulative?: number | null
+  source?: string | null
+}
+
+export interface SectorGrayFlowPayload {
+  sector_id: string
+  latest_complete_minute: string
+  member_count?: number | null
+  gray_covered_count?: number | null
+  coverage_pct?: number | null
+  source?: string | null
+  quality?: string | null
+  points: SectorGrayFlowPoint[]
+}
+
+export function fetchSectorGrayFlow(
+  sectorId: string,
+  tradeDate: string,
+): Promise<SectorGrayFlowPayload> {
+  return apiGet<SectorGrayFlowPayload>(`/api/v1/sectors/${sectorId}/gray-flow`, {
+    date: tradeDate,
+  })
+}
+
+export interface SectorGrayFlowBatchResponse {
+  trade_date: string
+  items: SectorGrayFlowPayload[]
+}
+
+export async function fetchSectorGrayFlowBatch(
+  sectorIds: string[],
+  tradeDate: string,
+): Promise<SectorGrayFlowBatchResponse> {
+  if (!sectorIds.length) {
+    return { trade_date: tradeDate, items: [] }
+  }
+  try {
+    return await apiPost<SectorGrayFlowBatchResponse>(
+      '/api/v1/sectors/gray-flow/batch',
+      { ids: sectorIds },
+      { date: tradeDate },
+    )
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error
+    const items = (
+      await Promise.all(
+        sectorIds.map(async (sectorId) => {
+          try {
+            return await fetchSectorGrayFlow(sectorId, tradeDate)
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).filter((item): item is SectorGrayFlowPayload => item != null)
+    return { trade_date: tradeDate, items }
+  }
+}

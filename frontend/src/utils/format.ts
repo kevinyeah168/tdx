@@ -45,7 +45,7 @@ export function chgTone(v: number | null | undefined): 'up' | 'down' | 'flat' {
 export function toneClass(tone: 'up' | 'down' | 'flat'): string {
   if (tone === 'up') return 'text-up'
   if (tone === 'down') return 'text-down'
-  return 'text-[var(--muted)]'
+  return 'text-flat'
 }
 
 const SECTOR_TYPE_LABELS: Record<string, string> = {

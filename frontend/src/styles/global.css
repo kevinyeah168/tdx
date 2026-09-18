@@ -50,6 +50,18 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.text-up {
+  color: var(--up);
+}
+
+.text-down {
+  color: var(--down);
+}
+
+.text-flat {
+  color: var(--muted);
+}
+
 .panel-card {
   background: var(--panel);
   border: 1px solid var(--border);

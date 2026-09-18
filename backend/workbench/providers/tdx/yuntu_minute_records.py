@@ -188,7 +188,7 @@ def build_gap_sector_minutes(
 
 def apply_written_main_cum(
     previous_main_cum: dict[str, float],
-    records: list[StockMinute] | list[SectorMinute],
+    records: list[StockMinute] | list[SectorMinute] | list,
     *,
     key_attr: str,
 ) -> None:

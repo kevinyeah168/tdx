@@ -2,6 +2,7 @@
 import FundFlowChart from '@/components/chart/FundFlowChart.vue'
 import FundRankPanel from '@/components/common/FundRankPanel.vue'
 import IntradayDatePicker from '@/components/common/IntradayDatePicker.vue'
+import MarketScopePanel from '@/components/workbench/MarketScopePanel.vue'
 import { NButton, NSelect, NSpin } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
@@ -119,9 +120,15 @@ const loadingHint = computed(() => {
     </div>
 
     <NSpin class="panel-spin" :show="showLoading" :delay="80" :description="loadingHint">
-      <div class="panel-body" :class="mode === 'sector' ? 'panel-body--sector' : 'panel-body--stock'">
-        <FundFlowChart :mode="mode" />
-        <FundRankPanel :mode="mode" />
+      <div
+        class="panel-stack"
+        :class="mode === 'sector' ? 'panel-stack--sector' : 'panel-stack--stock'"
+      >
+        <MarketScopePanel v-if="mode === 'sector'" />
+        <div class="panel-body" :class="mode === 'sector' ? 'panel-body--sector' : 'panel-body--stock'">
+          <FundFlowChart :mode="mode" />
+          <FundRankPanel :mode="mode" />
+        </div>
       </div>
     </NSpin>
   </section>
@@ -165,6 +172,20 @@ const loadingHint = computed(() => {
   flex-direction: column;
 }
 
+.panel-stack {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-stack--sector .panel-body {
+  flex: 1;
+  min-height: 240px;
+}
+
 .panel-body {
   display: grid;
   flex: 1;
@@ -173,9 +194,9 @@ const loadingHint = computed(() => {
   gap: 8px;
 }
 
-/* 板块信息区：板块/明盘/涨幅；个股信息区：个股/明盘/暗盘/净比/涨幅 */
+/* 板块信息区：板块/明盘/暗盘/涨幅；个股信息区：个股/明盘/暗盘/净比/涨幅 */
 .panel-body--sector {
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 38%);
+  grid-template-columns: minmax(0, 1fr) minmax(336px, 38%);
 }
 
 .panel-body--stock {

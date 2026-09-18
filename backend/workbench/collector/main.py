@@ -13,6 +13,9 @@ from typing import Sequence
 from workbench.collector.gray_stock_collector import GrayStockCollector
 from workbench.collector.yuntu_snapshot_collector import YuntuSnapshotCollector
 from workbench.collector.classic_index_backfill import ClassicIndexBackfillService
+from workbench.collector.sector_gray_backfill import (
+    backfill_sector_gray_for_settings,
+)
 from workbench.collector.catalog_sync import CatalogSyncService
 from workbench.collector.heartbeat import write_collector_heartbeat
 from workbench.collector.history_sync import HistorySyncService, refresh_security_cache
@@ -110,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace existing classic-index minute rows when backfilling",
     )
+    parser.add_argument(
+        "--backfill-sector-gray",
+        action="store_true",
+        help="rebuild sector_gray_minute from stock_gray_minute (all hot dates unless --date)",
+    )
     parser.add_argument("--stocks", type=positive_integer, default=5_500)
     parser.add_argument("--sectors", type=lambda value: nonnegative_integer(value, "sectors"), default=400)
     parser.add_argument(
@@ -133,12 +141,21 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--fake and --real are mutually exclusive")
     if not arguments.fake and not arguments.real:
         arguments.real = True
-    if not arguments.once and not arguments.serve and not arguments.backfill_classic_indices:
-        parser.error("--once, --serve, or --backfill-classic-indices is required")
+    if (
+        not arguments.once
+        and not arguments.serve
+        and not arguments.backfill_classic_indices
+        and not arguments.backfill_sector_gray
+    ):
+        parser.error(
+            "--once, --serve, --backfill-classic-indices, or --backfill-sector-gray is required"
+        )
     if arguments.once and arguments.serve:
         parser.error("--once and --serve are mutually exclusive")
     if arguments.backfill_classic_indices and (arguments.once or arguments.serve):
         parser.error("--backfill-classic-indices cannot be combined with --once or --serve")
+    if arguments.backfill_sector_gray and (arguments.once or arguments.serve):
+        parser.error("--backfill-sector-gray cannot be combined with --once or --serve")
     if arguments.backfill_classic_indices and arguments.date is None:
         parser.error("--backfill-classic-indices requires --date")
     if arguments.once and (arguments.date is None or arguments.minute is None):
@@ -211,7 +228,19 @@ def serve(arguments: argparse.Namespace) -> int:
     hot.initialize()
 
     if collector_role == "gray":
-        gray_stocks = GrayStockCollector(hot, settings=settings)
+        try:
+            backfill_results = backfill_sector_gray_for_settings(settings)
+            if backfill_results:
+                total_rows = sum(item.sector_rows for item in backfill_results)
+                active_days = sum(1 for item in backfill_results if item.sector_rows > 0)
+                print(
+                    f"sector gray backfill: {active_days} day(s), {total_rows} sector rows",
+                    file=sys.stderr,
+                )
+        except ValueError as error:
+            print(f"sector gray backfill skipped: {error}", file=sys.stderr)
+
+        gray_stocks = GrayStockCollector(hot, settings=settings, meta=meta)
 
         def collect_gray(trade_date: date, minute: str) -> dict[str, object]:
             hot_path = settings.hot_db_for(trade_date.isoformat())
@@ -347,6 +376,19 @@ def serve(arguments: argparse.Namespace) -> int:
         return 0
     return 0
 
+def backfill_sector_gray(arguments: argparse.Namespace) -> int:
+    settings = WorkbenchSettings(data_dir=arguments.data_dir, tdx_home=arguments.tdx_home)
+    settings.ensure_directories()
+    trade_dates = [arguments.date.isoformat()] if arguments.date is not None else None
+    try:
+        results = backfill_sector_gray_for_settings(settings, trade_dates=trade_dates)
+    except ValueError as error:
+        print(f"sector gray backfill failed: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps([asdict(item) for item in results], ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
 def backfill_classic_indices(arguments: argparse.Namespace) -> int:
     settings = WorkbenchSettings(data_dir=arguments.data_dir, tdx_home=arguments.tdx_home)
     settings.ensure_directories()
@@ -375,6 +417,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return serve(arguments)
     if arguments.backfill_classic_indices:
         return backfill_classic_indices(arguments)
+    if arguments.backfill_sector_gray:
+        return backfill_sector_gray(arguments)
     try:
         result = collect_once(
             trade_date=arguments.date,

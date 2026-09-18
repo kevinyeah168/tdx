@@ -70,6 +70,11 @@ const PRICE_SERIES_PREFIX = '__price__:'
 const AVG_PRICE_SERIES_PREFIX = '__avg_price__:'
 const GRAY_SERIES_PREFIX = '__gray__:'
 
+/** 全部曲线都展示末端标签的上限；超出后只展示 Top-K，避免 shiftY 把标签挤离曲线 */
+const END_LABEL_ALL_MAX = 15
+const END_LABEL_TOP_K = 12
+const END_LABEL_LAYOUT = { hideOverlap: false }
+
 const hasChartData = computed(() => {
   const tl = sourceTimeline.value || []
   return seriesList.value.some((s) => {
@@ -128,6 +133,7 @@ function endLabelStyle(
 ) {
   return {
     show: true,
+    triggerEvent: true,
     formatter: (params: { seriesName?: string; value?: number | null }) => {
       const item = list.find(
         (s) => s.id === params.seriesName || s.name === params.seriesName,
@@ -158,6 +164,32 @@ function lastNonNullIndex(values: (number | null)[]): number {
     if (values[i] != null) return i
   }
   return -1
+}
+
+function seriesLastYi(item: FlowSeries, tl: string[]): number | null {
+  const aligned = alignValuesToTradingMinutes(tl, item.values || [])
+  const baseYi = aligned.map((v) => (v == null ? null : toYi(v)))
+  const { lastYi } = applySnapshotTip(baseYi, item.cum_main, tl)
+  if (lastYi != null && Number.isFinite(lastYi)) return lastYi
+  if (item.cum_main != null && Number.isFinite(item.cum_main)) return toYi(item.cum_main)
+  return null
+}
+
+function resolveEndLabelIds(
+  renderList: FlowSeries[],
+  hl: string | null,
+  tl: string[],
+): Set<string> {
+  if (hl) return new Set([hl])
+  if (renderList.length <= END_LABEL_ALL_MAX) {
+    return new Set(renderList.map((s) => s.id))
+  }
+  return new Set(
+    [...renderList]
+      .sort((a, b) => Math.abs(seriesLastYi(b, tl) ?? 0) - Math.abs(seriesLastYi(a, tl) ?? 0))
+      .slice(0, END_LABEL_TOP_K)
+      .map((s) => s.id),
+  )
 }
 
 /** Solo + 价格叠加时，资金轴必须按「亿」独立定标，否则会被指数/股价（千级）压成平线。 */
@@ -233,11 +265,11 @@ function baseAxis(
   showPrice = false,
   priceMode: 'stock' | 'sector' = 'stock',
   fundExtent: { min: number; max: number } | null = null,
+  rankLinked = true,
 ) {
   const c = colors.value
-  const seriesCount = seriesList.value.length
   const tipMaxH = chartTipMaxHeight()
-  const dense = seriesCount > 10
+  const dense = seriesList.value.length > 10
   const fundAxis: Record<string, unknown> = {
     id: 'fund',
     scale: !fundExtent,
@@ -269,6 +301,13 @@ function baseAxis(
   }
   return {
     grid: { left: 48, right: showPrice ? gridRight + 40 : gridRight, top: 32, bottom: 32 },
+    axisPointer: {
+      type: 'line' as const,
+      snap: true,
+      triggerTooltip: false,
+      lineStyle: { color: c.axisLine, type: 'dashed' as const, opacity: 0.55 },
+      label: { show: false },
+    },
     xAxis: {
       type: 'category' as const,
       data: TRADING_MINUTES,
@@ -282,61 +321,72 @@ function baseAxis(
       },
       axisLine: { lineStyle: { color: c.axisLine } },
       axisTick: { show: false },
+      axisPointer: {
+        show: true,
+        type: 'line' as const,
+        snap: true,
+        label: { show: false },
+      },
     },
     yAxis,
-    tooltip: {
-      trigger: 'axis' as const,
-      appendTo: 'body' as const,
-      className: 'fund-flow-tooltip',
-      order: 'valueDesc' as const,
-      position: tooltipNearMouse,
-      backgroundColor: c.tooltipBg,
-      borderColor: c.tooltipBorder,
-      borderWidth: 1,
-      padding: dense ? [6, 10] : [8, 12],
-      textStyle: {
-        color: c.tooltipText,
-        fontSize: dense ? 11 : 12,
-        lineHeight: dense ? 16 : 18,
-      },
-      extraCssText: [
-        `max-height:${tipMaxH}px`,
-        'overflow-y:auto',
-        'pointer-events:none',
-        'box-shadow:0 8px 28px rgba(15,23,42,0.18)',
-        'border-radius:8px',
-        'z-index:4000',
-      ].join(';'),
-      formatter: (params: unknown) => {
-        if (!Array.isArray(params) || !params.length) return ''
-        const axisLabel = String(params[0]?.axisValue ?? '')
-        const lines = [...params]
-          .filter((entry) => entry.value != null && entry.value !== '')
-          .sort((a, b) => Number(b.value) - Number(a.value))
-          .map((entry) => {
-            const seriesKey = String(entry.seriesId ?? entry.seriesName ?? '')
-            if (seriesKey.startsWith(AVG_PRICE_SERIES_PREFIX)) {
-              return `${entry.marker}均价: ${Number(entry.value).toFixed(2)}`
-            }
-            if (seriesKey.startsWith(PRICE_SERIES_PREFIX)) {
-              const solo = soloSeries.value
-              const pct = solo?.change_pct
-              const pctText = pct != null ? ` (${fmtPct(pct)})` : ''
-              const label = props.mode === 'sector' ? '指数' : '股价'
-              return `${entry.marker}${label}: ${Number(entry.value).toFixed(2)}${pctText}`
-            }
-            if (seriesKey.startsWith(GRAY_SERIES_PREFIX)) {
-              return `${entry.marker}暗盘: ${Number(entry.value).toFixed(2)}亿`
-            }
-            const item = list.find((s) => s.id === entry.seriesName)
-            const label = item ? seriesLabel(item) : entry.seriesName
-            return `${entry.marker}${label}: ${Number(entry.value).toFixed(2)}亿`
-          })
-        return `${axisLabel}<br/>${lines.join('<br/>')}`
-      },
-      valueFormatter: (v: unknown) =>
-        v == null ? '—' : `${Number(v).toFixed(2)}亿`,
-    },
+    tooltip: rankLinked
+      ? {
+          show: false,
+          trigger: 'axis' as const,
+        }
+      : {
+          trigger: 'axis' as const,
+          appendTo: 'body' as const,
+          className: 'fund-flow-tooltip',
+          order: 'valueDesc' as const,
+          position: tooltipNearMouse,
+          backgroundColor: c.tooltipBg,
+          borderColor: c.tooltipBorder,
+          borderWidth: 1,
+          padding: dense ? [6, 10] : [8, 12],
+          textStyle: {
+            color: c.tooltipText,
+            fontSize: dense ? 11 : 12,
+            lineHeight: dense ? 16 : 18,
+          },
+          extraCssText: [
+            `max-height:${tipMaxH}px`,
+            'overflow-y:auto',
+            'pointer-events:none',
+            'box-shadow:0 8px 28px rgba(15,23,42,0.18)',
+            'border-radius:8px',
+            'z-index:4000',
+          ].join(';'),
+          formatter: (params: unknown) => {
+            if (!Array.isArray(params) || !params.length) return ''
+            const axisLabel = String(params[0]?.axisValue ?? '')
+            const lines = [...params]
+              .filter((entry) => entry.value != null && entry.value !== '')
+              .sort((a, b) => Number(b.value) - Number(a.value))
+              .map((entry) => {
+                const seriesKey = String(entry.seriesId ?? entry.seriesName ?? '')
+                if (seriesKey.startsWith(AVG_PRICE_SERIES_PREFIX)) {
+                  return `${entry.marker}均价: ${Number(entry.value).toFixed(2)}`
+                }
+                if (seriesKey.startsWith(PRICE_SERIES_PREFIX)) {
+                  const solo = soloSeries.value
+                  const pct = solo?.change_pct
+                  const pctText = pct != null ? ` (${fmtPct(pct)})` : ''
+                  const label = props.mode === 'sector' ? '指数' : '股价'
+                  return `${entry.marker}${label}: ${Number(entry.value).toFixed(2)}${pctText}`
+                }
+                if (seriesKey.startsWith(GRAY_SERIES_PREFIX)) {
+                  return `${entry.marker}暗盘: ${Number(entry.value).toFixed(2)}亿`
+                }
+                const item = list.find((s) => s.id === entry.seriesName)
+                const label = item ? seriesLabel(item) : entry.seriesName
+                return `${entry.marker}${label}: ${Number(entry.value).toFixed(2)}亿`
+              })
+            return `${axisLabel}<br/>${lines.join('<br/>')}`
+          },
+          valueFormatter: (v: unknown) =>
+            v == null ? '—' : `${Number(v).toFixed(2)}亿`,
+        },
   }
 }
 
@@ -380,8 +430,9 @@ function applySnapshotTip(
 function buildSeries(list: FlowSeries[], hl: string | null, tl: string[], soloOnly = false) {
   // Solo + 价格叠加时只画选中序列，避免其它曲线（或错误量纲）污染左轴「亿」尺度。
   const renderList = soloOnly && hl ? list.filter((s) => s.id === hl) : list
-  const visible = renderList.filter((s) => !hl || hl === s.id)
-  const gridRight = Math.max(148, Math.min(240, 96 + visible.length * 14))
+  const endLabelIds = resolveEndLabelIds(renderList, hl, tl)
+  const endLabelCount = hl ? 1 : endLabelIds.size
+  const gridRight = Math.max(132, Math.min(220, 88 + endLabelCount * 13))
 
   const series = renderList.map((s) => {
     const active = !hl || hl === s.id
@@ -391,6 +442,7 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[], soloOn
     const { values: valuesYi, tipIdx, lastYi } = applySnapshotTip(baseYi, s.cum_main, tl)
     // Truncate trailing nulls so ECharts endLabel sits on the last captured point
     const data = tipIdx >= 0 ? valuesYi.slice(0, tipIdx + 1) : []
+    const showEndLabel = active && tipIdx >= 0 && endLabelIds.has(s.id)
 
     return {
       id: s.id,
@@ -413,10 +465,10 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[], soloOn
       },
       itemStyle: { color },
       endLabel:
-        active && tipIdx >= 0
+        showEndLabel
           ? endLabelStyle(color, hl === s.id, list, lastYi)
           : { show: false },
-      labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
+      labelLayout: END_LABEL_LAYOUT,
     }
   })
 
@@ -479,7 +531,7 @@ function buildOverlayPriceSeries(
       padding: [2, 5, 2, 5],
       borderRadius: 4,
     },
-    labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
+    labelLayout: END_LABEL_LAYOUT,
   }
 }
 
@@ -540,7 +592,7 @@ function buildGrayOverlaySeries(item: FlowSeries, tl: string[]): echarts.SeriesO
       padding: [2, 5, 2, 5],
       borderRadius: 4,
     },
-    labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
+    labelLayout: END_LABEL_LAYOUT,
   }
 }
 
@@ -550,17 +602,33 @@ function resolveSeriesId(params: {
   seriesIndex?: number
 }): string | null {
   const list = seriesList.value || []
-  if (params.seriesId != null && params.seriesId !== '') {
-    return String(params.seriesId)
+  const rawId = params.seriesId != null && params.seriesId !== '' ? String(params.seriesId) : ''
+  if (rawId.startsWith(PRICE_SERIES_PREFIX) || rawId.startsWith(AVG_PRICE_SERIES_PREFIX) || rawId.startsWith(GRAY_SERIES_PREFIX)) {
+    return null
+  }
+  if (rawId) {
+    const byId = list.find((s) => s.id === rawId)
+    if (byId) return byId.id
   }
   if (params.seriesName) {
-    const byId = list.find((s) => s.id === params.seriesName)
+    const name = String(params.seriesName)
+    if (name.startsWith(PRICE_SERIES_PREFIX) || name.startsWith(AVG_PRICE_SERIES_PREFIX) || name.startsWith(GRAY_SERIES_PREFIX)) {
+      return null
+    }
+    const byId = list.find((s) => s.id === name)
     if (byId) return byId.id
-    const byName = list.find((s) => s.name === params.seriesName)
+    const byName = list.find((s) => s.name === name)
     if (byName) return byName.id
   }
-  if (typeof params.seriesIndex === 'number' && list[params.seriesIndex]) {
-    return list[params.seriesIndex]!.id
+  if (typeof params.seriesIndex === 'number') {
+    const option = chart?.getOption()?.series
+    const entry = Array.isArray(option) ? option[params.seriesIndex] : null
+    const optionId = entry && typeof entry === 'object' && 'id' in entry ? String(entry.id ?? '') : ''
+    if (optionId && !optionId.startsWith('__')) {
+      const byOptionId = list.find((s) => s.id === optionId)
+      if (byOptionId) return byOptionId.id
+    }
+    if (list[params.seriesIndex]) return list[params.seriesIndex]!.id
   }
   return null
 }
@@ -581,6 +649,86 @@ function onChartClick(params: {
   }
 }
 
+let lastPublishedMinute: string | null = null
+let hoverFrame = 0
+let pendingPointer: { x: number; y: number } | null = null
+
+function publishHoverMinute(minute: string | null) {
+  if (lastPublishedMinute === minute) return
+  lastPublishedMinute = minute
+  boardStore.setChartHoverMinute(minute, props.mode)
+}
+
+function minuteFromPointerPixel(offsetX: number, offsetY: number): string | null {
+  if (!chart || showEmpty.value) return null
+  const point: [number, number] = [offsetX, offsetY]
+
+  if (chart.containPixel('grid', point)) {
+    const raw = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, point)
+    if (raw && Number.isFinite(Number(raw[0]))) {
+      const idx = Math.max(0, Math.min(TRADING_MINUTES.length - 1, Math.round(Number(raw[0]))))
+      return TRADING_MINUTES[idx] ?? null
+    }
+  }
+
+  const width = chart.getWidth()
+  const height = chart.getHeight()
+  if (width <= 0 || height <= 0) return null
+  const option = chart.getOption() as {
+    grid?: Array<{ left?: number | string; right?: number | string }>
+  }
+  const grid = option.grid?.[0]
+  const left = typeof grid?.left === 'number' ? grid.left : 48
+  const right = typeof grid?.right === 'number' ? grid.right : 132
+  const plotLeft = left
+  const plotWidth = Math.max(1, width - left - right)
+  if (offsetX < plotLeft || offsetX > plotLeft + plotWidth) return null
+  const ratio = (offsetX - plotLeft) / plotWidth
+  const idx = Math.max(
+    0,
+    Math.min(TRADING_MINUTES.length - 1, Math.round(ratio * (TRADING_MINUTES.length - 1))),
+  )
+  return TRADING_MINUTES[idx] ?? null
+}
+
+function scheduleHoverSync(offsetX: number, offsetY: number) {
+  pendingPointer = { x: offsetX, y: offsetY }
+  if (hoverFrame) return
+  hoverFrame = window.requestAnimationFrame(() => {
+    hoverFrame = 0
+    const pointer = pendingPointer
+    pendingPointer = null
+    if (!pointer || !chart) return
+
+    const minute = minuteFromPointerPixel(pointer.x, pointer.y)
+    if (!minute) {
+      publishHoverMinute(null)
+      return
+    }
+
+    publishHoverMinute(minute)
+    chart?.dispatchAction({
+      type: 'updateAxisPointer',
+      currTrigger: 'mousemove',
+      x: pointer.x,
+      y: pointer.y,
+    })
+  })
+}
+
+function onChartElMouseMove(event: MouseEvent) {
+  if (!chartEl.value) return
+  const rect = chartEl.value.getBoundingClientRect()
+  scheduleHoverSync(event.clientX - rect.left, event.clientY - rect.top)
+}
+
+function onChartElMouseLeave() {
+  pendingPointer = null
+  lastPublishedMinute = null
+  boardStore.clearChartHover(props.mode)
+  chart?.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' })
+}
+
 function bindChartEvents() {
   if (!chart) return
   chart.off('click')
@@ -596,6 +744,8 @@ function renderChart() {
 
   if (showEmpty.value) {
     chart.clear()
+    lastPublishedMinute = null
+    boardStore.clearChartHover(props.mode)
     return
   }
 
@@ -647,6 +797,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeChart)
+  if (hoverFrame) {
+    window.cancelAnimationFrame(hoverFrame)
+    hoverFrame = 0
+  }
+  lastPublishedMinute = null
+  boardStore.clearChartHover(props.mode)
   chart?.dispose()
   chart = null
 })
@@ -657,7 +813,12 @@ defineExpose({ renderChart, resizeChart })
 <template>
   <section class="panel-card flex min-h-0 flex-1 flex-col p-2.5">
     <div class="relative min-h-[420px] flex-1 w-full">
-      <div ref="chartEl" class="absolute inset-0" />
+      <div
+        ref="chartEl"
+        class="absolute inset-0"
+        @mousemove="onChartElMouseMove"
+        @mouseleave="onChartElMouseLeave"
+      />
       <ChartEmptyState
         v-if="showEmpty"
         :title="emptyTitle"

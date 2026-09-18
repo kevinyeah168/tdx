@@ -253,7 +253,7 @@ class SectorQueryService:
         *,
         trade_date: str,
         minute: str,
-        limit: int = 20,
+        limit: int = 60,
         live_members: list[dict[str, object]] | None = None,
         quote_client: object | None = None,
     ) -> SectorMemberRankResponse:

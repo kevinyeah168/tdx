@@ -85,9 +85,18 @@ export const useBoardStore = defineStore('board', () => {
   const linkageSectorId = ref<string | null>(null)
   const linkageSectorName = ref<string | null>(null)
   const autoSectorCount = ref(loadAutoSectorCount())
-  const linkageTopK = ref(Math.min(loadLinkageTopK(), 20) || 20)
-  saveLinkageTopK(linkageTopK.value)
+  const linkageTopK = ref(loadLinkageTopK())
+  if (linkageTopK.value === 20) {
+    linkageTopK.value = 60
+    saveLinkageTopK(linkageTopK.value)
+  }
+  if (autoSectorCount.value === 20) {
+    autoSectorCount.value = 60
+    saveAutoSectorCount(autoSectorCount.value)
+  }
   const replayMinute = ref<string | null>(null)
+  const chartHoverMinute = ref<string | null>(null)
+  const chartHoverSource = ref<'sector' | 'stock' | null>(null)
 
   let stockLoadSeq = 0
   let sectorLoadSeq = 0
@@ -160,6 +169,8 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   async function loadBoard(opts?: { stockSeq?: number; sectorSeq?: number }) {
+    chartHoverMinute.value = null
+    chartHoverSource.value = null
     let release!: () => void
     const slot = new Promise<void>((resolve) => {
       release = resolve
@@ -584,6 +595,8 @@ export const useBoardStore = defineStore('board', () => {
     activeTab.value = tab
     highlightedSector.value = null
     highlightedStock.value = null
+    chartHoverMinute.value = null
+    chartHoverSource.value = null
   }
 
   function toggleHighlight(id: string, mode: 'sector' | 'stock' = 'sector') {
@@ -628,6 +641,22 @@ export const useBoardStore = defineStore('board', () => {
     saveLinkageTopK(topK)
   }
 
+  function setChartHoverMinute(minute: string | null, source: 'sector' | 'stock') {
+    if (!minute) {
+      clearChartHover(source)
+      return
+    }
+    if (chartHoverMinute.value === minute && chartHoverSource.value === source) return
+    chartHoverMinute.value = minute
+    chartHoverSource.value = source
+  }
+
+  function clearChartHover(source?: 'sector' | 'stock') {
+    if (source && chartHoverSource.value !== source) return
+    chartHoverMinute.value = null
+    chartHoverSource.value = null
+  }
+
   return {
     board,
     loading,
@@ -646,6 +675,8 @@ export const useBoardStore = defineStore('board', () => {
     autoSectorCount,
     linkageTopK,
     replayMinute,
+    chartHoverMinute,
+    chartHoverSource,
     pickerOpen,
     pickerType,
     pickerQuery,
@@ -700,5 +731,7 @@ export const useBoardStore = defineStore('board', () => {
     sortedStocks,
     setAutoSectorCount,
     setLinkageTopK,
+    setChartHoverMinute,
+    clearChartHover,
   }
 })

@@ -160,4 +160,39 @@ CREATE TABLE IF NOT EXISTS stock_gray_minute (
 
 CREATE INDEX IF NOT EXISTS idx_stock_gray_series
 ON stock_gray_minute(trade_date, symbol, minute);
+
+CREATE TABLE IF NOT EXISTS sector_gray_minute (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    sector_id TEXT NOT NULL,
+    member_count INTEGER NOT NULL,
+    gray_covered_count INTEGER NOT NULL,
+    open_cum REAL NOT NULL,
+    dark_cum REAL NOT NULL,
+    total_cum REAL NOT NULL,
+    observed_at TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    quality TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute, sector_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sector_gray_series
+ON sector_gray_minute(trade_date, sector_id, minute);
+
+CREATE TABLE IF NOT EXISTS market_scope_minute (
+    trade_date TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    change_pct REAL NOT NULL,
+    main_delta REAL NOT NULL,
+    main_cum REAL NOT NULL,
+    tier_meta_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    PRIMARY KEY (trade_date, minute, scope)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_scope_series
+ON market_scope_minute(trade_date, scope, minute);
 """

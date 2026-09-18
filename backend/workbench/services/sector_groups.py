@@ -6,8 +6,8 @@ import uuid
 
 from workbench.storage.meta_store import MetaStore
 
-MAX_GROUP_MEMBERS = 30
-MAX_CHART_VISIBLE = 30
+MAX_GROUP_MEMBERS = 60
+MAX_CHART_VISIBLE = 60
 
 
 @dataclass(frozen=True)
