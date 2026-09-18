@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
 from workbench.domain import BarPeriod
-from workbench.query.models import QueryMetadata
+from workbench.providers.tdx.text_clean import clean_tdx_text
+from workbench.query.models import QueryMetadata, StockRankItem, StockRankResponse
 from workbench.storage.history_store import HistoryStore
 from workbench.storage.hot_store import HotStore
 from workbench.storage.meta_store import MetaStore
@@ -43,6 +45,140 @@ class StockQueryService:
                 source=snapshot.source,
             ).model_dump(mode="json"),
         }
+
+    def _all_security_names(self) -> dict[str, str]:
+        with self._meta.connect() as connection:
+            rows = connection.execute("SELECT symbol, name FROM security_master").fetchall()
+        return {
+            str(row[0]): clean_tdx_text(row[1], fallback=str(row[0]))
+            for row in rows
+        }
+
+    def resolve_symbols(self, inputs: list[str]) -> dict[str, object]:
+        names = self._all_security_names()
+        symbol_set = set(names)
+        resolved: list[dict[str, str]] = []
+        unresolved: list[str] = []
+        seen: set[str] = set()
+        prefixed = re.compile(r"^(SH|SZ|BJ)(\d{6})$")
+        digits = re.compile(r"^\d{6}$")
+
+        for raw in inputs:
+            token = str(raw).strip().upper()
+            if not token:
+                continue
+            candidate: str | None = None
+            if prefixed.fullmatch(token):
+                candidate = token if token in symbol_set else None
+            elif digits.fullmatch(token):
+                for prefix in ("SH", "SZ", "BJ"):
+                    symbol = f"{prefix}{token}"
+                    if symbol in symbol_set:
+                        candidate = symbol
+                        break
+            else:
+                code_matches = [symbol for symbol in symbol_set if token in symbol]
+                name_matches = [
+                    symbol for symbol, name in names.items() if token in name.upper()
+                ]
+                matches = sorted(set(code_matches + name_matches))
+                if len(matches) == 1:
+                    candidate = matches[0]
+
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                resolved.append({"symbol": candidate, "name": names[candidate]})
+            else:
+                unresolved.append(str(raw).strip())
+
+        return {"resolved": resolved, "unresolved": unresolved}
+
+    def stock_ranking(self, trade_date: str, minute: str) -> StockRankResponse:
+        snapshot = self._meta.catalog_snapshot()
+        names = self._all_security_names()
+        metadata = QueryMetadata(
+            catalog_version=snapshot.catalog_version,
+            stale=snapshot.stale,
+            source=snapshot.source,
+        )
+        if self._hot is None:
+            items = [
+                StockRankItem(
+                    symbol=symbol,
+                    name=name,
+                    main_cumulative=0.0,
+                    change_pct=0.0,
+                )
+                for symbol, name in sorted(names.items())
+            ]
+            return StockRankResponse(
+                trade_date=trade_date,
+                minute=minute,
+                items=items,
+                metadata=metadata,
+            )
+
+        effective_minute = minute
+        rows: list[tuple[str, float, float]] = []
+        for candidate in (
+            minute,
+            self._hot.latest_stock_minute(trade_date),
+            self._hot.latest_complete_minute(trade_date),
+        ):
+            if not candidate:
+                continue
+            with self._hot.connect(readonly=True) as connection:
+                fetched = connection.execute(
+                    """
+                    SELECT symbol, main_cum, change_pct
+                    FROM stock_minute
+                    WHERE trade_date = ? AND minute = ?
+                    ORDER BY main_cum DESC, symbol
+                    """,
+                    (trade_date, candidate),
+                ).fetchall()
+            if fetched:
+                effective_minute = str(candidate)
+                rows = [(str(row[0]), float(row[1]), float(row[2])) for row in fetched]
+                break
+
+        if not rows:
+            items = [
+                StockRankItem(
+                    symbol=symbol,
+                    name=name,
+                    main_cumulative=0.0,
+                    change_pct=0.0,
+                )
+                for symbol, name in sorted(names.items())
+            ]
+            return StockRankResponse(
+                trade_date=trade_date,
+                minute=minute,
+                items=items,
+                metadata=metadata,
+            )
+
+        items = [
+            StockRankItem(
+                symbol=symbol,
+                name=names.get(symbol, symbol),
+                main_cumulative=main_cum,
+                change_pct=change_pct,
+            )
+            for symbol, main_cum, change_pct in rows
+        ]
+        return StockRankResponse(
+            trade_date=trade_date,
+            minute=effective_minute,
+            items=items,
+            metadata=QueryMetadata(
+                catalog_version=snapshot.catalog_version,
+                stale=snapshot.stale,
+                source=snapshot.source,
+                batch_id=f"{trade_date}T{effective_minute}",
+            ),
+        )
 
     def sectors_for(self, symbol: str) -> list[dict[str, str]]:
         normalized = symbol.upper()

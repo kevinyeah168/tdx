@@ -157,7 +157,7 @@ try {
     $resolvedDataDir = (Join-Path $Root ($DataDir -replace '^\.\./', ''))
 }
 
-# Drop leftover collectors before launch (duplicate hot/archive writers corrupt hot DBs).
+# Drop leftover collectors before launch (duplicate writers corrupt hot DBs).
 foreach ($proc in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
     $cmd = $proc.CommandLine
     if ($cmd -and ($cmd -like "*workbench.collector.main*")) {
@@ -166,10 +166,17 @@ foreach ($proc in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
         Write-Host "  cleaned leftover collector pid=$($proc.ProcessId)" -ForegroundColor DarkGray
     }
 }
-Get-ChildItem -Path (Join-Path $Root "data\workbench-real\run") -Filter "collector-*.lock" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $RunDir -Filter "collector-*.lock" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+foreach ($runPath in @((Join-Path $Root "data\workbench-real\run"), $RunDir)) {
+    if (-not (Test-Path $runPath)) { continue }
+    Get-ChildItem -Path $runPath -Filter "collector-*.lock" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    foreach ($staleRole in @("collector-hot.json", "collector-archive.json")) {
+        $stalePath = Join-Path $runPath $staleRole
+        if (Test-Path $stalePath) {
+            Remove-Item $stalePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 if (Test-PortListening -Port $ApiPort) {
     Write-Host "[ERROR] API port $ApiPort is already in use." -ForegroundColor Red
@@ -192,7 +199,7 @@ Write-Host "  Data:      $resolvedDataDir"
 Write-Host "  API:       http://${BindHost}:${ApiPort}"
 Write-Host "  UI:        http://${BindHost}:${FrontendPort}/workbench.html"
 if (-not $SkipCollector) {
-    Write-Host "  Collector: hot + archive (5s hot path, backfill on break/close)"
+    Write-Host "  Collector: yuntu (combined) + gray (East Money, separate process)"
 } else {
     Write-Host "  Collector: skipped (-SkipCollector)"
 }
@@ -212,16 +219,16 @@ if ($Background) {
         -WorkingDirectory $Frontend
 
     if (-not $SkipCollector) {
-        $started += Start-WorkbenchHiddenProcess -Name "collector-hot" -FilePath $BackendVenv `
+        $started += Start-WorkbenchHiddenProcess -Name "collector" -FilePath $BackendVenv `
             -ArgumentList @(
-                "-u", "-m", "workbench.collector.main", "--real", "--serve", "--mode", "hot",
+                "-u", "-m", "workbench.collector.main", "--real", "--serve", "--mode", "combined",
                 "--data-dir", $DataDir, "--tdx-home", $TdxHome
             ) `
             -WorkingDirectory $Backend
 
-        $started += Start-WorkbenchHiddenProcess -Name "collector-archive" -FilePath $BackendVenv `
+        $started += Start-WorkbenchHiddenProcess -Name "collector-gray" -FilePath $BackendVenv `
             -ArgumentList @(
-                "-u", "-m", "workbench.collector.main", "--real", "--serve", "--mode", "archive",
+                "-u", "-m", "workbench.collector.main", "--real", "--serve", "--mode", "gray",
                 "--data-dir", $DataDir, "--tdx-home", $TdxHome
             ) `
             -WorkingDirectory $Backend
@@ -280,12 +287,12 @@ Start-Process $psExe -ArgumentList @(
 
 if (-not $SkipCollector) {
     Start-Process $psExe -ArgumentList @(
-        "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "start-workbench-collector-hot.ps1"),
+        "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $collectorScript,
         "-DataDir", $DataDir, "-TdxHome", $TdxHome
     ) -WorkingDirectory $Root
 
     Start-Process $psExe -ArgumentList @(
-        "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "start-workbench-collector-archive.ps1"),
+        "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "start-workbench-collector-gray.ps1"),
         "-DataDir", $DataDir, "-TdxHome", $TdxHome
     ) -WorkingDirectory $Root
 }

@@ -38,6 +38,8 @@ from workbench.query.models import (
 from workbench.query.sector_resolve import resolve_member_sector_id
 from workbench.query.sectors import SectorQueryService
 from workbench.services.collector_control import restart_collectors
+from workbench.services.sector_groups import SectorGroupService, SectorGroupView
+from workbench.services.stock_groups import StockGroupService, StockGroupView
 from workbench.services.tdx_probe import probe_tdx_home
 from workbench.storage.hot_store import HotStore
 from workbench.storage.meta_store import MetaStore
@@ -138,6 +140,107 @@ class TdxProbeRequest(BaseModel):
     tdx_home: str = Field(min_length=1)
 
 
+class SectorGroupCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class SectorGroupRenamePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class SectorGroupMembersPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sector_ids: list[str] = Field(default_factory=list)
+
+
+class SectorGroupActivePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    group_id: str = "all"
+
+
+class SectorGroupMemberChartPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    chart_visible: bool
+
+
+class StockGroupCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class StockGroupRenamePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class StockGroupMembersPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbols: list[str] = Field(default_factory=list)
+
+
+class StockGroupActivePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    group_id: str = "all"
+
+
+def _serialize_group(group: SectorGroupView) -> dict[str, object]:
+    return {
+        "id": group.id,
+        "name": group.name,
+        "sort_order": group.sort_order,
+        "sector_ids": group.sector_ids,
+        "sectors": [
+            {
+                "sector_id": member.sector_id,
+                "name": member.name,
+                "chart_visible": member.chart_visible,
+            }
+            for member in group.sectors
+        ],
+    }
+
+
+def _serialize_sector_groups(service: SectorGroupService) -> dict[str, object]:
+    return {
+        "items": [_serialize_group(group) for group in service.list_groups()],
+        "active_group_id": service.read_active_group_id(),
+    }
+
+
+def _serialize_stock_group(group: StockGroupView) -> dict[str, object]:
+    return {
+        "id": group.id,
+        "name": group.name,
+        "sort_order": group.sort_order,
+        "symbol_ids": group.symbol_ids,
+        "symbols": [
+            {
+                "symbol": member.symbol,
+                "name": member.name,
+            }
+            for member in group.symbols
+        ],
+    }
+
+
+def _serialize_stock_groups(service: StockGroupService) -> dict[str, object]:
+    return {
+        "items": [_serialize_stock_group(group) for group in service.list_groups()],
+        "active_group_id": service.read_active_group_id(),
+    }
+
+
 def create_settings_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
@@ -211,16 +314,21 @@ def create_settings_router() -> APIRouter:
     @router.get("/collection-targets")
     def read_collection_targets(
         settings: WorkbenchSettings = Depends(get_settings),
+        include_symbols: bool = Query(default=False),
     ) -> dict[str, object]:
-        return {
+        resolved_symbols = read_priority_stock_symbols(settings.data_dir)
+        payload: dict[str, object] = {
             "sector_ids": read_priority_sector_ids(settings.data_dir),
-            "symbols": read_priority_stock_symbols(settings.data_dir),
             "manual_symbols": read_priority_manual_symbols(settings.data_dir),
+            "resolved_symbol_count": len(resolved_symbols),
             "priority_max_sectors": settings.priority_max_sectors,
             "priority_max_stocks": settings.priority_max_stocks,
             "priority_sector_members": settings.priority_sector_members,
             "priority_linkage_members": settings.priority_linkage_members,
         }
+        if include_symbols:
+            payload["symbols"] = resolved_symbols
+        return payload
 
     @router.get("/ui-selected-boards")
     def read_ui_selected_boards(
@@ -311,6 +419,256 @@ def create_settings_router() -> APIRouter:
     ) -> dict[str, object]:
         return {"items": read_settings_audit(settings.data_dir, limit=limit)}
 
+    @router.get("/sector-groups")
+    def list_sector_groups(
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        return _serialize_sector_groups(SectorGroupService(meta))
+
+    @router.post("/sector-groups")
+    def create_sector_group(
+        payload: SectorGroupCreatePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        group = service.create_group(payload.name)
+        append_settings_audit(
+            settings.data_dir,
+            "create_sector_group",
+            {"group_id": group.id, "name": group.name},
+        )
+        return {"ok": True, "group": _serialize_group(group)}
+
+    @router.put("/sector-groups/active")
+    def set_active_sector_group(
+        payload: SectorGroupActivePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            active_group_id = service.set_active_group_id(payload.group_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "set_active_sector_group",
+            {"group_id": active_group_id},
+        )
+        return {"ok": True, "active_group_id": active_group_id}
+
+    @router.put("/sector-groups/{group_id}")
+    def rename_sector_group(
+        group_id: str,
+        payload: SectorGroupRenamePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            group = service.rename_group(group_id, payload.name)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "rename_sector_group",
+            {"group_id": group.id, "name": group.name},
+        )
+        return {"ok": True, "group": _serialize_group(group)}
+
+    @router.delete("/sector-groups/{group_id}")
+    def delete_sector_group(
+        group_id: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            service.delete_group(group_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(settings.data_dir, "delete_sector_group", {"group_id": group_id})
+        return {"ok": True}
+
+    @router.post("/sector-groups/{group_id}/members")
+    def add_sector_group_members(
+        group_id: str,
+        payload: SectorGroupMembersPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            group = service.add_members(group_id, payload.sector_ids)
+        except ValueError as error:
+            message = str(error)
+            status = 400 if "limit" in message else 404
+            raise HTTPException(status_code=status, detail=message) from error
+        append_settings_audit(
+            settings.data_dir,
+            "add_sector_group_members",
+            {"group_id": group.id, "count": len(group.sector_ids)},
+        )
+        return {"ok": True, "group": _serialize_group(group)}
+
+    @router.delete("/sector-groups/{group_id}/members/{sector_id}")
+    def remove_sector_group_member(
+        group_id: str,
+        sector_id: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            group = service.remove_member(group_id, sector_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "remove_sector_group_member",
+            {"group_id": group.id, "sector_id": sector_id},
+        )
+        return {"ok": True, "group": _serialize_group(group)}
+
+    @router.put("/sector-groups/{group_id}/members/{sector_id}/chart-visible")
+    def set_sector_group_member_chart_visible(
+        group_id: str,
+        sector_id: str,
+        payload: SectorGroupMemberChartPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = SectorGroupService(meta)
+        try:
+            group = service.set_member_chart_visible(group_id, sector_id, payload.chart_visible)
+        except ValueError as error:
+            message = str(error)
+            status = 400 if "limit" in message else 404
+            raise HTTPException(status_code=status, detail=message) from error
+        append_settings_audit(
+            settings.data_dir,
+            "set_sector_group_member_chart_visible",
+            {
+                "group_id": group.id,
+                "sector_id": sector_id,
+                "chart_visible": payload.chart_visible,
+            },
+        )
+        return {"ok": True, "group": _serialize_group(group)}
+
+    @router.get("/stock-groups")
+    def list_stock_groups(
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        return _serialize_stock_groups(StockGroupService(meta))
+
+    @router.post("/stock-groups")
+    def create_stock_group(
+        payload: StockGroupCreatePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        group = service.create_group(payload.name)
+        append_settings_audit(
+            settings.data_dir,
+            "create_stock_group",
+            {"group_id": group.id, "name": group.name},
+        )
+        return {"ok": True, "group": _serialize_stock_group(group)}
+
+    @router.put("/stock-groups/active")
+    def set_active_stock_group(
+        payload: StockGroupActivePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        try:
+            active_group_id = service.set_active_group_id(payload.group_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "set_active_stock_group",
+            {"group_id": active_group_id},
+        )
+        return {"ok": True, "active_group_id": active_group_id}
+
+    @router.put("/stock-groups/{group_id}")
+    def rename_stock_group(
+        group_id: str,
+        payload: StockGroupRenamePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        try:
+            group = service.rename_group(group_id, payload.name)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "rename_stock_group",
+            {"group_id": group.id, "name": group.name},
+        )
+        return {"ok": True, "group": _serialize_stock_group(group)}
+
+    @router.delete("/stock-groups/{group_id}")
+    def delete_stock_group(
+        group_id: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        try:
+            service.delete_group(group_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(settings.data_dir, "delete_stock_group", {"group_id": group_id})
+        return {"ok": True}
+
+    @router.post("/stock-groups/{group_id}/members")
+    def add_stock_group_members(
+        group_id: str,
+        payload: StockGroupMembersPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        try:
+            group = service.add_members(group_id, payload.symbols)
+        except ValueError as error:
+            message = str(error)
+            status = 400 if "limit" in message else 404
+            raise HTTPException(status_code=status, detail=message) from error
+        append_settings_audit(
+            settings.data_dir,
+            "add_stock_group_members",
+            {"group_id": group.id, "count": len(group.symbol_ids)},
+        )
+        return {"ok": True, "group": _serialize_stock_group(group)}
+
+    @router.delete("/stock-groups/{group_id}/members/{symbol}")
+    def remove_stock_group_member(
+        group_id: str,
+        symbol: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = StockGroupService(meta)
+        try:
+            group = service.remove_member(group_id, symbol)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "remove_stock_group_member",
+            {"group_id": group.id, "symbol": symbol.upper()},
+        )
+        return {"ok": True, "group": _serialize_stock_group(group)}
+
     return router
 
 
@@ -318,7 +676,13 @@ def create_sector_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/sectors", tags=["sectors"])
 
     @router.get("", response_model=SectorListResponse)
-    def list_sectors(meta: MetaStore = Depends(get_meta_store)) -> SectorListResponse:
+    def list_sectors(
+        meta: MetaStore = Depends(get_meta_store),
+        q: str | None = Query(default=None),
+        limit: int | None = Query(default=None, ge=1, le=1500),
+    ) -> SectorListResponse:
+        if q is not None or limit is not None:
+            return SectorQueryService(meta).list_sectors(query=q, limit=limit or 50)
         return SectorQueryService(meta).list_sectors()
 
     @router.get("/rank", response_model=SectorRankResponse)

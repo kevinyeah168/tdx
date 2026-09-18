@@ -73,7 +73,7 @@ def test_retention_defaults_to_thirty_and_can_change(tmp_path: Path) -> None:
     store = MetaStore(tmp_path / "meta.sqlite")
     store.initialize()
 
-    assert store.retention_days() == 30
+    assert store.retention_days() == 365
     store.set_retention_days(60)
     assert store.retention_days() == 60
 

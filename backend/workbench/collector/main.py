@@ -119,9 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("hot", "archive", "combined"),
+        choices=("hot", "archive", "combined", "gray"),
         default="hot",
-        help="hot=优先采集(盘中); archive=全量补采(午休/收盘); combined=单进程两者",
+        help="hot/combined=云图主盘; gray=东财暗盘(独立进程); archive=已废弃",
     )
     return parser
 
@@ -206,19 +206,40 @@ def serve(arguments: argparse.Namespace) -> int:
         retention_trading_days=meta.retention_days(),
         today=date.today(),
     )
-    provider = build_provider(arguments, settings)
     write_collector_heartbeat(settings.data_dir, role=collector_role)
     hot = HotStore(settings.hot_db_for(date.today().isoformat()))
     hot.initialize()
+
+    if collector_role == "gray":
+        gray_stocks = GrayStockCollector(hot, settings=settings)
+
+        def collect_gray(trade_date: date, minute: str) -> dict[str, object]:
+            hot_path = settings.hot_db_for(trade_date.isoformat())
+            gray_stocks.hot = HotStore(hot_path)
+            gray_stocks.hot.initialize()
+            return gray_stocks.collect(trade_date, minute)
+
+        scheduler = MinuteScheduler(
+            collect=lambda *_args, **_kwargs: {},
+            gray_collect=collect_gray,
+            gray_interval_seconds=settings.gray_collect_interval_seconds,
+            on_tick=lambda: write_collector_heartbeat(settings.data_dir, role=collector_role),
+            mode="gray",
+        )
+        try:
+            scheduler.serve()
+        except KeyboardInterrupt:
+            release_collector_lock(settings.data_dir, collector_role)
+            return 0
+        return 0
+
+    provider = build_provider(arguments, settings)
     yuntu_snapshots = YuntuSnapshotCollector(
         meta,
         hot,
         settings=settings,
     )
-    gray_stocks = GrayStockCollector(
-        hot,
-        settings=settings,
-    )
+
     def collect(trade_date: date, minute: str) -> dict[str, object]:
         return collect_once(
             trade_date=trade_date,
@@ -258,12 +279,6 @@ def serve(arguments: argparse.Namespace) -> int:
         yuntu_snapshots.hot.initialize()
         return yuntu_snapshots.finalize_pending(trade_date)
 
-    def collect_gray(trade_date: date, minute: str) -> dict[str, object]:
-        hot_path = settings.hot_db_for(trade_date.isoformat())
-        gray_stocks.hot = HotStore(hot_path)
-        gray_stocks.hot.initialize()
-        return gray_stocks.collect(trade_date, minute)
-
     def collect_once_for_backfill(trade_date: date, minute: str) -> dict[str, object]:
         hot_path = settings.hot_db_for(trade_date.isoformat())
         backfill_hot = HotStore(hot_path)
@@ -295,26 +310,24 @@ def serve(arguments: argparse.Namespace) -> int:
         write_collector_heartbeat(settings.data_dir, role=collector_role)
         return backfill.next_missing_minute(trade_date, now)
 
+    # gray runs in a dedicated process (--mode gray); yuntu paths never embed it.
     if collector_role == "hot":
         priority_fn: CollectFn | None = collect_yuntu
-        gray_fn: CollectFn | None = collect_gray
         backfill_fn = None
         yuntu_finalize_fn = finalize_yuntu
     elif collector_role == "archive":
         priority_fn = None
-        gray_fn = None
         backfill_fn = run_session_backfill
         yuntu_finalize_fn = None
     else:
         priority_fn = collect_yuntu
-        gray_fn = collect_gray
         backfill_fn = run_session_backfill
         yuntu_finalize_fn = finalize_yuntu
 
     scheduler = MinuteScheduler(
         collect=collect,
         priority_collect=priority_fn,
-        gray_collect=gray_fn,
+        gray_collect=None,
         gray_interval_seconds=settings.gray_collect_interval_seconds,
         yuntu_finalize=yuntu_finalize_fn,
         session_backfill=backfill_fn,
@@ -333,7 +346,6 @@ def serve(arguments: argparse.Namespace) -> int:
         release_collector_lock(settings.data_dir, collector_role)
         return 0
     return 0
-
 
 def backfill_classic_indices(arguments: argparse.Namespace) -> int:
     settings = WorkbenchSettings(data_dir=arguments.data_dir, tdx_home=arguments.tdx_home)

@@ -360,7 +360,7 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
     def health() -> dict[str, object]:
         run_dir = active_settings.data_dir / "run"
         collectors: dict[str, object] = {}
-        for role in ("hot", "archive", "collector"):
+        for role in ("hot", "archive", "combined", "gray", "collector"):
             path = run_dir / (f"collector-{role}.json" if role != "collector" else "collector.json")
             if path.is_file():
                 try:

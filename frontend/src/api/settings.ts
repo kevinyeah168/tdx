@@ -29,12 +29,18 @@ export interface SettingsUpdatePayload {
 
 export interface CollectionTargets {
   sector_ids: string[]
-  symbols: string[]
+  symbols?: string[]
   manual_symbols?: string[]
+  resolved_symbol_count?: number
   priority_max_sectors: number
   priority_max_stocks: number
   priority_sector_members: number
   priority_linkage_members: number
+}
+
+export interface UiSelectedBoard {
+  id: string
+  name: string
 }
 
 export interface TdxProbeResult {
@@ -56,8 +62,8 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export async function fetchSettingsDetail(): Promise<SettingsDetail> {
-  return apiGet<SettingsDetail>('/api/v1/settings', { probe: 'true' })
+export async function fetchSettingsDetail(includeProbe = false): Promise<SettingsDetail> {
+  return apiGet<SettingsDetail>('/api/v1/settings', { probe: includeProbe ? 'true' : 'false' })
 }
 
 export async function updateSettingsDetail(payload: SettingsUpdatePayload): Promise<SettingsDetail> {
@@ -68,14 +74,20 @@ export async function updateSettingsDetail(payload: SettingsUpdatePayload): Prom
   })
 }
 
-export async function fetchCollectionTargets(): Promise<CollectionTargets> {
-  return apiGet<CollectionTargets>('/api/v1/settings/collection-targets')
+export async function fetchCollectionTargets(includeResolved = false): Promise<CollectionTargets> {
+  return apiGet<CollectionTargets>('/api/v1/settings/collection-targets', {
+    include_symbols: includeResolved ? 'true' : 'false',
+  })
+}
+
+export async function fetchUiSelectedBoards(): Promise<{ boards: UiSelectedBoard[]; source: string }> {
+  return apiGet('/api/v1/settings/ui-selected-boards')
 }
 
 export async function saveCollectionTargets(payload: {
   sector_ids: string[]
   symbols: string[]
-}): Promise<{ ok: boolean; sector_count: number; symbol_count: number }> {
+}): Promise<{ ok: boolean; sector_count: number; symbol_count: number; manual_symbol_count?: number }> {
   return apiJson('/api/v1/settings/collection-targets', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

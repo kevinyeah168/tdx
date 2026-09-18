@@ -1,9 +1,7 @@
-param(
-    [string]$DataDir = "../data/workbench-real",
-    [string]$TdxHome = "C:\new_tdx64"
-)
+# Deprecated: archive collector was merged into combined mode.
+# Use start-workbench-collector.ps1 or start-workbench-all-background.cmd instead.
 
 $ErrorActionPreference = "Stop"
-$backend = Join-Path (Split-Path -Parent $PSScriptRoot) "backend"
-Set-Location $backend
-.\.venv\Scripts\python.exe -m workbench.collector.main --real --serve --mode archive --data-dir $DataDir --tdx-home $TdxHome
+Write-Host "[deprecated] archive collector is no longer used." -ForegroundColor Yellow
+Write-Host "           Run scripts/start-workbench-collector.ps1 (combined mode) instead." -ForegroundColor Yellow
+exit 1

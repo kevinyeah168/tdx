@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class WorkbenchSettings(BaseModel):
     data_dir: Path = Path("../data")
     tdx_home: Path = Path("C:/new_tdx64")
-    retention_trading_days: int = Field(default=30, ge=1, le=2500)
+    retention_trading_days: int = Field(default=365, ge=1, le=2500)
     quote_interval_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
     priority_interval_seconds: float = Field(default=5.0, ge=1.0, le=15.0)
     yuntu_collect_interval_seconds: float = Field(default=18.0, ge=5.0, le=60.0)

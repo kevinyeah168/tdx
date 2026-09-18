@@ -31,6 +31,57 @@ export interface StockSectorItem {
   sector_type: string
 }
 
+export interface StockRankItem {
+  symbol: string
+  name: string
+  main_cumulative: number
+  change_pct: number
+}
+
+export interface StockRankResponse {
+  trade_date: string
+  minute: string
+  items: StockRankItem[]
+}
+
+export function fetchStockRank(tradeDate: string, minute: string): Promise<StockRankResponse> {
+  return apiGet<StockRankResponse>('/api/v1/stocks/rank', {
+    date: tradeDate,
+    minute,
+  })
+}
+
+export interface StockCatalogItem {
+  symbol: string
+  name: string
+}
+
+export function fetchStockCatalog(): Promise<{ items: StockCatalogItem[] }> {
+  return apiGet<{ items: StockCatalogItem[] }>('/api/v1/stocks/catalog')
+}
+
+export interface StockResolveItem {
+  symbol: string
+  name: string
+}
+
+export interface StockResolveResponse {
+  resolved: StockResolveItem[]
+  unresolved: string[]
+}
+
+export async function resolveStockSymbols(inputs: string[]): Promise<StockResolveResponse> {
+  const response = await fetch('/api/v1/stocks/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs }),
+  })
+  if (!response.ok) {
+    throw new Error(`API ${response.status}: ${await response.text()}`)
+  }
+  return response.json() as Promise<StockResolveResponse>
+}
+
 export function fetchStockDetail(symbol: string): Promise<StockDetail> {
   return apiGet<StockDetail>(`/api/v1/stocks/${symbol}`)
 }

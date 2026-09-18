@@ -55,7 +55,6 @@ def test_scheduler_runs_priority_only_during_trading_when_priority_enabled() -> 
 
 
 def test_scheduler_runs_gray_every_15_seconds() -> None:
-    priority_calls: list[tuple[date, str]] = []
     gray_calls: list[tuple[date, str]] = []
     sleep_calls: list[float] = []
     clock = [
@@ -65,10 +64,6 @@ def test_scheduler_runs_gray_every_15_seconds() -> None:
         datetime(2026, 8, 25, 10, 15, 16),
     ]
     timestamps = [1000.0, 1005.0, 1010.0, 1016.0]
-
-    def priority_collect(trade_date: date, minute: str) -> dict[str, object]:
-        priority_calls.append((trade_date, minute))
-        return {"priority_sectors": 1}
 
     def gray_collect(trade_date: date, minute: str) -> dict[str, object]:
         gray_calls.append((trade_date, minute))
@@ -81,12 +76,10 @@ def test_scheduler_runs_gray_every_15_seconds() -> None:
 
     scheduler = MinuteScheduler(
         collect=lambda *_args, **_kwargs: {},
-        priority_collect=priority_collect,
         gray_collect=gray_collect,
         sleep=sleep,
-        priority_interval_seconds=5.0,
         gray_interval_seconds=15.0,
-        mode="hot",
+        mode="gray",
     )
 
     with (
@@ -99,11 +92,45 @@ def test_scheduler_runs_gray_every_15_seconds() -> None:
         with pytest.raises(_StopLoop):
             scheduler.serve()
 
-    assert len(priority_calls) == 4
     assert gray_calls == [
         (date(2026, 8, 25), "10:15"),
         (date(2026, 8, 25), "10:15"),
     ]
+    assert all(14.9 <= value <= 15.0 for value in sleep_calls)
+
+
+def test_scheduler_hot_does_not_run_gray() -> None:
+    priority_calls: list[tuple[date, str]] = []
+    gray_calls: list[tuple[date, str]] = []
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 3:
+            raise _StopLoop
+
+    fixed_now = datetime(2026, 8, 25, 10, 15, 0)
+    scheduler = MinuteScheduler(
+        collect=lambda *_args, **_kwargs: {},
+        priority_collect=lambda trade_date, minute: priority_calls.append((trade_date, minute)) or {},
+        gray_collect=lambda trade_date, minute: gray_calls.append((trade_date, minute)) or {},
+        sleep=sleep,
+        priority_interval_seconds=5.0,
+        gray_interval_seconds=15.0,
+        mode="hot",
+    )
+
+    with (
+        patch("workbench.collector.scheduler.is_trading_day", return_value=True),
+        patch("workbench.collector.scheduler.is_trading_minute", return_value=True),
+        patch("workbench.collector.scheduler.datetime") as mock_datetime,
+    ):
+        mock_datetime.now.return_value = fixed_now
+        with pytest.raises(_StopLoop):
+            scheduler.serve()
+
+    assert len(priority_calls) == 3
+    assert gray_calls == []
 
 
 def test_scheduler_archive_skips_trading_minutes() -> None:

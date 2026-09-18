@@ -15,7 +15,7 @@ TickFn = Callable[[], None]
 BackfillFn = Callable[[date, datetime], dict[str, object] | None]
 
 
-CollectorMode = str  # "hot" | "archive" | "combined"
+CollectorMode = str  # "hot" | "archive" | "combined" | "gray"
 
 
 class MinuteScheduler:
@@ -56,8 +56,8 @@ class MinuteScheduler:
         self._on_tick = on_tick
         self._last_full_collect_at = 0.0
         self._last_gray_collect_at = 0.0
-        if mode not in {"hot", "archive", "combined"}:
-            raise ValueError("mode must be hot, archive, or combined")
+        if mode not in {"hot", "archive", "combined", "gray"}:
+            raise ValueError("mode must be hot, archive, combined, or gray")
         self._mode = mode
 
     def serve(self) -> None:
@@ -71,6 +71,9 @@ class MinuteScheduler:
 
             clock = now.time().replace(second=0, microsecond=0)
             if not is_trading_minute(clock):
+                if self._mode == "gray":
+                    self._sleep(1.0)
+                    continue
                 if self._yuntu_finalize is not None:
                     try:
                         finalized = self._yuntu_finalize(now.date())
@@ -98,8 +101,30 @@ class MinuteScheduler:
 
             minute = now.strftime("%H:%M")
             now_ts = now.timestamp()
-            due_full = (now_ts - self._last_full_collect_at) >= self._full_collect_interval_seconds
             cycle_started = time.perf_counter()
+
+            if self._mode == "gray":
+                try:
+                    due_gray = (now_ts - self._last_gray_collect_at) >= self._gray_interval_seconds
+                    if self._gray_collect is not None and due_gray:
+                        self._last_gray_collect_at = now_ts
+                        gray_result = self._gray_collect(now.date(), minute)
+                        print(
+                            json.dumps(
+                                {"mode": "gray", **gray_result},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        )
+                except Exception as error:
+                    print(f"gray collect failed: {error}", file=sys.stderr)
+                    self._sleep(5.0)
+                    continue
+                elapsed = time.perf_counter() - cycle_started
+                self._sleep(max(1.0, self._gray_interval_seconds - elapsed))
+                continue
+
+            due_full = (now_ts - self._last_full_collect_at) >= self._full_collect_interval_seconds
             try:
                 # 盘中不做阻塞式全量（5216 股一次可达数分钟，会漏分钟）；仅走优先快路径
                 if due_full and self._priority_collect is None:
@@ -111,17 +136,6 @@ class MinuteScheduler:
                     print(
                         json.dumps(
                             {"mode": "yuntu", **result},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    )
-                due_gray = (now_ts - self._last_gray_collect_at) >= self._gray_interval_seconds
-                if self._gray_collect is not None and due_gray:
-                    self._last_gray_collect_at = now_ts
-                    gray_result = self._gray_collect(now.date(), minute)
-                    print(
-                        json.dumps(
-                            {"mode": "gray", **gray_result},
                             ensure_ascii=False,
                             separators=(",", ":"),
                         )

@@ -104,8 +104,15 @@ export function fetchSectorCatalogMembers(
   return apiGet<SectorCatalogMembersResponse>(`/api/v1/sectors/${sectorId}/catalog-members`, params)
 }
 
-export function fetchSectors(): Promise<SectorListResponse> {
-  return apiGet<SectorListResponse>('/api/v1/sectors')
+export function fetchSectors(params?: { q?: string; limit?: number }): Promise<SectorListResponse> {
+  const query: Record<string, string> = {}
+  if (params?.q?.trim()) query.q = params.q.trim()
+  if (params?.limit != null) query.limit = String(params.limit)
+  return apiGet<SectorListResponse>('/api/v1/sectors', Object.keys(query).length ? query : undefined)
+}
+
+export function searchSectors(query: string, limit = 30): Promise<SectorListResponse> {
+  return fetchSectors({ q: query, limit })
 }
 
 export function fetchSectorRank(

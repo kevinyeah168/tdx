@@ -85,16 +85,31 @@ class SectorQueryService:
                     break
         return effective_minute, [(str(row[0]), float(row[1]), float(row[2])) for row in rows]
 
-    def list_sectors(self) -> SectorListResponse:
+    def list_sectors(
+        self,
+        *,
+        query: str | None = None,
+        limit: int | None = None,
+    ) -> SectorListResponse:
         snapshot = self._meta.catalog_snapshot()
+        normalized_query = str(query or "").strip()
+        effective_limit = None if limit is None else max(1, min(int(limit), 1500))
+        sql = (
+            "SELECT s.sector_id, s.name, s.sector_type, COUNT(m.symbol) "
+            "FROM sector_master s "
+            "LEFT JOIN sector_membership m ON m.sector_id = s.sector_id "
+        )
+        params: list[object] = []
+        if normalized_query:
+            like = f"%{normalized_query}%"
+            sql += "WHERE s.name LIKE ? OR s.sector_id LIKE ? "
+            params.extend([like, like])
+        sql += "GROUP BY s.sector_id, s.name, s.sector_type ORDER BY s.sector_id"
+        if effective_limit is not None:
+            sql += " LIMIT ?"
+            params.append(effective_limit)
         with self._meta.connect() as connection:
-            rows = connection.execute(
-                "SELECT s.sector_id, s.name, s.sector_type, COUNT(m.symbol) "
-                "FROM sector_master s "
-                "LEFT JOIN sector_membership m ON m.sector_id = s.sector_id "
-                "GROUP BY s.sector_id, s.name, s.sector_type "
-                "ORDER BY s.sector_id"
-            ).fetchall()
+            rows = connection.execute(sql, params).fetchall()
         return SectorListResponse(
             items=[
                 SectorSummary(

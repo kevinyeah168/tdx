@@ -52,7 +52,7 @@ def test_stock_bars_api(tmp_path: Path) -> None:
 def test_settings_api(tmp_path: Path) -> None:
     client = TestClient(create_app(seed(tmp_path)))
     payload = client.get("/api/v1/settings").json()
-    assert payload["retention_days"] == 30
+    assert payload["retention_days"] == 365
     assert payload["collect_mode"] == "selective"
     response = client.put("/api/v1/settings", json={"retention_days": 45})
     assert response.status_code == 200

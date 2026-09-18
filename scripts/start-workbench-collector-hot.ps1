@@ -6,4 +6,4 @@ param(
 $ErrorActionPreference = "Stop"
 $backend = Join-Path (Split-Path -Parent $PSScriptRoot) "backend"
 Set-Location $backend
-.\.venv\Scripts\python.exe -m workbench.collector.main --real --serve --mode hot --data-dir $DataDir --tdx-home $TdxHome
+.\.venv\Scripts\python.exe -m workbench.collector.main --real --serve --mode combined --data-dir $DataDir --tdx-home $TdxHome

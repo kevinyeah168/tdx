@@ -64,3 +64,14 @@ def test_sector_list_includes_member_counts(tmp_path: Path) -> None:
 
     assert len(response.items) == 2
     assert response.items[0].member_count == 1
+
+
+def test_sector_list_supports_query_filter(tmp_path: Path) -> None:
+    meta = MetaStore(tmp_path / "meta.sqlite")
+    meta.initialize()
+    seed_meta(meta)
+
+    response = SectorQueryService(meta).list_sectors(query="银行", limit=10)
+
+    assert len(response.items) == 1
+    assert response.items[0].sector_id == "881001"

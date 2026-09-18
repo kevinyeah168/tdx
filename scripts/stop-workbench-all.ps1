@@ -123,7 +123,7 @@ Stop-ByPort -Port $ApiPort -Label "api" | Out-Null
 
 # 2) Clean pid files and try any stale pids with tree kill
 if (Test-Path $RunDir) {
-    foreach ($name in @("collector-hot", "collector-archive", "collector", "frontend", "api")) {
+    foreach ($name in @("collector-hot", "collector-archive", "collector-gray", "collector", "frontend", "api")) {
         $pidFile = Join-Path $RunDir "$name.pid"
         if (Test-Path $pidFile) {
             $rawPid = (Get-Content $pidFile -Raw).Trim()
@@ -143,6 +143,17 @@ if ($orphans -gt 0) {
 
 Remove-LockFiles -Dir $RunDir
 Remove-LockFiles -Dir $DataRunDir
+
+foreach ($runPath in @($RunDir, $DataRunDir)) {
+    if (-not (Test-Path $runPath)) { continue }
+    foreach ($staleRole in @("collector-hot.json", "collector-archive.json")) {
+        $stalePath = Join-Path $runPath $staleRole
+        if (Test-Path $stalePath) {
+            Remove-Item $stalePath -Force -ErrorAction SilentlyContinue
+            Write-Host "  heartbeat : removed $staleRole" -ForegroundColor DarkGray
+        }
+    }
+}
 
 Start-Sleep -Milliseconds 800
 

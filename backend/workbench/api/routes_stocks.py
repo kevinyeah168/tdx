@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from workbench.collector.history_sync import HistorySyncService
 from workbench.config import WorkbenchSettings
@@ -65,8 +66,59 @@ def get_hot_store(
     return store
 
 
+def get_optional_hot_store(
+    trade_date: date = Query(alias="date"),
+    settings: WorkbenchSettings = Depends(get_settings),
+) -> HotStore | None:
+    path = settings.hot_db_for(trade_date.isoformat())
+    if not path.is_file():
+        return None
+    store = HotStore(path)
+    store.initialize()
+    return store
+
+
+class StockResolvePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    inputs: list[str] = Field(default_factory=list)
+
+
 def create_stock_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/stocks", tags=["stocks"])
+
+    @router.get("/rank")
+    def stock_rank(
+        trade_date: date = Query(alias="date"),
+        minute: str = Query(default="15:00"),
+        meta: MetaStore = Depends(get_meta_store),
+        hot: HotStore | None = Depends(get_optional_hot_store),
+    ) -> dict[str, object]:
+        payload = StockQueryService(meta, hot).stock_ranking(
+            trade_date.isoformat(),
+            minute,
+        )
+        return payload.model_dump(mode="json")
+
+    @router.post("/resolve")
+    def resolve_stocks(
+        payload: StockResolvePayload,
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        return StockQueryService(meta).resolve_symbols(payload.inputs)
+
+    @router.get("/catalog")
+    def stock_catalog(meta: MetaStore = Depends(get_meta_store)) -> dict[str, object]:
+        with meta.connect() as connection:
+            rows = connection.execute(
+                "SELECT symbol, name FROM security_master WHERE active=1 ORDER BY symbol"
+            ).fetchall()
+        return {
+            "items": [
+                {"symbol": str(row[0]).upper(), "name": str(row[1])}
+                for row in rows
+            ],
+        }
 
     @router.get("/{symbol}")
     def stock_detail(symbol: str, meta: MetaStore = Depends(get_meta_store)) -> dict[str, object]:

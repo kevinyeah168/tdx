@@ -46,6 +46,21 @@ CREATE TABLE IF NOT EXISTS catalog_state (
     stale INTEGER NOT NULL DEFAULT 0,
     error_summary TEXT
 );
+
+CREATE TABLE IF NOT EXISTS sector_group (
+    group_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sector_group_member (
+    group_id TEXT NOT NULL,
+    sector_id TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_id, sector_id),
+    FOREIGN KEY (group_id) REFERENCES sector_group(group_id) ON DELETE CASCADE
+);
 """
 
 HOT_SCHEMA = """

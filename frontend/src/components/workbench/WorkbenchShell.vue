@@ -10,21 +10,24 @@ import ReplayControls from '@/components/workbench/ReplayControls.vue'
 import SectorWorkspace from '@/components/workbench/SectorWorkspace.vue'
 import HealthPage from '@/components/workbench/HealthPage.vue'
 import SettingsPage from '@/components/workbench/SettingsPage.vue'
+import CycleReplayWorkspace from '@/components/workbench/CycleReplayWorkspace.vue'
 import StockWorkspace from '@/components/workbench/StockWorkspace.vue'
 import { useBoardStore } from '@/stores/boardStore'
 import { useMarketStore } from '@/stores/marketStore'
 import { useReplayStore } from '@/stores/replayStore'
 import { useSectorStore } from '@/stores/sectorStore'
+import { useStockStore } from '@/stores/stockStore'
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { fmtPct } from '@/utils/format'
 
 const marketStore = useMarketStore()
 const sectorStore = useSectorStore()
+const stockStore = useStockStore()
 const boardStore = useBoardStore()
 const replayStore = useReplayStore()
 const themeStore = useThemeStore()
 
-const activeView = ref<'home' | 'sectors' | 'stock' | 'health' | 'settings'>('home')
+const activeView = ref<'home' | 'sectors' | 'stock' | 'cycle-replay' | 'health' | 'settings'>('home')
 const selectedStock = ref('')
 const refreshing = ref(false)
 const bootstrapped = ref(false)
@@ -58,12 +61,32 @@ function onOpenStock(symbol: string) {
   activeView.value = 'stock'
 }
 
+function onOpenSettings() {
+  activeView.value = 'settings'
+}
+
+watch(activeView, (view) => {
+  if (view === 'sectors') {
+    void sectorStore.loadGroups()
+    // 开盘前 bootstrap 可能判定无数据；进入板块页时重试，避免一直卡在「尚未开盘」
+    void sectorStore.reloadForDate()
+  }
+  if (view === 'stock') {
+    void stockStore.loadGroups()
+    if (stockStore.bootstrapped) {
+      void stockStore.reloadForDate()
+    }
+  }
+})
+
 async function refreshAll() {
   refreshing.value = true
   try {
     await marketStore.loadOverview()
     if (activeView.value === 'home') {
       await boardStore.manualRefresh()
+    } else if (activeView.value === 'stock') {
+      await stockStore.reloadForDate()
     } else {
       await sectorStore.reloadForDate()
       replayStore.minute = sectorStore.replayMinute
@@ -78,6 +101,7 @@ watch(
   ([tradeDate, minute]) => {
     if (!bootstrapped.value) return
     sectorStore.setTradeDate(tradeDate, minute)
+    stockStore.setReplayContext(tradeDate, minute)
     marketStore.tradeDate = tradeDate
     void marketStore.loadOverview()
   },
@@ -137,23 +161,26 @@ onMounted(async () => {
     <main class="workbench-main">
       <PulseHomePage v-if="activeView === 'home'" />
 
-      <SectorWorkspace v-else-if="activeView === 'sectors'" @open-stock="onOpenStock" />
+      <SectorWorkspace
+        v-else-if="activeView === 'sectors'"
+        @open-stock="onOpenStock"
+        @open-settings="onOpenSettings"
+      />
 
       <StockWorkspace
-        v-else-if="activeView === 'stock' && selectedStock"
-        :symbol="selectedStock"
-        @back="activeView = 'sectors'"
+        v-else-if="activeView === 'stock'"
+        :initial-symbol="selectedStock"
+        @open-settings="onOpenSettings"
       />
-      <div v-else-if="activeView === 'stock'" class="panel-card empty-hint">
-        请从板块成分股或顶部搜索选择个股
-      </div>
+
+      <CycleReplayWorkspace v-else-if="activeView === 'cycle-replay'" />
 
       <HealthPage v-else-if="activeView === 'health'" />
       <SettingsPage v-else-if="activeView === 'settings'" />
     </main>
 
-    <p v-if="marketStore.error || sectorStore.error || sectorStore.fundError || boardStore.board.error" class="workbench-error">
-      {{ marketStore.error || sectorStore.error || sectorStore.fundError || boardStore.board.error }}
+    <p v-if="marketStore.error || sectorStore.error || sectorStore.fundError || stockStore.error || boardStore.board.error" class="workbench-error">
+      {{ marketStore.error || sectorStore.error || sectorStore.fundError || stockStore.error || boardStore.board.error }}
     </p>
   </div>
 </template>

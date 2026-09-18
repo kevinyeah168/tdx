@@ -2,18 +2,19 @@
 import {
   NButton,
   NDataTable,
+  NDropdown,
   NEmpty,
   NInput,
+  NModal,
   NSpin,
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed, h, ref } from 'vue'
 
-import FundTierSelector from '@/components/workbench/FundTierSelector.vue'
 import MemberListDrawer, { type MemberListKind } from '@/components/workbench/MemberListDrawer.vue'
+import SectorFundChart from '@/components/workbench/SectorFundChart.vue'
 import SectorHeader, { type StatKind } from '@/components/workbench/SectorHeader.vue'
 import SessionSkeleton from '@/components/workbench/SessionSkeleton.vue'
-import StockFundChart from '@/components/workbench/StockFundChart.vue'
 import { useSectorStore, type SectorTypeFilter } from '@/stores/sectorStore'
 import { fmtMoneyCompact, fmtPct, chgTone, toneClass } from '@/utils/format'
 import { todayTradeDate } from '@/utils/tradeDate'
@@ -21,6 +22,7 @@ import type { SectorMemberRankItem } from '@/api/sectors'
 
 const emit = defineEmits<{
   openStock: [symbol: string]
+  openSettings: []
 }>()
 
 const sectorStore = useSectorStore()
@@ -34,11 +36,15 @@ const {
   membersLoading,
   latestMainFlow,
   hasSessionData,
+  groups,
+  activeGroup,
 } = storeToRefs(sectorStore)
 
-const selectedTiers = ref(['main'])
 const drawerOpen = ref(false)
 const drawerKind = ref<MemberListKind | null>(null)
+const quickCreateOpen = ref(false)
+const newGroupName = ref('')
+const creatingGroup = ref(false)
 
 const drawerTitle = computed(() => {
   const map: Record<MemberListKind, string> = {
@@ -54,6 +60,20 @@ const drawerItems = computed((): SectorMemberRankItem[] => {
   if (!drawerKind.value || !breadth.value) return []
   return breadth.value[drawerKind.value] ?? []
 })
+
+const chartTitle = computed(() => {
+  if (!selected.value) return '主力净额分时'
+  return `${selected.value.name} · 主力净额`
+})
+
+const isCustomGroup = computed(() => sectorStore.activeGroupId !== 'all')
+
+const groupDropdownOptions = computed(() =>
+  groups.value.map((group) => ({
+    key: group.id,
+    label: group.name,
+  })),
+)
 
 function openMemberList(kind: StatKind) {
   drawerKind.value = kind
@@ -110,15 +130,66 @@ const headerTime = computed(() => {
   const minute = fundFlow.value?.latest_complete_minute || sectorStore.replayMinute
   return `${date} ${minute}`
 })
+
+async function createGroup() {
+  const name = newGroupName.value.trim()
+  if (!name) return
+  creatingGroup.value = true
+  try {
+    await sectorStore.createGroup(name)
+    newGroupName.value = ''
+    quickCreateOpen.value = false
+  } finally {
+    creatingGroup.value = false
+  }
+}
+
+function addSelectedToGroup(groupId: string) {
+  if (!selected.value) return
+  void sectorStore.addSectorToGroup(groupId, selected.value.sector_id)
+}
+
+function removeFromActiveGroup(sectorId: string) {
+  if (!activeGroup.value) return
+  void sectorStore.removeSectorFromGroup(activeGroup.value.id, sectorId)
+}
 </script>
 
 <template>
   <div class="sector-workspace">
-    <!-- 左栏：板块列表 -->
     <aside class="panel-card sector-sidebar">
       <div class="sector-sidebar-head">
-        <p class="m-0 text-sm font-600">板块列表</p>
-        <div class="mt-2 flex flex-wrap gap-1">
+        <div class="sidebar-title-row">
+          <p class="m-0 text-sm font-600">板块列表</p>
+          <NButton size="tiny" quaternary @click="emit('openSettings')">管理分组</NButton>
+        </div>
+
+        <div class="group-tabs">
+          <button
+            type="button"
+            class="group-tab"
+            :class="{ active: sectorStore.activeGroupId === 'all' }"
+            @click="void sectorStore.setActiveGroup('all')"
+          >
+            全部
+          </button>
+          <button
+            v-for="group in groups"
+            :key="group.id"
+            type="button"
+            class="group-tab"
+            :class="{ active: sectorStore.activeGroupId === group.id }"
+            @click="void sectorStore.setActiveGroup(group.id)"
+          >
+            {{ group.name }}
+            <span class="group-count">{{ group.sector_ids.length }}</span>
+          </button>
+          <button type="button" class="group-tab group-tab-add" title="新建分组" @click="quickCreateOpen = true">
+            +
+          </button>
+        </div>
+
+        <div v-if="!isCustomGroup" class="mt-2 flex flex-wrap gap-1">
           <NButton
             v-for="tab in typeTabs"
             :key="tab.key"
@@ -129,37 +200,68 @@ const headerTime = computed(() => {
             {{ tab.label }}
           </NButton>
         </div>
+
         <NInput
           v-model:value="sectorStore.searchQuery"
           class="mt-2"
           size="small"
-          placeholder="搜索板块名称或代码"
+          :placeholder="isCustomGroup ? '在当前分组内搜索' : '搜索板块名称或代码'"
           clearable
         />
+
+        <p v-if="isCustomGroup" class="group-hint">
+          在设置页搜索添加板块；此处可切换分组并查看列表。
+        </p>
       </div>
+
       <div class="sector-sidebar-body">
         <NSpin :show="sectorStore.loading" class="sector-list-spin">
           <div class="sector-list">
-            <button
+            <div
               v-for="sector in filteredItems"
               :key="sector.sector_id"
-              type="button"
-              class="sector-item"
-              :class="{ active: sector.sector_id === sectorStore.selectedId }"
-              @click="sectorStore.selectSector(sector.sector_id)"
+              class="sector-item-wrap"
             >
-              <span class="truncate text-sm font-500">{{ sector.name }}</span>
-              <span class="num text-[10px] text-[var(--muted)]">
-                {{ sector.sector_id }} · {{ sector.member_count }} 成分
-              </span>
-            </button>
-            <NEmpty v-if="!filteredItems.length" class="py-8" description="无匹配板块" size="small" />
+              <button
+                type="button"
+                class="sector-item"
+                :class="{ active: sector.sector_id === sectorStore.selectedId }"
+                @click="sectorStore.selectSector(sector.sector_id)"
+              >
+                <span class="truncate text-sm font-500">{{ sector.name }}</span>
+                <span class="num text-[10px] text-[var(--muted)]">
+                  {{ sector.sector_id }} · {{ sector.member_count }} 成分
+                </span>
+              </button>
+              <button
+                v-if="isCustomGroup"
+                type="button"
+                class="sector-remove"
+                title="从分组移除"
+                @click.stop="removeFromActiveGroup(sector.sector_id)"
+              >
+                ×
+              </button>
+              <NDropdown
+                v-else-if="groups.length && sector.sector_id === sectorStore.selectedId"
+                trigger="click"
+                :options="groupDropdownOptions"
+                @select="addSelectedToGroup"
+              >
+                <button type="button" class="sector-add-group" title="加入分组">+</button>
+              </NDropdown>
+            </div>
+            <NEmpty
+              v-if="!filteredItems.length"
+              class="py-8"
+              :description="isCustomGroup ? '分组为空，请搜索添加板块' : '无匹配板块'"
+              size="small"
+            />
           </div>
         </NSpin>
       </div>
     </aside>
 
-    <!-- 主区 -->
     <section class="sector-main">
       <NSpin :show="fundLoading && hasSessionData">
         <SectorHeader
@@ -186,12 +288,10 @@ const headerTime = computed(() => {
         @open-stock="emit('openStock', $event)"
       />
 
-      <!-- 曲线 + 成分股 3:1 同行（无数据时也保留布局） -->
       <div v-if="selected" class="chart-members-row panel-card">
         <div class="chart-pane">
           <div class="chart-toolbar">
-            <span class="chart-title">主力净额分时</span>
-            <FundTierSelector v-if="hasSessionData" v-model="selectedTiers" />
+            <span class="chart-title">{{ chartTitle }}</span>
           </div>
 
           <SessionSkeleton
@@ -203,10 +303,9 @@ const headerTime = computed(() => {
 
           <div v-else class="chart-body">
             <NSpin :show="fundLoading" class="chart-spin">
-              <StockFundChart
+              <SectorFundChart
                 v-if="fundFlow?.points.length"
                 :payload="fundFlow"
-                :tiers="selectedTiers"
                 class="chart-canvas"
               />
               <NEmpty
@@ -249,6 +348,17 @@ const headerTime = computed(() => {
         </aside>
       </div>
     </section>
+
+    <NModal v-model:show="quickCreateOpen" preset="card" title="新建分组" style="width: 380px">
+      <div class="manage-block">
+        <p class="hint">分组保存在 Workbench 元数据库。完整管理（增删板块、重命名）请前往设置页。</p>
+        <div class="manage-row">
+          <NInput v-model:value="newGroupName" placeholder="新分组名称" @keyup.enter="createGroup" />
+          <NButton type="primary" :loading="creatingGroup" @click="createGroup">创建</NButton>
+        </div>
+        <NButton quaternary size="small" @click="emit('openSettings')">打开设置 · 板块分组</NButton>
+      </div>
+    </NModal>
   </div>
 </template>
 
@@ -258,7 +368,7 @@ const headerTime = computed(() => {
   height: 100%;
   min-height: 0;
   gap: 6px;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
 }
 
 .sector-sidebar {
@@ -275,6 +385,65 @@ const headerTime = computed(() => {
   padding: 8px 10px;
 }
 
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.group-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.group-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.group-tab.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--accent);
+}
+
+.group-tab-add {
+  width: 28px;
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.group-count {
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.group-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .sector-sidebar-body {
   flex: 1;
   min-height: 0;
@@ -285,10 +454,7 @@ const headerTime = computed(() => {
   height: 100%;
 }
 
-:deep(.sector-list-spin .n-spin-container) {
-  height: 100%;
-}
-
+:deep(.sector-list-spin .n-spin-container),
 :deep(.sector-list-spin .n-spin-content) {
   height: 100%;
 }
@@ -301,6 +467,12 @@ const headerTime = computed(() => {
   padding: 4px;
 }
 
+.sector-item-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
 .sector-main {
   display: flex;
   min-height: 0;
@@ -310,17 +482,10 @@ const headerTime = computed(() => {
   gap: 6px;
 }
 
-.chart-skeleton {
-  flex: 1;
-  min-height: 0;
-  border: none;
-  box-shadow: none;
-  border-radius: 8px;
-}
-
 .sector-item {
   display: flex;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
@@ -334,12 +499,26 @@ const headerTime = computed(() => {
   transition: background-color 0.15s ease;
 }
 
-.sector-item:hover {
-  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
-}
-
+.sector-item:hover,
 .sector-item.active {
   background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  color: var(--accent);
+}
+
+.sector-remove,
+.sector-add-group {
+  flex-shrink: 0;
+  width: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sector-remove:hover,
+.sector-add-group:hover {
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
   color: var(--accent);
 }
 
@@ -348,7 +527,6 @@ const headerTime = computed(() => {
   flex: 1;
   min-height: 0;
   grid-template-columns: minmax(0, 3fr) minmax(220px, 1fr);
-  align-items: stretch;
   overflow: hidden;
 }
 
@@ -362,37 +540,26 @@ const headerTime = computed(() => {
 }
 
 .chart-toolbar {
-  display: flex;
   flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
   margin-bottom: 6px;
-  min-height: 28px;
+  min-height: 24px;
 }
 
 .chart-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .chart-body,
-.chart-spin {
+.chart-spin,
+.chart-skeleton {
   display: flex;
   flex: 1;
   min-height: 0;
   flex-direction: column;
 }
 
-:deep(.chart-spin .n-spin-container) {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  flex-direction: column;
-}
-
+:deep(.chart-spin .n-spin-container),
 :deep(.chart-spin .n-spin-content) {
   display: flex;
   flex: 1;
@@ -436,13 +603,7 @@ const headerTime = computed(() => {
   flex-direction: column;
 }
 
-:deep(.members-spin .n-spin-container) {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  flex-direction: column;
-}
-
+:deep(.members-spin .n-spin-container),
 :deep(.members-spin .n-spin-content) {
   display: flex;
   flex: 1;
@@ -455,19 +616,15 @@ const headerTime = computed(() => {
   min-height: 200px;
 }
 
-:deep(.members-table .n-data-table-th) {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 6px 8px;
+.manage-block {
+  display: grid;
+  gap: 12px;
 }
 
-:deep(.members-table .n-data-table-td) {
-  padding: 6px 8px;
-}
-
-:deep(.members-table .money-cell) {
-  display: inline-block;
-  white-space: nowrap;
+.manage-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
 }
 
 @media (max-width: 1024px) {
@@ -477,7 +634,7 @@ const headerTime = computed(() => {
   }
 
   .sector-sidebar {
-    max-height: 220px;
+    max-height: 280px;
   }
 
   .chart-members-row {
@@ -489,10 +646,6 @@ const headerTime = computed(() => {
     border-right: none;
     border-bottom: 1px solid var(--border);
     min-height: 320px;
-  }
-
-  .members-pane {
-    min-height: 240px;
   }
 }
 </style>

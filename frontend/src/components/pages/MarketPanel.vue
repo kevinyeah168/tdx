@@ -2,7 +2,7 @@
 import FundFlowChart from '@/components/chart/FundFlowChart.vue'
 import FundRankPanel from '@/components/common/FundRankPanel.vue'
 import IntradayDatePicker from '@/components/common/IntradayDatePicker.vue'
-import { NButton, NSpin } from 'naive-ui'
+import { NButton, NSelect, NSpin } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 import { useBoardStore } from '@/stores/boardStore'
@@ -20,7 +20,15 @@ const {
   stockLoadingHint,
   linkageSectorName,
   highlightedStock,
+  sectorGroups,
+  activeSectorGroupId,
+  stockSourceMode,
+  sectorViewDate,
 } = storeToRefs(boardStore)
+
+const showDatePicker = computed(
+  () => props.mode === 'sector' || stockSourceMode.value !== 'linkage',
+)
 
 const highlightedStockSeries = computed(() => {
   const id = highlightedStock.value
@@ -42,13 +50,27 @@ const count = computed(() => {
   return board.value.sector_series?.length ?? 0
 })
 
-const selectedTotal = computed(() => board.value.selected_boards?.length ?? 0)
+const groupMemberTotal = computed(() => board.value.selected_boards?.length ?? 0)
 
 const countLabel = computed(() => {
   if (props.mode === 'stock') return `(${count.value})`
-  if (selectedTotal.value > count.value) return `(${count.value}/${selectedTotal.value})`
+  if (groupMemberTotal.value > count.value) {
+    return `(${count.value}/${groupMemberTotal.value})`
+  }
   return `(${count.value})`
 })
+
+const groupSelectOptions = computed(() =>
+  sectorGroups.value.map((group) => ({
+    label: `${group.name} (${group.sector_ids.length})`,
+    value: group.id,
+  })),
+)
+
+function switchGroup(groupId: string | null) {
+  if (!groupId) return
+  void boardStore.switchSectorGroup(groupId)
+}
 
 const showLoading = computed(() =>
   props.mode === 'stock' ? stockLoading.value : sectorLoading.value,
@@ -66,6 +88,14 @@ const loadingHint = computed(() => {
       <div class="flex min-w-0 items-center gap-2">
         <h2 class="m-0 flex min-w-0 items-center gap-1.5 text-sm font-600 text-[var(--text)]">
           <span class="truncate">{{ title }}</span>
+          <NSelect
+            v-if="mode === 'sector' && sectorGroups.length"
+            :value="activeSectorGroupId"
+            :options="groupSelectOptions"
+            size="small"
+            class="group-select"
+            @update:value="switchGroup"
+          />
           <span
             v-if="mode === 'stock' && soloStockLabel"
             class="truncate text-[var(--primary)]"
@@ -75,9 +105,16 @@ const loadingHint = computed(() => {
       </div>
       <div class="flex shrink-0 items-center gap-2">
         <NButton v-if="mode === 'sector'" size="tiny" quaternary @click="boardStore.openPicker">
-          管理自选
+          管理分组
         </NButton>
-        <IntradayDatePicker :mode="mode" />
+        <IntradayDatePicker v-if="showDatePicker" :mode="mode" />
+        <span
+          v-else-if="mode === 'stock' && (sectorViewDate || board.sector_view_date)"
+          class="linked-date-hint"
+          title="个股日期跟随左侧板块"
+        >
+          {{ sectorViewDate || board.sector_view_date }}
+        </span>
       </div>
     </div>
 
@@ -91,6 +128,23 @@ const loadingHint = computed(() => {
 </template>
 
 <style scoped>
+.group-select {
+  width: 132px;
+  flex-shrink: 0;
+}
+
+.linked-date-hint {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.group-select :deep(.n-base-selection) {
+  --n-height: 26px;
+  font-size: 12px;
+}
+
 .panel-spin {
   flex: 1;
   min-height: 0;

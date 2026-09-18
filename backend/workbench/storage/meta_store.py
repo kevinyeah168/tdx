@@ -44,7 +44,7 @@ class MetaStore:
         with self._session() as connection:
             connection.executescript(META_SCHEMA)
             connection.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES('retention_days', '30')"
+                "INSERT OR IGNORE INTO settings(key, value) VALUES('retention_days', '365')"
             )
             self._migrate_catalog_state(connection)
 

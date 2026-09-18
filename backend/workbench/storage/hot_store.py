@@ -374,6 +374,7 @@ class HotStore:
         safe_expected_stocks = max(expected_stocks, collected_stocks, 1)
         safe_expected_sectors = max(expected_sectors, collected_sectors, 1)
         coverage_pct = round(collected_stocks / safe_expected_stocks * 100.0, 4)
+        is_complete = coverage_pct >= 99.5 and collected_sectors == safe_expected_sectors
         status = CollectionStatus(
             trade_date=date_type.fromisoformat(trade_date),
             minute=minute,
@@ -385,8 +386,8 @@ class HotStore:
             collected_sectors=collected_sectors,
             duration_ms=max(duration_ms, 0),
             coverage_pct=coverage_pct,
-            status="partial",
-            error_summary="priority-batch",
+            status="complete" if is_complete else "partial",
+            error_summary="" if is_complete else "priority-batch",
         )
         with self._session() as connection:
             connection.execute(STATUS_UPSERT, status.model_dump(mode="json"))

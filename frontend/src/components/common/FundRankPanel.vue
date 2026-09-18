@@ -42,16 +42,18 @@ const chartSolo = computed(() =>
 const chartVisibleTotal = computed(() => chartVisibleCount(board.value.selected_boards ?? []))
 
 const sectorRows = computed(() =>
-  [...(board.value.selected_boards ?? [])]
-    .filter((board) => board.chart_visible)
-    .sort((a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0)),
+  [...(board.value.selected_boards ?? [])].sort(
+    (a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0),
+  ),
 )
 
 const stockRows = computed(() => [...board.value.stock_series])
 
 const rows = computed(() => (props.mode === 'stock' ? stockRows.value : sectorRows.value))
 
-const panelTitle = computed(() => (props.mode === 'stock' ? '榜单' : '自选板块'))
+const panelTitle = computed(() =>
+  props.mode === 'stock' ? '榜单' : board.value.active_sector_group_name || '板块分组',
+)
 
 const panelHint = computed(() => {
   if (props.mode === 'stock') {
@@ -60,8 +62,8 @@ const panelHint = computed(() => {
     }
     return boardStore.linkageSectorName ? `联动 · ${boardStore.linkageSectorName}` : '联动成分股'
   }
-  const selected = board.value.selected_boards?.length ?? 0
-  return `图表 ${chartVisibleTotal.value}/${MAX_CHART_SECTORS} · 自选 ${selected}`
+  const members = board.value.selected_boards?.length ?? 0
+  return `曲线 ${chartVisibleTotal.value}/${MAX_CHART_SECTORS} · 成员 ${members}`
 })
 
 function sectorDotColor(row: BoardItem): string {
@@ -220,8 +222,10 @@ function rowProps(row: BoardItem | FlowSeries) {
     props.mode === 'sector'
       ? chartSolo.value === id || highlighted.value === id
       : highlighted.value === id
+  const dimmed =
+    props.mode === 'sector' && 'chart_visible' in row && row.chart_visible === false
   return {
-    class: isActive ? 'active-row' : '',
+    class: [isActive ? 'active-row' : '', dimmed ? 'dim-row' : ''].filter(Boolean).join(' '),
     style: { cursor: 'pointer' },
     onClick: () => {
       if (props.mode === 'sector') {
@@ -260,9 +264,11 @@ function rowProps(row: BoardItem | FlowSeries) {
           ? '点击左侧板块查看前 20 成分股'
             : mode === 'stock'
             ? '暂无个股曲线'
-            : chartVisibleTotal
-              ? '暂无展示板块，请在「管理自选」勾选展示曲线'
-              : '尚未添加自选板块，请点击「管理自选」添加'
+            : board.active_sector_group_id && (board.selected_boards?.length ?? 0)
+              ? '暂无展示曲线，请在「管理分组」勾选曲线'
+              : board.active_sector_group_id
+                ? '当前分组为空，请在「管理分组」添加板块'
+                : '请先创建板块分组'
       "
       size="small"
     />
@@ -313,6 +319,10 @@ function rowProps(row: BoardItem | FlowSeries) {
   min-width: 0;
   align-items: center;
   gap: 3px;
+}
+
+:deep(.dim-row) {
+  opacity: 0.45;
 }
 
 :deep(.rank-row-dot) {

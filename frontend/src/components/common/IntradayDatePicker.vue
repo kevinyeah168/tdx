@@ -24,9 +24,12 @@ const showPopover = ref(false)
 
 const tradeDate = computed(() => board.value.trading_session?.tradeDate)
 
-const viewDate = computed(() =>
-  props.mode === 'stock' ? stockViewDate.value : sectorViewDate.value,
-)
+const viewDate = computed(() => {
+  if (props.mode === 'stock') {
+    return stockViewDate.value ?? board.value.sector_view_date ?? board.value.stock_view_date
+  }
+  return sectorViewDate.value ?? board.value.sector_view_date
+})
 
 /** Persisted intraday samples plus today (always selectable on trading days). */
 const savedDates = computed(() => {

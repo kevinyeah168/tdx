@@ -68,6 +68,8 @@ export interface BoardPayload {
   host: string
   board_type: string
   sector_mode: string
+  active_sector_group_id?: string | null
+  active_sector_group_name?: string | null
   selected_boards: BoardItem[]
   stock_mode: string
   selected_stocks: BoardItem[]

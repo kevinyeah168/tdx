@@ -80,6 +80,24 @@ class SectorMemberRankResponse(BaseModel):
     metadata: QueryMetadata
 
 
+class StockRankItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    name: str
+    main_cumulative: float
+    change_pct: float
+
+
+class StockRankResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    trade_date: str
+    minute: str
+    items: list[StockRankItem]
+    metadata: QueryMetadata
+
+
 class CatalogMemberItem(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

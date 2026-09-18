@@ -1,6 +1,16 @@
 import { defineStore } from 'pinia'
 
 import {
+  addSectorGroupMembers,
+  createSectorGroup,
+  deleteSectorGroup,
+  fetchSectorGroups,
+  removeSectorGroupMember,
+  renameSectorGroup,
+  setActiveSectorGroup,
+  type SectorGroup,
+} from '@/api/sectorGroups'
+import {
   fetchSectorBreadth,
   fetchSectorFundFlow,
   fetchSectorMembers,
@@ -21,6 +31,9 @@ export const useSectorStore = defineStore('sector', {
     selectedId: '' as string,
     typeFilter: 'all' as SectorTypeFilter,
     searchQuery: '' as string,
+    groups: [] as SectorGroup[],
+    activeGroupId: 'all' as string,
+    groupsLoading: false,
     tradeDate: todayTradeDate(),
     replayMinute: '09:31' as string,
     hasSessionData: false,
@@ -37,14 +50,29 @@ export const useSectorStore = defineStore('sector', {
     selected(state): SectorSummary | null {
       return state.items.find((item) => item.sector_id === state.selectedId) ?? null
     },
+    activeGroup(state): SectorGroup | null {
+      if (state.activeGroupId === 'all') return null
+      return state.groups.find((group) => group.id === state.activeGroupId) ?? null
+    },
     filteredItems(state): SectorSummary[] {
       const q = state.searchQuery.trim().toLowerCase()
-      return state.items.filter((item) => {
-        if (state.typeFilter === 'industry' && item.sector_type !== 'industry') return false
-        if (state.typeFilter === 'concept' && item.sector_type !== 'concept') return false
-        if (!q) return true
-        return item.name.toLowerCase().includes(q) || item.sector_id.includes(q)
-      })
+      let items = state.items
+      if (state.activeGroupId !== 'all') {
+        const group = state.groups.find((entry) => entry.id === state.activeGroupId)
+        if (!group) return []
+        const idSet = new Set(group.sector_ids)
+        items = items.filter((item) => idSet.has(item.sector_id))
+      } else {
+        items = items.filter((item) => {
+          if (state.typeFilter === 'industry' && item.sector_type !== 'industry') return false
+          if (state.typeFilter === 'concept' && item.sector_type !== 'concept') return false
+          return true
+        })
+      }
+      if (!q) return items
+      return items.filter(
+        (item) => item.name.toLowerCase().includes(q) || item.sector_id.includes(q),
+      )
     },
     latestMainFlow(state): number | null {
       const points = state.fundFlow?.points ?? []
@@ -54,6 +82,70 @@ export const useSectorStore = defineStore('sector', {
     },
   },
   actions: {
+    replaceGroup(group: SectorGroup) {
+      const index = this.groups.findIndex((entry) => entry.id === group.id)
+      if (index >= 0) {
+        this.groups.splice(index, 1, group)
+      } else {
+        this.groups.push(group)
+      }
+    },
+    async loadGroups() {
+      this.groupsLoading = true
+      try {
+        const response = await fetchSectorGroups()
+        this.groups = response.items
+        this.activeGroupId = response.active_group_id || 'all'
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error)
+      } finally {
+        this.groupsLoading = false
+      }
+    },
+    async setActiveGroup(groupId: string) {
+      this.activeGroupId = await setActiveSectorGroup(groupId)
+      const visible = this.filteredItems
+      if (!visible.some((item) => item.sector_id === this.selectedId)) {
+        const next = visible[0]
+        if (next) {
+          await this.selectSector(next.sector_id)
+        }
+      }
+    },
+    async createGroup(name: string) {
+      const group = await createSectorGroup(name)
+      this.replaceGroup(group)
+      await this.setActiveGroup(group.id)
+      return group
+    },
+    async renameGroup(groupId: string, name: string) {
+      const group = await renameSectorGroup(groupId, name)
+      this.replaceGroup(group)
+    },
+    async deleteGroup(groupId: string) {
+      await deleteSectorGroup(groupId)
+      this.groups = this.groups.filter((group) => group.id !== groupId)
+      if (this.activeGroupId === groupId) {
+        await this.setActiveGroup('all')
+      }
+    },
+    async addSectorToGroup(groupId: string, sectorId: string) {
+      const group = await addSectorGroupMembers(groupId, [sectorId])
+      this.replaceGroup(group)
+    },
+    async removeSectorFromGroup(groupId: string, sectorId: string) {
+      const group = await removeSectorGroupMember(groupId, sectorId)
+      this.replaceGroup(group)
+      if (this.activeGroupId === groupId && this.selectedId === sectorId) {
+        const visible = this.filteredItems
+        const next = visible[0]
+        if (next) {
+          await this.selectSector(next.sector_id)
+        } else {
+          this.selectedId = ''
+        }
+      }
+    },
     clearSessionData() {
       this.hasSessionData = false
       this.fundFlow = null
@@ -66,10 +158,13 @@ export const useSectorStore = defineStore('sector', {
       this.error = ''
       try {
         this.tradeDate = todayTradeDate()
-        const response = await fetchSectors()
-        this.items = response.items
+        const [sectorsResponse] = await Promise.all([fetchSectors(), this.loadGroups()])
+        this.items = sectorsResponse.items
         if (!this.selectedId && this.items.length > 0) {
-          const preferred = this.items.find((item) => item.name.includes('5G')) ?? this.items[0]!
+          const preferred =
+            this.filteredItems[0] ??
+            this.items.find((item) => item.name.includes('煤炭')) ??
+            this.items[0]!
           this.selectedId = preferred.sector_id
         }
         await this.resolveSessionForDate(this.tradeDate)
@@ -83,42 +178,53 @@ export const useSectorStore = defineStore('sector', {
       this.tradeDate = tradeDate
       try {
         const minutes = await fetchReplayMinutes(tradeDate)
-        this.replayMinute = minutes.latest_complete_minute || minutes.minutes[minutes.minutes.length - 1] || '09:31'
+        this.replayMinute =
+          minutes.latest_available_minute ||
+          minutes.latest_complete_minute ||
+          minutes.minutes[minutes.minutes.length - 1] ||
+          '09:31'
         this.hasSessionData = minutes.minutes.length > 0
       } catch {
         this.clearSessionData()
         return
       }
-      if (this.hasSessionData && this.selectedId) {
-        await this.loadSelectedSectorData()
-      } else {
+      if (!this.hasSessionData) {
         this.clearSessionData()
+        return
+      }
+      if (this.selectedId) {
+        await this.loadSelectedSectorData()
       }
     },
     setTradeDate(tradeDate: string, minute?: string) {
       const dateChanged = tradeDate !== this.tradeDate
       if (minute) this.replayMinute = minute
-      if (dateChanged) {
+      if (dateChanged || !this.hasSessionData) {
         void this.resolveSessionForDate(tradeDate)
         return
       }
-      if (this.hasSessionData && this.selectedId) {
-        void this.reloadSnapshot()
+      if (this.selectedId) {
+        void this.reloadLiveData()
       }
     },
     async reloadSnapshot() {
+      await this.reloadLiveData()
+    },
+    async reloadLiveData() {
       if (!this.selectedId || !this.hasSessionData) return
-      await Promise.all([this.loadMemberRanks(), this.loadBreadth()])
+      await Promise.all([this.loadFundFlow(), this.loadMemberRanks(), this.loadBreadth()])
     },
     async reloadForDate() {
       await this.resolveSessionForDate(this.tradeDate)
     },
-    selectSector(sectorId: string) {
+    async selectSector(sectorId: string) {
       if (this.selectedId === sectorId) return
       this.selectedId = sectorId
-      if (this.hasSessionData) {
-        void this.loadSelectedSectorData()
+      if (!this.hasSessionData) {
+        await this.resolveSessionForDate(this.tradeDate)
+        return
       }
+      await this.loadSelectedSectorData()
     },
     async loadSelectedSectorData() {
       if (!this.selectedId || !this.hasSessionData) return

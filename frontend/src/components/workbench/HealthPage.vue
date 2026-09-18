@@ -13,12 +13,6 @@ function collectorLabel(): string {
   return health.value.collector_online ? '在线' : '离线'
 }
 
-function roleLabel(role: string): string {
-  const info = health.value?.collector_roles?.[role]
-  if (!info) return '未启动'
-  return info.online ? '在线' : '离线'
-}
-
 async function load() {
   error.value = ''
   try {
@@ -42,14 +36,13 @@ onMounted(() => {
           <NStatistic label="未解决 Gap" :value="health.unresolved_gaps" />
           <NStatistic label="覆盖率" :value="health.coverage_pct ?? '-'" />
           <NStatistic label="采集器" :value="collectorLabel()" />
-          <NStatistic label="Hot 采集" :value="roleLabel('hot')" />
-          <NStatistic label="Archive 采集" :value="roleLabel('archive')" />
+          <NStatistic label="采集模式" value="yuntu + gray" />
         </div>
       </AsyncPanel>
     </NCard>
     <NCard title="说明" size="small">
       <p class="hint">
-        健康页展示采集与目录状态（只读）。通达信目录、采集范围、保留策略请在「设置」页修改。
+        健康页展示采集与目录状态（只读）。板块分组、数据保留与采集服务请在「设置」页修改。
       </p>
     </NCard>
   </div>

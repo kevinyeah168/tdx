@@ -16,7 +16,7 @@ def test_real_tdx_settings_have_bounded_defaults() -> None:
     assert settings.node_retry_count == 2
     assert settings.enhanced_quote_enabled is True
     assert settings.quote_batch_size == 80
-    assert settings.retention_trading_days == 30
+    assert settings.retention_trading_days == 365
 
 
 def test_real_tdx_settings_load_from_workbench_prefixed_environment(

@@ -10,6 +10,8 @@ HEARTBEAT_STALE_AFTER = timedelta(minutes=2)
 ROLE_FILES = {
     "hot": "collector-hot.json",
     "archive": "collector-archive.json",
+    "combined": "collector-combined.json",
+    "gray": "collector-gray.json",
 }
 
 

@@ -1,6 +1,13 @@
 import { fetchMarketOverview, searchSecurities } from '@/api/market'
 import { fetchReplayDates, fetchReplayMinutes } from '@/api/replay'
-import { fetchCollectionTargets } from '@/api/settings'
+import {
+  addSectorGroupMembers,
+  createSectorGroup,
+  fetchSectorGroups,
+  MAX_GROUP_MEMBERS,
+  setActiveSectorGroup,
+  setSectorGroupMemberChartVisible,
+} from '@/api/sectorGroups'
 import {
   fetchSectorCatalogMembers,
   fetchSectorFundFlowBatch,
@@ -34,6 +41,7 @@ import { legacySectorSearchHint, isClassicIndexCodeQuery } from '@/utils/sectorC
 import { inferSectorTypeFromId, resolveSectorType } from '@/utils/format'
 
 const SELECTED_BOARDS_KEY = 'workbench-selected-boards'
+const SECTOR_GROUP_MIGRATED_KEY = 'workbench-sector-group-migrated'
 const SELECTED_STOCKS_KEY = 'workbench-selected-stocks'
 const SECTOR_SOURCE_MODE_KEY = 'workbench-sector-source-mode'
 const STOCK_SOURCE_MODE_KEY = 'workbench-stock-source-mode'
@@ -167,17 +175,6 @@ export function saveSelectedStocksLocal(stocks: BoardItem[]) {
   writeStorage(SELECTED_STOCKS_KEY, stocks)
 }
 
-const DEFAULT_SECTOR_NAMES = [
-  '5G概念',
-  '通信设备',
-  'CPO概念',
-  '有色金属',
-  '人工智能',
-  '半导体',
-  '新能源车',
-  '光伏概念',
-]
-
 function toBoardItem(item: {
   sector_id: string
   name: string
@@ -206,27 +203,6 @@ export function enrichBoardItems(
       }),
     }
   })
-}
-
-function pickDefaultBoards(items: { sector_id: string; name: string; sector_type: string }[]): BoardItem[] {
-  const picked: BoardItem[] = []
-  for (const name of DEFAULT_SECTOR_NAMES) {
-    const hit = items.find((item) => item.name === name || item.name.includes(name))
-    if (hit && !picked.some((b) => b.id === hit.sector_id)) {
-      picked.push(toBoardItem(hit))
-    }
-    if (picked.length >= 8) break
-  }
-  for (const item of items) {
-    if (picked.length >= 8) break
-    if (item.sector_type === 'concept' && !picked.some((b) => b.id === item.sector_id)) {
-      picked.push(toBoardItem(item))
-    }
-  }
-  if (!picked.length && items.length > 0) {
-    return items.slice(0, 8).map((item) => toBoardItem(item))
-  }
-  return picked
 }
 
 interface RawSeries {
@@ -570,67 +546,93 @@ async function resolveRankingMinute(
   return '09:31'
 }
 
-async function loadAutoSectorBoards(
-  sectorDate: string,
-  autoSectorCount: number,
-  rankingMinute: string,
-): Promise<BoardItem[]> {
-  const attempts: (string | undefined)[] = [rankingMinute, undefined]
-  for (const minute of attempts) {
-    try {
-      const rank = await fetchSectorRank(sectorDate, minute, autoSectorCount)
-      if (rank.items.length) {
-        return rank.items.map((item) => toBoardItem(item))
-      }
-    } catch {
-      /* try next strategy */
+async function migrateLegacyWatchlistToGroups(): Promise<void> {
+  try {
+    if (localStorage.getItem(SECTOR_GROUP_MIGRATED_KEY)) return
+    const legacy = loadSelectedBoards()
+    if (!legacy.length) {
+      localStorage.setItem(SECTOR_GROUP_MIGRATED_KEY, '1')
+      return
     }
+    const existing = await fetchSectorGroups()
+    if (!existing.items.length) {
+      const group = await createSectorGroup('默认分组')
+      const members = legacy.slice(0, MAX_GROUP_MEMBERS)
+      if (members.length) {
+        await addSectorGroupMembers(group.id, members.map((item) => item.id))
+        for (const member of members) {
+          if (member.chart_visible === false) {
+            await setSectorGroupMemberChartVisible(group.id, member.id, false)
+          }
+        }
+      }
+      await setActiveSectorGroup(group.id)
+    }
+    saveSelectedBoardsLocal([])
+    localStorage.setItem(SECTOR_GROUP_MIGRATED_KEY, '1')
+  } catch {
+    /* retry on next board load */
   }
-
-  const sectorsResponse = await fetchSectors()
-  return pickDefaultBoards(sectorsResponse.items).slice(0, autoSectorCount)
 }
 
 async function loadSectorBoards(
-  sectorSourceMode: SectorSourceMode,
-  sectorDate: string,
-  autoSectorCount: number,
-  rankingMinute: string,
-): Promise<{ boards: BoardItem[]; sectorMode: string; selectedBoards: BoardItem[] }> {
-  // Home page is watchlist-only; keep auto path for rare fallbacks.
-  const sectorsResponse = await fetchSectors()
-  let selectedBoards = enrichBoardItems(loadSelectedBoards(), sectorsResponse.items).filter((board) =>
-    sectorsResponse.items.some((item) => item.sector_id === board.id),
-  )
-  if (!selectedBoards.length) {
-    try {
-      const targets = await fetchCollectionTargets()
-      if (targets.sector_ids.length) {
-        const byId = new Map(sectorsResponse.items.map((item) => [item.sector_id, item]))
-        selectedBoards = normalizeChartVisibility(
-          targets.sector_ids
-            .map((sectorId) => byId.get(sectorId))
-            .filter((item): item is NonNullable<typeof item> => item != null)
-            .map((item) => toBoardItem(item)),
-        )
-        saveSelectedBoardsLocal(selectedBoards)
-      }
-    } catch {
-      /* optional */
+  _sectorSourceMode: SectorSourceMode,
+  _sectorDate: string,
+  _autoSectorCount: number,
+  _rankingMinute: string,
+): Promise<{
+  boards: BoardItem[]
+  sectorMode: string
+  selectedBoards: BoardItem[]
+  activeGroupId: string | null
+  activeGroupName: string | null
+}> {
+  await migrateLegacyWatchlistToGroups()
+  const [groupsResponse, sectorsResponse] = await Promise.all([
+    fetchSectorGroups(),
+    fetchSectors(),
+  ])
+  const groups = groupsResponse.items
+  let activeId = groupsResponse.active_group_id
+  if (!groups.length) {
+    return {
+      boards: [],
+      sectorMode: 'group',
+      selectedBoards: [],
+      activeGroupId: null,
+      activeGroupName: null,
     }
   }
-
-  if (!selectedBoards.length && sectorSourceMode === 'auto') {
-    const boards = await loadAutoSectorBoards(sectorDate, autoSectorCount, rankingMinute)
-    return { boards, sectorMode: 'auto', selectedBoards: boards }
+  if (activeId === 'all' || !groups.some((group) => group.id === activeId)) {
+    const fallbackId = groups[0]!.id
+    if (fallbackId) {
+      activeId = fallbackId
+      try {
+        await setActiveSectorGroup(fallbackId)
+      } catch {
+        /* optional */
+      }
+    }
   }
-  if (!selectedBoards.length) {
-    return { boards: [], sectorMode: 'selected', selectedBoards: [] }
-  }
-
-  selectedBoards = normalizeChartVisibility(selectedBoards)
+  const group = groups.find((entry) => entry.id === activeId) ?? groups[0]!
+  const selectedBoards = normalizeChartVisibility(
+    enrichBoardItems(
+      group.sectors.map((member) => ({
+        id: member.sector_id,
+        name: member.name,
+        chart_visible: member.chart_visible ?? true,
+      })),
+      sectorsResponse.items,
+    ),
+  )
   const chartBoards = boardsForChart(selectedBoards)
-  return { boards: chartBoards, sectorMode: 'selected', selectedBoards }
+  return {
+    boards: chartBoards,
+    sectorMode: 'group',
+    selectedBoards,
+    activeGroupId: group.id,
+    activeGroupName: group.name,
+  }
 }
 
 async function enrichSelectedBoardsWithSnapshot(
@@ -922,12 +924,13 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
 
   const rankingMinute = await resolveRankingMinute(sectorDate, opts?.replayMinute, minutesMeta, overview)
 
-  const { boards: sectorBoards, sectorMode, selectedBoards: allSelectedBoards } = await loadSectorBoards(
-    sectorSourceMode,
-    sectorDate,
-    autoSectorCount,
-    rankingMinute,
-  )
+  const {
+    boards: sectorBoards,
+    sectorMode,
+    selectedBoards: allSelectedBoards,
+    activeGroupId,
+    activeGroupName,
+  } = await loadSectorBoards(sectorSourceMode, sectorDate, autoSectorCount, rankingMinute)
   const enrichedSelectedBoards = allSelectedBoards.length
     ? await enrichSelectedBoardsWithSnapshot(allSelectedBoards, sectorDate, rankingMinute)
     : allSelectedBoards
@@ -1022,11 +1025,13 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
 
   if (!hasSectorData && !sectorError) {
     if (enrichedSelectedBoards.length && !sectorBoards.length) {
-      sectorError = `已选 ${enrichedSelectedBoards.length} 个板块，请勾选最多 ${MAX_CHART_SECTORS} 条曲线展示`
+      sectorError = `分组内 ${enrichedSelectedBoards.length} 个板块，请勾选最多 ${MAX_CHART_SECTORS} 条曲线展示`
     } else if (sectorBoards.length) {
       sectorError = `图表展示 ${sectorBoards.length} 个板块，但 ${sectorDate} 暂无资金曲线数据`
+    } else if (!activeGroupId) {
+      sectorError = `尚未创建板块分组，请点击「管理分组」创建`
     } else if (!enrichedSelectedBoards.length) {
-      sectorError = `尚未添加自选板块，请点击「管理自选」添加`
+      sectorError = `分组「${activeGroupName ?? ''}」为空，请添加板块`
     }
   }
 
@@ -1040,16 +1045,18 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   }
 
   const sectorHint =
-    sectorMode === 'selected' && !enrichedSelectedBoards.length
-      ? '尚未添加自选板块，请点击「管理自选」添加'
-      : missingSectorBoards.length
-        ? `${missingSectorBoards.length} 个板块暂无 ${sectorDate} 曲线：${missingSectorBoards
-            .slice(0, 3)
-            .map((b) => b.name)
-            .join('、')}${missingSectorBoards.length > 3 ? '…' : ''}（需等待采集器补采）`
-        : enrichedSelectedBoards.length > sectorBoards.length
-          ? `自选 ${enrichedSelectedBoards.length} · 图表 ${sectorBoards.length}/${MAX_CHART_SECTORS}`
-          : undefined
+    !activeGroupId
+      ? '尚未创建板块分组，请点击「管理分组」'
+      : !enrichedSelectedBoards.length
+        ? `分组「${activeGroupName ?? ''}」为空，请添加板块`
+        : missingSectorBoards.length
+          ? `${missingSectorBoards.length} 个板块暂无 ${sectorDate} 曲线：${missingSectorBoards
+              .slice(0, 3)
+              .map((b) => b.name)
+              .join('、')}${missingSectorBoards.length > 3 ? '…' : ''}（需等待采集器补采）`
+          : enrichedSelectedBoards.length > sectorBoards.length
+            ? `${activeGroupName ?? '分组'} ${enrichedSelectedBoards.length} · 曲线 ${sectorBoards.length}/${MAX_CHART_SECTORS}`
+            : undefined
 
   return {
     updated_at: new Date().toISOString(),
@@ -1058,6 +1065,8 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     host: 'workbench',
     board_type: 'GN',
     sector_mode: sectorMode,
+    active_sector_group_id: activeGroupId,
+    active_sector_group_name: activeGroupName,
     selected_boards: finalSelectedBoards,
     stock_mode: stockMode,
     selected_stocks: stockSourceMode === 'selected' ? stockTargets : [],
@@ -1103,26 +1112,47 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   }
 }
 
+let sectorCatalogCache: { sector_id: string; name: string; sector_type: string }[] | null = null
+
+async function loadSectorCatalogCache() {
+  if (!sectorCatalogCache) {
+    const response = await fetchSectors()
+    sectorCatalogCache = Array.isArray(response.items) ? response.items : []
+  }
+  return sectorCatalogCache
+}
+
+export function invalidateSectorCatalogCache() {
+  sectorCatalogCache = null
+}
+
 export async function fetchWorkbenchBoardCatalog(
   type: BoardCatalogType,
   q = '',
-  limit = 500,
+  limit = 1200,
 ): Promise<CatalogResponse> {
-  const response = await fetchSectors()
   const filterType = BOARD_TYPE_FILTER[type]
   const rawQuery = String(q ?? '').trim()
   const query = rawQuery.toLowerCase()
   const isCodeQuery = /^\d{6}$/.test(rawQuery)
   const isClassicQuery = isClassicIndexCodeQuery(rawQuery)
-  const items = Array.isArray(response.items) ? response.items : []
+
+  let items: { sector_id: string; name: string; sector_type: string }[]
+  if (query) {
+    const response = await fetchSectors({ q: rawQuery, limit: Math.min(limit, 200) })
+    items = Array.isArray(response.items) ? response.items : []
+  } else {
+    items = await loadSectorCatalogCache()
+  }
+
   let filtered = items
   if (isClassicQuery) {
     filtered = items.filter((item) => item.sector_type === 'classic_index')
-  } else if (filterType && !isCodeQuery) {
+  } else if (filterType && !isCodeQuery && !query) {
     filtered = items.filter((item) => item.sector_type === filterType)
   }
   let boards = filtered.map((item) => toBoardItem(item))
-  if (query) {
+  if (query && !isCodeQuery) {
     boards = boards.filter(
       (board) => board.name.toLowerCase().includes(query) || board.id.includes(query),
     )

@@ -30,6 +30,8 @@ export default defineConfig({
   server: {
     port: 5180,
     open: '/workbench.html',
+    // Public demo tunnels (cloudflared / cpolar) send a non-local Host header.
+    allowedHosts: ['.trycloudflare.com', '.cpolar.cn', '.cpolar.io'],
     proxy: {
       '/api': 'http://127.0.0.1:8877',
     },
