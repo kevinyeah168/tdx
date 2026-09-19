@@ -7,6 +7,11 @@ describe('sector display labels', () => {
     expect(inferSectorTypeFromId('881319')).toBeUndefined()
   })
 
+  it('infers custom sector type from custom_ prefix', () => {
+    expect(inferSectorTypeFromId('custom_abc123')).toBe('custom')
+    expect(sectorTypeShort('custom', 'custom_abc123')).toBe('自定义')
+  })
+
   it('builds disambiguated series labels', () => {
     expect(
       fmtSectorSeriesLabel({ name: '半导体', id: '881319', sector_type: 'industry' }),

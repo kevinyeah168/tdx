@@ -5,7 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fetchReplayMinutes } from '@/api/replay'
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
 import { useReplayStore } from '@/stores/replayStore'
-import { isWeekdayDate } from '@/utils/tradingSession'
+import { isWeekdayDate, shouldFetchMarketDataForDate } from '@/utils/tradingSession'
 import { filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
 import { localDateFromTimestamp, todayTradeDate } from '@/utils/tradeDate'
 
@@ -28,6 +28,12 @@ function isDateDisabled(ts: number): boolean {
 
 async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
   const date = tradeDate || replayStore.tradeDate
+  if (!shouldFetchMarketDataForDate(date)) {
+    minuteOptions.value = []
+    replayStore.minute = '09:31'
+    replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
+    return
+  }
   loadingMinutes.value = true
   try {
     const payload = await fetchReplayMinutes(date)
@@ -82,6 +88,7 @@ let liveMinuteTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   liveMinuteTimer = setInterval(() => {
     if (replayStore.mode !== 'live' || replayStore.tradeDate !== todayTradeDate()) return
+    if (!shouldFetchMarketDataForDate(replayStore.tradeDate)) return
     void loadMinutes(replayStore.tradeDate)
   }, WORKBENCH_REFRESH_MS)
 })

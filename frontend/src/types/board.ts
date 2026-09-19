@@ -72,6 +72,8 @@ export interface BoardPayload {
   sector_mode: string
   active_sector_group_id?: string | null
   active_sector_group_name?: string | null
+  /** Directory-synced custom sectors shown above the active group in the sector rank panel. */
+  imported_sector_boards?: BoardItem[]
   selected_boards: BoardItem[]
   stock_mode: string
   selected_stocks: BoardItem[]
@@ -127,6 +129,6 @@ export interface SelectedStocksResponse {
   stocks: BoardItem[]
 }
 
-export type BoardCatalogType = 'ALL' | 'HY' | 'GN' | 'HY2' | 'IDX'
+export type BoardCatalogType = 'ALL' | 'HY' | 'GN' | 'HY2' | 'IDX' | 'CUSTOM'
 
 export type ViewTab = 'sector' | 'stock'

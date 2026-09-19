@@ -2,23 +2,23 @@
 import { NTag } from 'naive-ui'
 import { onBeforeUnmount, onMounted, watch } from 'vue'
 
-import { syncWorkbenchPriorityTargets } from '@/api/workbenchBoard'
 import MarketPanel from '@/components/pages/MarketPanel.vue'
 import SectorPickerDrawer from '@/components/sector/SectorPickerDrawer.vue'
 import StockPickerDrawer from '@/components/stock/StockPickerDrawer.vue'
-import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
+import { CATALOG_REFRESH_MS, WORKBENCH_REFRESH_MS } from '@/constants/refresh'
 import { useBoardStore } from '@/stores/boardStore'
 import { useReplayStore } from '@/stores/replayStore'
-import { shouldPollLiveWorkbench } from '@/utils/tradingSession'
+import { shouldFetchMarketDataForDate, shouldPollLiveWorkbench } from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
 
 const boardStore = useBoardStore()
 const replayStore = useReplayStore()
 
 let pollTimer: ReturnType<typeof setInterval> | undefined
+let catalogTimer: ReturnType<typeof setInterval> | undefined
 let tickTimer: ReturnType<typeof setInterval> | undefined
-let syncTimer: ReturnType<typeof setInterval> | undefined
 let pollInFlight = false
+let catalogPollInFlight = false
 
 async function syncFromReplay() {
   const minute = replayStore.mode === 'live' ? null : replayStore.minute
@@ -27,32 +27,25 @@ async function syncFromReplay() {
 
 onMounted(async () => {
   await syncFromReplay()
-  void syncWorkbenchPriorityTargets()
 
   pollTimer = setInterval(async () => {
     if (pollInFlight || boardStore.isPanelBusy) return
-    if (
-      replayStore.mode === 'live' &&
-      !shouldPollLiveWorkbench({
-        mode: replayStore.mode,
-        tradeDate: replayStore.tradeDate || todayTradeDate(),
-      })
-    ) {
-      return
-    }
+
+    const isLive = replayStore.mode === 'live'
+    const tradeDate = replayStore.tradeDate || todayTradeDate()
+    const historicalSectorView = boardStore.isHistoricalSectorView()
+    const pollQuotes =
+      isLive &&
+      !historicalSectorView &&
+      shouldFetchMarketDataForDate(tradeDate) &&
+      shouldPollLiveWorkbench({ mode: replayStore.mode, tradeDate })
+
+    if (!pollQuotes && !isLive) return
+    if (isLive && !pollQuotes) return
+
     pollInFlight = true
     try {
-      if (replayStore.mode === 'live') {
-        boardStore.replayMinute = null
-        // Panel historical dates must stick; do not pull them back to TopBar "today".
-        if (boardStore.isHistoricalSectorView()) {
-          if (!boardStore.isHistoricalStockView()) {
-            await boardStore.loadStockPanel()
-            boardStore.resetCountdown()
-          }
-          return
-        }
-      }
+      if (isLive) boardStore.replayMinute = null
       await boardStore.loadBoard()
       boardStore.resetCountdown()
     } finally {
@@ -60,21 +53,28 @@ onMounted(async () => {
     }
   }, WORKBENCH_REFRESH_MS)
 
-  syncTimer = setInterval(() => {
+  catalogTimer = setInterval(() => {
+    if (catalogPollInFlight || pollInFlight || boardStore.isPanelBusy) return
+    if (replayStore.mode !== 'live') return
+    if (boardStore.stockSourceMode !== 'linkage' || !boardStore.linkageSectorId) return
+
+    const sectorViewDate =
+      boardStore.sectorViewDate ?? boardStore.board.sector_view_date ?? todayTradeDate()
+    if (!shouldFetchMarketDataForDate(sectorViewDate)) return
+
+    const tradeDate = replayStore.tradeDate || todayTradeDate()
     if (
-      replayStore.mode !== 'live' ||
-      !shouldPollLiveWorkbench({
-        mode: replayStore.mode,
-        tradeDate: replayStore.tradeDate || todayTradeDate(),
-      })
+      shouldPollLiveWorkbench({ mode: replayStore.mode, tradeDate }) &&
+      !boardStore.isHistoricalSectorView()
     ) {
       return
     }
-    void syncWorkbenchPriorityTargets({
-      linkageSectorId: boardStore.linkageSectorId,
-      linkageSectorName: boardStore.linkageSectorName,
+
+    catalogPollInFlight = true
+    void boardStore.refreshHomeCatalogIfChanged().finally(() => {
+      catalogPollInFlight = false
     })
-  }, WORKBENCH_REFRESH_MS * 12)
+  }, CATALOG_REFRESH_MS)
 
   tickTimer = setInterval(() => {
     boardStore.tickCountdown()
@@ -83,8 +83,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (catalogTimer) clearInterval(catalogTimer)
   if (tickTimer) clearInterval(tickTimer)
-  if (syncTimer) clearInterval(syncTimer)
 })
 
 watch(

@@ -51,15 +51,20 @@ def sector_member_symbols(
     enhanced_client: object | None = None,
     sector_name: str | None = None,
 ) -> list[str]:
-    from workbench.providers.tdx.live_members import fetch_live_board_members
+    from workbench.query.custom_sector_ids import is_custom_sector_id
+    from workbench.services.custom_sectors import CustomSectorService
 
     resolved = resolve_member_sector_id(meta, sector_id, sector_name=sector_name)
-    catalog = meta.memberships_for(resolved)
     limit = max(1, int(per_sector_limit))
+    if is_custom_sector_id(resolved):
+        return CustomSectorService(meta).symbols_for(resolved)[:limit]
+    catalog = meta.memberships_for(resolved)
     # Prefer full catalog membership when available so "自选板块" keeps every constituent.
     if catalog:
         return catalog[:limit]
     if enhanced_client is not None:
+        from workbench.providers.tdx.live_members import fetch_live_board_members
+
         live_rows = fetch_live_board_members(
             enhanced_client,
             resolved,

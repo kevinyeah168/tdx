@@ -34,6 +34,12 @@
   --sector-tone-border: color-mix(in srgb, #059669 34%, var(--border));
 }
 
+.sector-tone-custom {
+  --sector-tone: #6366f1;
+  --sector-tone-soft: color-mix(in srgb, #6366f1 13%, var(--panel));
+  --sector-tone-border: color-mix(in srgb, #6366f1 34%, var(--border));
+}
+
 .sector-tone-default {
   --sector-tone: #64748b;
   --sector-tone-soft: color-mix(in srgb, #64748b 12%, var(--panel));

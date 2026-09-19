@@ -8,8 +8,10 @@ from workbench.collector.priority_targets import (
     apply_hot_target_sync,
     merge_priority_sector_ids,
     resolve_priority_stock_symbols,
+    sector_member_symbols,
 )
 from workbench.config import WorkbenchSettings
+from workbench.services.custom_sectors import CustomSectorService
 from workbench.storage.meta_store import MetaStore
 
 
@@ -68,6 +70,33 @@ def test_resolve_priority_stock_symbols_expands_sector_members(tmp_path: Path) -
         enhanced_client=None,
     )
     assert merged == ["SH600000", "SH600362", "SZ000001"]
+
+
+def test_sector_member_symbols_reads_custom_sector_catalog(tmp_path: Path) -> None:
+    meta = MetaStore(tmp_path / "meta.sqlite")
+    meta.initialize()
+    with meta.connect() as connection:
+        connection.executemany(
+            "INSERT INTO security_master(symbol, code, name, market, active) VALUES(?, ?, ?, ?, 1)",
+            [("SH600000", "600000", "浦发银行", "SH")],
+        )
+        connection.commit()
+    service = CustomSectorService(meta)
+    sector = service.create_sector("哨兵仓")
+    service.add_members(sector.sector_id, ["SH600000"])
+
+    class _BrokenLiveClient:
+        def get_board_members(self, *_args, **_kwargs):
+            raise RuntimeError("live members should not be called for custom sectors")
+
+    symbols = sector_member_symbols(
+        meta,
+        sector.sector_id,
+        per_sector_limit=10,
+        enhanced_client=_BrokenLiveClient(),
+        sector_name="哨兵仓",
+    )
+    assert symbols == ["SH600000"]
 
 
 def test_apply_hot_target_sync_writes_files(tmp_path: Path) -> None:

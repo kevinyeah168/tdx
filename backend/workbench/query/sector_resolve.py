@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from workbench.query.custom_sector_ids import is_custom_sector_id
 from workbench.storage.meta_store import MetaStore
 
 
@@ -26,6 +27,8 @@ def resolve_member_sector_id(
     sector_name: str | None = None,
 ) -> str:
     normalized_id = str(sector_id).strip()
+    if is_custom_sector_id(normalized_id):
+        return normalized_id
     input_count = len(meta.memberships_for(normalized_id))
 
     if sector_name:

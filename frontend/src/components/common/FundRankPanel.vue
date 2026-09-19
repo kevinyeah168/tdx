@@ -82,11 +82,24 @@ function sectorBoardAtHover(boardItem: BoardItem): BoardItem {
   }
 }
 
-const sectorRows = computed(() =>
-  [...(board.value.selected_boards ?? [])]
+const importedIdSet = computed(
+  () => new Set((board.value.imported_sector_boards ?? []).map((row) => row.id)),
+)
+
+const importedSectorRows = computed(() =>
+  [...(board.value.imported_sector_boards ?? [])]
     .map((row) => sectorBoardAtHover(row))
     .sort((a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0)),
 )
+
+const groupSectorRows = computed(() =>
+  [...(board.value.selected_boards ?? [])]
+    .filter((row) => !importedIdSet.value.has(row.id))
+    .map((row) => sectorBoardAtHover(row))
+    .sort((a, b) => Number(b.cum_main || 0) - Number(a.cum_main || 0)),
+)
+
+const sectorRows = computed(() => groupSectorRows.value)
 
 const stockRows = computed(() =>
   [...board.value.stock_series]
@@ -96,8 +109,8 @@ const stockRows = computed(() =>
 
 const rows = computed(() => (props.mode === 'stock' ? stockRows.value : sectorRows.value))
 
-const panelTitle = computed(() =>
-  props.mode === 'stock' ? '榜单' : board.value.active_sector_group_name || '板块分组',
+const groupPanelTitle = computed(
+  () => board.value.active_sector_group_name || '板块分组',
 )
 
 const panelHint = computed(() => {
@@ -111,8 +124,10 @@ const panelHint = computed(() => {
       : '联动成分股'
     return `${base}${hoverSuffix}`
   }
-  const members = board.value.selected_boards?.length ?? 0
-  return `曲线 ${chartVisibleTotal.value}/${MAX_CHART_SECTORS} · 成员 ${members}${hoverSuffix}`
+  const imported = board.value.imported_sector_boards?.length ?? 0
+  const groupMembers = groupSectorRows.value.length
+  const curves = board.value.sector_series?.length ?? 0
+  return `曲线 ${curves}/${MAX_CHART_SECTORS} · 导入 ${imported} · 分组 ${groupMembers}${hoverSuffix}`
 })
 
 function sectorDotColor(row: BoardItem): string {
@@ -304,43 +319,130 @@ function rowProps(row: BoardItem | FlowSeries) {
 <template>
   <aside class="panel-card rank-aside flex min-h-0 flex-1 flex-col overflow-hidden p-2">
     <div class="mb-1 flex items-center justify-between gap-2 border-b border-[var(--border)] px-0.5 pb-1.5">
-      <span class="shrink-0 text-xs font-600">{{ panelTitle }}</span>
+      <span class="shrink-0 text-xs font-600">{{ mode === 'stock' ? '榜单' : '板块信息' }}</span>
       <span class="truncate text-right text-[10px] text-[var(--muted)]">{{ panelHint }}</span>
     </div>
 
-    <NDataTable
-      v-if="rows.length"
-      :columns="columns"
-      :data="rows"
-      :bordered="false"
-      size="small"
-      :single-line="true"
-      flex-height
-      :class="['rank-table min-h-0 flex-1', mode === 'stock' ? 'rank-table--stock' : 'rank-table--sector']"
-      :row-props="rowProps"
-    />
-    <NEmpty
-      v-else
-      class="py-8"
-      :description="
-        mode === 'stock' && !boardStore.linkageSectorId
-          ? `点击左侧板块查看前 ${DEFAULT_LINKAGE_TOP_K} 成分股`
-            : mode === 'stock'
-            ? '暂无个股曲线'
-            : board.active_sector_group_id && (board.selected_boards?.length ?? 0)
-              ? '暂无展示曲线，请在「管理分组」勾选曲线'
-              : board.active_sector_group_id
-                ? '当前分组为空，请在「管理分组」添加板块'
-                : '请先创建板块分组'
-      "
-      size="small"
-    />
+    <template v-if="mode === 'sector'">
+      <div class="rank-sections min-h-0 flex flex-1 flex-col overflow-hidden">
+      <div v-if="importedSectorRows.length" class="rank-section rank-section--imported">
+        <div class="rank-section-head">
+          <span class="rank-section-title">导入板块</span>
+          <span class="rank-section-count">({{ importedSectorRows.length }})</span>
+        </div>
+        <NDataTable
+          :columns="columns"
+          :data="importedSectorRows"
+          :bordered="false"
+          size="small"
+          :single-line="true"
+          class="rank-table rank-table--sector rank-table-section"
+          :row-props="rowProps"
+        />
+      </div>
+
+      <div class="rank-section rank-section--group min-h-0 flex-1">
+        <div class="rank-section-head">
+          <span class="rank-section-title">{{ groupPanelTitle }}</span>
+          <span class="rank-section-count">({{ groupSectorRows.length }})</span>
+        </div>
+        <NDataTable
+          v-if="groupSectorRows.length"
+          :columns="columns"
+          :data="groupSectorRows"
+          :bordered="false"
+          size="small"
+          :single-line="true"
+          flex-height
+          class="rank-table rank-table--sector rank-table-section min-h-0 flex-1"
+          :row-props="rowProps"
+        />
+        <NEmpty
+          v-else
+          class="rank-empty py-6"
+          :description="
+            board.active_sector_group_id
+              ? '当前分组为空，请在「管理分组」添加板块'
+              : '请先创建板块分组'
+          "
+          size="small"
+        />
+      </div>
+      </div>
+    </template>
+
+    <template v-else>
+      <NDataTable
+        v-if="rows.length"
+        :columns="columns"
+        :data="rows"
+        :bordered="false"
+        size="small"
+        :single-line="true"
+        flex-height
+        class="rank-table rank-table--stock min-h-0 flex-1"
+        :row-props="rowProps"
+      />
+      <NEmpty
+        v-else
+        class="py-8"
+        :description="
+          !boardStore.linkageSectorId
+            ? `点击左侧板块查看前 ${DEFAULT_LINKAGE_TOP_K} 成分股`
+            : '暂无个股曲线'
+        "
+        size="small"
+      />
+    </template>
   </aside>
 </template>
 
 <style scoped>
 .rank-aside {
   min-width: 0;
+}
+
+.rank-section {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rank-sections {
+  gap: 4px;
+}
+
+.rank-section--imported {
+  flex: 0 0 auto;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rank-section--group {
+  flex: 1;
+}
+
+.rank-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.rank-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rank-section-count {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.rank-table-section :deep(.n-data-table-wrapper) {
+  min-height: 0;
 }
 
 :deep(.rank-table .n-data-table-table) {

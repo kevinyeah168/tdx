@@ -84,6 +84,7 @@ export function normalizeBoard(data: Partial<BoardPayload>): BoardPayload {
     board_type: data.board_type ?? 'HY',
     sector_mode: data.sector_mode ?? 'auto',
     selected_boards: data.selected_boards ?? [],
+    imported_sector_boards: data.imported_sector_boards ?? [],
     stock_mode: data.stock_mode ?? 'empty',
     selected_stocks: data.selected_stocks ?? [],
     watchlist: data.watchlist ?? [],

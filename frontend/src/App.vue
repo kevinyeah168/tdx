@@ -21,7 +21,7 @@ import TopBar from '@/components/layout/TopBar.vue'
 import DashboardPage from '@/components/pages/DashboardPage.vue'
 
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
-import { shouldPollLiveWorkbench } from '@/utils/tradingSession'
+import { shouldFetchMarketDataForDate, shouldPollLiveWorkbench } from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
 import { useReplayStore } from '@/stores/replayStore'
 
@@ -73,11 +73,13 @@ onMounted(async () => {
 
   pollTimer = setInterval(async () => {
     if (boardStore.isPanelBusy) return
+    const tradeDate = replayStore.tradeDate || todayTradeDate()
+    if (!shouldFetchMarketDataForDate(tradeDate)) return
     if (
       replayStore.mode === 'live' &&
       !shouldPollLiveWorkbench({
         mode: replayStore.mode,
-        tradeDate: replayStore.tradeDate || todayTradeDate(),
+        tradeDate,
       })
     ) {
       return

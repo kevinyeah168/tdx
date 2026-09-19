@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import uuid
 
+from workbench.services.custom_sectors import CustomSectorService
 from workbench.storage.meta_store import MetaStore
 
 MAX_GROUP_MEMBERS = 60
@@ -79,6 +80,7 @@ class SectorGroupService:
                 str(row[0]): str(row[1])
                 for row in connection.execute("SELECT sector_id, name FROM sector_master").fetchall()
             }
+            sector_names.update(CustomSectorService(self._meta).sector_names())
         members_by_group: dict[str, list[tuple[str, int, bool]]] = {}
         for group_id, sector_id, sort_order, chart_visible in member_rows:
             members_by_group.setdefault(str(group_id), []).append(

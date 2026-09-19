@@ -1,3 +1,4 @@
+import { fetchCustomSectors } from '@/api/customSectors'
 import { fetchMarketOverview, searchSecurities } from '@/api/market'
 import { fetchReplayDates, fetchReplayMinutes } from '@/api/replay'
 import {
@@ -13,7 +14,6 @@ import {
   fetchSectorFundFlowBatch,
   fetchSectorGrayFlowBatch,
   fetchSectorMembers,
-  fetchSectorRank,
   fetchSectorSnapshot,
   fetchSectors,
   type CurvePoint,
@@ -37,7 +37,11 @@ import type {
   StockDetail,
 } from '@/types/board'
 import { TRADING_MINUTES, withoutPrematureClosingPoint, filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
-import { isWeekdayDate, resolveLiveMarketStatus } from '@/utils/tradingSession'
+import {
+  isWeekdayDate,
+  resolveLiveMarketStatus,
+  shouldFetchMarketDataForDate,
+} from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
 import { legacySectorSearchHint, isClassicIndexCodeQuery } from '@/utils/sectorCodeAliases'
 import { inferSectorTypeFromId, resolveSectorType } from '@/utils/format'
@@ -62,6 +66,7 @@ const BOARD_TYPE_FILTER: Partial<Record<BoardCatalogType, string>> = {
   GN: 'concept',
   HY2: 'industry2',
   IDX: 'classic_index',
+  CUSTOM: 'custom',
 }
 
 function previousTradingMinute(minute: string): string | null {
@@ -522,6 +527,9 @@ async function resolveRankingMinute(
   minutesMeta?: Awaited<ReturnType<typeof fetchReplayMinutes>> | null,
   overview?: Awaited<ReturnType<typeof fetchMarketOverview>> | null,
 ): Promise<string> {
+  if (!shouldFetchMarketDataForDate(tradeDate)) {
+    return replayMinute ?? '09:31'
+  }
   if (minutesMeta?.minutes.length) {
     const latest =
       pickLatestMinute(minutesMeta, overview, tradeDate) ?? minutesMeta.minutes[minutesMeta.minutes.length - 1]!
@@ -637,6 +645,22 @@ async function loadSectorBoards(
   }
 }
 
+async function loadImportedCustomSectorBoards(): Promise<BoardItem[]> {
+  try {
+    const { items } = await fetchCustomSectors()
+    return items
+      .filter((item) => item.source_type === 'directory')
+      .map((item) => ({
+        id: item.sector_id,
+        name: item.name,
+        sector_type: 'custom',
+        chart_visible: true,
+      }))
+  } catch {
+    return []
+  }
+}
+
 async function enrichSelectedBoardsWithSnapshot(
   boards: BoardItem[],
   tradeDate: string,
@@ -684,6 +708,25 @@ type StockPanelBundle = {
   watchlist: BoardPayload['watchlist']
 }
 
+async function loadLinkageCatalogStocks(
+  linkageSectorId: string,
+  linkageTopK: number,
+  linkageSectorName?: string | null,
+): Promise<BoardItem[]> {
+  try {
+    const catalog = await fetchSectorCatalogMembers(
+      linkageSectorId,
+      linkageSectorName ?? undefined,
+    )
+    return catalog.items.slice(0, linkageTopK).map((item) => ({
+      id: item.symbol,
+      name: item.name,
+    }))
+  } catch {
+    return []
+  }
+}
+
 async function loadStockTargets(
   stockSourceMode: StockSourceMode,
   stockDate: string,
@@ -713,20 +756,14 @@ async function loadStockTargets(
       }))
       if (stocks.length) return { stocks, stockMode: 'linkage' }
     } catch {
-      try {
-        const catalog = await fetchSectorCatalogMembers(
-          linkageSectorId,
-          linkageSectorName ?? undefined,
-        )
-        const stocks = catalog.items.slice(0, linkageTopK).map((item) => ({
-          id: item.symbol,
-          name: item.name,
-        }))
-        if (stocks.length) return { stocks, stockMode: 'linkage' }
-      } catch {
-        /* fall through */
-      }
+      /* fall through to catalog */
     }
+    const catalogStocks = await loadLinkageCatalogStocks(
+      linkageSectorId,
+      linkageTopK,
+      linkageSectorName,
+    )
+    if (catalogStocks.length) return { stocks: catalogStocks, stockMode: 'linkage' }
     return { stocks: [], stockMode: 'linkage' }
   }
 
@@ -867,10 +904,12 @@ export async function fetchWorkbenchStockPanel(opts?: WorkbenchBoardOptions): Pr
     replayDates = []
   }
   let minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null = null
-  try {
-    minutesMeta = await fetchReplayMinutes(stockDate)
-  } catch {
-    /* optional */
+  if (shouldFetchMarketDataForDate(stockDate)) {
+    try {
+      minutesMeta = await fetchReplayMinutes(stockDate)
+    } catch {
+      /* optional */
+    }
   }
   const rankingMinute = await resolveRankingMinute(stockDate, opts?.replayMinute, minutesMeta, null)
   const timelineFallback = minutesMeta?.minutes.length ? [...minutesMeta.minutes] : []
@@ -907,43 +946,49 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   let minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null = null
   let overview: Awaited<ReturnType<typeof fetchMarketOverview>> | null = null
 
-  try {
-    overview = await fetchMarketOverview(sectorDate)
-  } catch {
-    /* optional */
-  }
+  if (shouldFetchMarketDataForDate(sectorDate)) {
+    try {
+      overview = await fetchMarketOverview(sectorDate)
+    } catch {
+      /* optional */
+    }
 
-  try {
-    minutesMeta = await fetchReplayMinutes(sectorDate)
-  } catch {
-    /* optional */
+    try {
+      minutesMeta = await fetchReplayMinutes(sectorDate)
+    } catch {
+      /* optional */
+    }
   }
 
   const fetchCurves = shouldFetchCurves(sectorDate, replayDates, minutesMeta, overview)
-  if (!fetchCurves && !hasIntradaySamples(minutesMeta, overview)) {
+  if (!shouldFetchMarketDataForDate(sectorDate)) {
+    sectorError = `${sectorDate} 为非交易日，请切换至工作日查看`
+  } else if (!fetchCurves && !hasIntradaySamples(minutesMeta, overview)) {
     sectorError = `暂无 ${sectorDate} 的分钟采样，请先在设置中确认采集数据或切换交易日`
   }
 
   const rankingMinute = await resolveRankingMinute(sectorDate, opts?.replayMinute, minutesMeta, overview)
 
   const {
-    boards: sectorBoards,
+    boards: groupChartBoards,
     sectorMode,
     selectedBoards: allSelectedBoards,
     activeGroupId,
     activeGroupName,
   } = await loadSectorBoards(sectorSourceMode, sectorDate, autoSectorCount, rankingMinute)
+  const importedRaw = await loadImportedCustomSectorBoards()
+  const importedIdSet = new Set(importedRaw.map((board) => board.id))
+  const enrichedImportedBoards = importedRaw.length
+    ? await enrichSelectedBoardsWithSnapshot(importedRaw, sectorDate, rankingMinute)
+    : []
   const enrichedSelectedBoards = allSelectedBoards.length
     ? await enrichSelectedBoardsWithSnapshot(allSelectedBoards, sectorDate, rankingMinute)
     : allSelectedBoards
-
-  if (sectorSourceMode === 'auto' && sectorBoards.length) {
-    try {
-      await syncWorkbenchPriorityTargets()
-    } catch {
-      /* keep board load resilient */
-    }
-  }
+  const importedChartBoards = boardsForChart(enrichedImportedBoards)
+  const sectorBoards = [...importedChartBoards, ...groupChartBoards.filter((board) => !importedIdSet.has(board.id))].slice(
+    0,
+    MAX_CHART_SECTORS,
+  )
 
   let sectorResults: Array<{ board: BoardItem; series: RawSeries | null; grayPoints: SectorGrayFlowPoint[] | null }>
   if (!fetchCurves || !sectorBoards.length) {
@@ -992,7 +1037,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     return mergeTimeline(rawSectorSeries)
   })()
   const snapshotBySectorId = new Map(
-    enrichedSelectedBoards.map((board) => [board.id, board.cum_main ?? null]),
+    [...enrichedImportedBoards, ...enrichedSelectedBoards].map((board) => [board.id, board.cum_main ?? null]),
   )
   const sectorSeries = sectorResults
     .filter((item): item is typeof item & { series: RawSeries } => item.series != null)
@@ -1009,7 +1054,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     })
 
   const seriesBySectorId = new Map(sectorSeries.map((item) => [item.id, item]))
-  const finalSelectedBoards = enrichedSelectedBoards.map((board) => {
+  const attachSeriesMetrics = (board: BoardItem): BoardItem => {
     const series = seriesBySectorId.get(board.id)
     if (!series) return board
     return {
@@ -1018,7 +1063,9 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
       cum_gray: series.cum_gray ?? null,
       change_pct: series.change_pct ?? board.change_pct ?? null,
     }
-  })
+  }
+  const finalImportedBoards = enrichedImportedBoards.map(attachSeriesMetrics)
+  const finalSelectedBoards = enrichedSelectedBoards.map(attachSeriesMetrics)
 
   const stockBundle = await loadStockPanelBundle(opts, rankingMinute, timeline, fetchCurves)
   const { stockTargets, stockMode, stockSeries, stockTimeline } = stockBundle
@@ -1082,6 +1129,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     sector_mode: sectorMode,
     active_sector_group_id: activeGroupId,
     active_sector_group_name: activeGroupName,
+    imported_sector_boards: finalImportedBoards,
     selected_boards: finalSelectedBoards,
     stock_mode: stockMode,
     selected_stocks: stockSourceMode === 'selected' ? stockTargets : [],
@@ -1163,7 +1211,7 @@ export async function fetchWorkbenchBoardCatalog(
   let filtered = items
   if (isClassicQuery) {
     filtered = items.filter((item) => item.sector_type === 'classic_index')
-  } else if (filterType && !isCodeQuery && !query) {
+  } else if (filterType) {
     filtered = items.filter((item) => item.sector_type === filterType)
   }
   let boards = filtered.map((item) => toBoardItem(item))
@@ -1181,95 +1229,8 @@ export async function fetchWorkbenchSelectedBoards(): Promise<SelectedBoardsResp
   return { boards }
 }
 
-export async function syncLinkageSector(
-  sectorId: string | null,
-  sectorName?: string | null,
-): Promise<void> {
-  try {
-    await fetch('/api/v1/settings/linkage-sector', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sector_id: sectorId ?? '',
-        sector_name: sectorName ?? '',
-      }),
-    })
-    await syncWorkbenchPriorityTargets({
-      linkageSectorId: sectorId,
-      linkageSectorName: sectorName,
-    })
-  } catch {
-    /* 联动板块同步失败不阻塞 UI */
-  }
-}
-
-export async function syncWorkbenchPriorityTargets(opts?: {
-  linkageSectorId?: string | null
-  linkageSectorName?: string | null
-}): Promise<void> {
-  // Prefer server watchlist when it is richer (e.g. seeded 100 hot sectors).
-  try {
-    const response = await fetch('/api/v1/settings/ui-selected-boards')
-    if (response.ok) {
-      const payload = (await response.json()) as { boards?: BoardItem[] }
-      const serverBoards = (payload.boards || [])
-        .map((board) => ({ id: String(board.id || '').trim(), name: String(board.name || board.id || '').trim() }))
-        .filter((board) => board.id)
-      const localById = new Map(loadSelectedBoards().map((board) => [board.id, board]))
-      const merged = serverBoards.map((board) => ({
-        ...board,
-        chart_visible: localById.get(board.id)?.chart_visible,
-      }))
-      const localBoards = loadSelectedBoards()
-      const localIds = localBoards.map((b) => b.id).join(',')
-      const serverIds = merged.map((b) => b.id).join(',')
-      if (merged.length && serverIds !== localIds) {
-        saveSelectedBoardsLocal(normalizeChartVisibility(merged))
-        saveSectorSourceMode('selected')
-      } else if (merged.length && localBoards.every((b) => b.chart_visible == null)) {
-        saveSelectedBoardsLocal(normalizeChartVisibility(merged))
-      }
-    }
-  } catch {
-    /* optional hydrate */
-  }
-
-  const selectedBoards = loadSelectedBoards()
-  const selectedStocks = loadSelectedStocks()
-  const autoCount = loadAutoSectorCount()
-  let rankSectorIds: string[] = []
-  try {
-    const sectorDate = await resolveTradeDate(null)
-    const rank = await fetchSectorRank(sectorDate, undefined, autoCount)
-    rankSectorIds = rank.items.map((item) => item.sector_id)
-  } catch {
-    /* rank optional */
-  }
-  try {
-    await fetch('/api/v1/settings/sync-hot-targets', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        selected_sector_ids: selectedBoards.map((b) => b.id),
-        // Keep selected watchlist intact; skip rank fill when already large.
-        rank_sector_ids: selectedBoards.length >= 80 ? [] : rankSectorIds,
-        symbols: selectedStocks.map((s) => s.id),
-        linkage_sector_id: opts?.linkageSectorId ?? '',
-        linkage_sector_name: opts?.linkageSectorName ?? '',
-      }),
-    })
-  } catch {
-    /* 启动时同步失败不阻塞 */
-  }
-}
-
-export async function syncWorkbenchPrioritySectors(): Promise<void> {
-  await syncWorkbenchPriorityTargets()
-}
-
 export async function saveWorkbenchSelectedBoards(boards: BoardItem[]): Promise<void> {
   saveSelectedBoardsLocal(boards)
-  await syncWorkbenchPriorityTargets()
 }
 
 export async function fetchWorkbenchStockCatalog(q = '', limit = 50): Promise<StockCatalogResponse> {
@@ -1288,7 +1249,6 @@ export async function fetchWorkbenchSelectedStocks(): Promise<SelectedStocksResp
 
 export async function saveWorkbenchSelectedStocks(stocks: BoardItem[]): Promise<void> {
   saveSelectedStocksLocal(stocks)
-  await syncWorkbenchPriorityTargets()
 }
 
 export async function fetchWorkbenchStock(symbol: string, date?: string | null): Promise<StockDetail | null> {

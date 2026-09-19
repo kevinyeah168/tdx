@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from contextlib import asynccontextmanager
@@ -21,8 +22,12 @@ from workbench.api.routes_replay import create_replay_router
 from workbench.api.routes_stocks import create_stock_router
 from workbench.collector.heartbeat import seed_demo_history
 from workbench.config import WorkbenchSettings, merge_user_config, workbench_settings_from_environment
+from workbench.services.custom_sector_sync_runner import custom_sector_sync_loop
 from workbench.providers.tdx.runtime import create_real_provider
+from workbench.query.custom_sector_flow import CustomSectorFlowService
+from workbench.query.custom_sector_ids import is_custom_sector_id
 from workbench.storage.hot_store import HotStore
+from workbench.storage.meta_store import MetaStore
 
 
 DEFAULT_TIERS = ("main", "super", "large")
@@ -160,6 +165,40 @@ def _optional_hot_store(settings: WorkbenchSettings, trade_date: date) -> HotSto
     store = HotStore(path)
     store.initialize()
     return store
+
+
+def _meta_store(settings: WorkbenchSettings) -> MetaStore:
+    store = MetaStore(settings.meta_db)
+    store.initialize()
+    return store
+
+
+def _sector_fund_curve(
+    settings: WorkbenchSettings,
+    trade_date: date,
+    sector_id: str,
+    store: HotStore,
+) -> Any:
+    if is_custom_sector_id(sector_id):
+        return CustomSectorFlowService(_meta_store(settings), store).complete_fund_curve(
+            trade_date.isoformat(),
+            sector_id,
+        )
+    return store.complete_sector_fund_curve(trade_date.isoformat(), sector_id)
+
+
+def _sector_gray_curve(
+    settings: WorkbenchSettings,
+    trade_date: date,
+    sector_id: str,
+    store: HotStore,
+) -> Any:
+    if is_custom_sector_id(sector_id):
+        return CustomSectorFlowService(_meta_store(settings), store).sector_gray_curve(
+            trade_date.isoformat(),
+            sector_id,
+        )
+    return store.sector_gray_curve(trade_date.isoformat(), sector_id)
 
 
 def _serialize_gray_curve(*, symbol: str, curve: Any) -> StockGrayFlowPayload:
@@ -394,9 +433,15 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         provider = create_real_provider(active_settings)
         application.state.hot_provider = provider
+        sync_task = asyncio.create_task(custom_sector_sync_loop(active_settings))
         try:
             yield
         finally:
+            sync_task.cancel()
+            try:
+                await sync_task
+            except asyncio.CancelledError:
+                pass
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
@@ -470,7 +515,7 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
     def sector_gray_flow(sector_id: str, trade_date: date = Query(alias="date")) -> SectorGrayFlowPayload:
         try:
             store = _hot_store(active_settings, trade_date)
-            curve = store.sector_gray_curve(trade_date.isoformat(), sector_id)
+            curve = _sector_gray_curve(active_settings, trade_date, sector_id, store)
             return _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)
         except HTTPException:
             raise
@@ -487,7 +532,7 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         selected_tiers = _parse_tiers(tiers)
         try:
             store = _hot_store(active_settings, trade_date)
-            curve = store.complete_sector_fund_curve(trade_date.isoformat(), sector_id)
+            curve = _sector_fund_curve(active_settings, trade_date, sector_id, store)
             payload = _serialize_series(
                 entity_key="sector_id",
                 entity_id=sector_id,
@@ -496,6 +541,8 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
                 tiers=selected_tiers,
                 payload_model=SectorFundFlowPayload,
             )
+            if is_custom_sector_id(sector_id):
+                return payload
             enhanced_client = None
             try:
                 enhanced_client = get_hot_enhanced_client(request)
@@ -524,7 +571,7 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         items: list[SectorFundFlowPayload] = []
         for sector_id in _normalize_batch_ids(payload.ids):
             try:
-                curve = store.complete_sector_fund_curve(trade_date_str, sector_id)
+                curve = _sector_fund_curve(active_settings, trade_date, sector_id, store)
                 serialized = _serialize_series_optional(
                     entity_key="sector_id",
                     entity_id=sector_id,
@@ -600,7 +647,7 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         items: list[SectorGrayFlowPayload] = []
         for sector_id in _normalize_batch_ids(payload.ids):
             try:
-                curve = store.sector_gray_curve(trade_date_str, sector_id)
+                curve = _sector_gray_curve(active_settings, trade_date, sector_id, store)
                 serialized = _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)
             except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
                 continue

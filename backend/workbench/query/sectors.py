@@ -15,6 +15,9 @@ from workbench.query.models import (
 )
 from workbench.providers.tdx.sector_float_cap import build_symbol_free_float_cap_details
 from workbench.providers.tdx.text_clean import clean_tdx_text
+from workbench.query.custom_sector_flow import CustomSectorFlowService
+from workbench.query.custom_sector_ids import CUSTOM_SECTOR_TYPE, is_custom_sector_id
+from workbench.services.custom_sectors import CustomSectorService
 from workbench.storage.hot_store import HotStore
 from workbench.storage.meta_store import MetaStore
 
@@ -45,6 +48,8 @@ class SectorQueryService:
         self._hot = hot
 
     def _resolve_member_symbols(self, sector_id: str) -> list[str]:
+        if is_custom_sector_id(sector_id):
+            return CustomSectorService(self._meta).symbols_for(sector_id)
         return self._meta.memberships_for(sector_id)
 
     def _rank_members_from_hot(
@@ -110,16 +115,32 @@ class SectorQueryService:
             params.append(effective_limit)
         with self._meta.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        return SectorListResponse(
-            items=[
+        items = [
+            SectorSummary(
+                sector_id=row[0],
+                name=row[1],
+                sector_type=row[2],
+                member_count=int(row[3]),
+            )
+            for row in rows
+        ]
+        custom_query = normalized_query.lower()
+        for sector in CustomSectorService(self._meta).list_sectors():
+            if custom_query:
+                if custom_query not in sector.name.lower() and custom_query not in sector.sector_id.lower():
+                    continue
+            items.append(
                 SectorSummary(
-                    sector_id=row[0],
-                    name=row[1],
-                    sector_type=row[2],
-                    member_count=int(row[3]),
+                    sector_id=sector.sector_id,
+                    name=sector.name,
+                    sector_type=CUSTOM_SECTOR_TYPE,
+                    member_count=len(sector.symbols),
                 )
-                for row in rows
-            ],
+            )
+        if effective_limit is not None:
+            items = items[:effective_limit]
+        return SectorListResponse(
+            items=items,
             metadata=QueryMetadata(
                 catalog_version=snapshot.catalog_version,
                 stale=snapshot.stale,
@@ -222,8 +243,12 @@ class SectorQueryService:
 
         effective_minute = minute
         items: list[SectorSnapshotItem] = []
+        custom_flow = CustomSectorFlowService(self._meta, self._hot)
         for sector_id in unique_ids:
-            tip = self._hot.sector_fund_tip(trade_date, sector_id, minute)
+            if is_custom_sector_id(sector_id):
+                tip = custom_flow.fund_tip_at_minute(trade_date, sector_id, minute)
+            else:
+                tip = self._hot.sector_fund_tip(trade_date, sector_id, minute)
             if tip is None:
                 continue
             effective_minute = str(tip["minute"])
@@ -410,7 +435,7 @@ class SectorQueryService:
         if self._hot is None:
             raise ValueError("hot store is required for member breadth")
         snapshot = self._meta.catalog_snapshot()
-        symbols = self._meta.memberships_for(sector_id)
+        symbols = self._resolve_member_symbols(sector_id)
         empty_counts = SectorBreadthCounts(
             limit_up=0,
             limit_down=0,

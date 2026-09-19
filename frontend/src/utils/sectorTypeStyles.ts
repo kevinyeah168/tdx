@@ -7,6 +7,7 @@ export type SectorTypeTone =
   | 'classic_index'
   | 'style'
   | 'region'
+  | 'custom'
   | 'default'
 
 export function sectorTypeTone(
@@ -27,6 +28,8 @@ export function sectorTypeTone(
       return 'style'
     case 'region':
       return 'region'
+    case 'custom':
+      return 'custom'
     default:
       return 'default'
   }
@@ -49,4 +52,5 @@ export const BOARD_TAB_TONE: Record<string, SectorTypeTone> = {
   GN: 'concept',
   HY2: 'industry2',
   IDX: 'classic_index',
+  CUSTOM: 'custom',
 }

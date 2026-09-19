@@ -36,14 +36,25 @@ from workbench.query.models import (
     SectorRankResponse,
     SectorSnapshotResponse,
 )
+from workbench.query.custom_sector_ids import is_custom_sector_id
 from workbench.query.sector_resolve import resolve_member_sector_id
 from workbench.query.sectors import SectorQueryService
 from workbench.services.collector_control import restart_collectors
+from workbench.services.custom_sector_sync_runner import run_custom_sector_directory_sync
+from workbench.services.folder_picker import pick_directory
+from workbench.services.custom_sectors import CustomSectorService, CustomSectorView
 from workbench.services.sector_groups import SectorGroupService, SectorGroupView
 from workbench.services.stock_groups import StockGroupService, StockGroupView
 from workbench.services.tdx_probe import probe_tdx_home
 from workbench.storage.hot_store import HotStore
 from workbench.storage.meta_store import MetaStore
+from workbench.storage.custom_sector_sync_config import (
+    MAX_SYNC_INTERVAL_SECONDS,
+    MIN_SYNC_INTERVAL_SECONDS,
+    read_custom_sector_sync_config,
+    write_custom_sector_sync_config,
+    CustomSectorSyncConfig,
+)
 from workbench.storage.workbench_config import append_settings_audit, read_settings_audit
 
 
@@ -272,6 +283,69 @@ class StockGroupActivePayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     group_id: str = "all"
+
+
+class CustomSectorCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class CustomSectorRenamePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1)
+
+
+class CustomSectorMembersPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbols: list[str] = Field(default_factory=list)
+
+
+class CustomSectorSyncConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    directory_path: str = ""
+    auto_sync_enabled: bool = False
+    interval_seconds: int = Field(
+        default=60,
+        ge=MIN_SYNC_INTERVAL_SECONDS,
+        le=MAX_SYNC_INTERVAL_SECONDS,
+    )
+
+
+class CustomSectorSyncRunPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    directory_path: str | None = None
+
+
+class CustomSectorPickDirectoryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    initial_path: str | None = None
+
+
+def _serialize_custom_sector_sync_config(config: CustomSectorSyncConfig) -> dict[str, object]:
+    return config.model_dump()
+
+
+def _serialize_custom_sector(sector: CustomSectorView) -> dict[str, object]:
+    return {
+        "sector_id": sector.sector_id,
+        "name": sector.name,
+        "sort_order": sector.sort_order,
+        "source_type": sector.source_type,
+        "symbols": sector.symbols,
+        "members": [
+            {
+                "symbol": member.symbol,
+                "name": member.name,
+            }
+            for member in sector.members
+        ],
+    }
 
 
 def _serialize_group(group: SectorGroupView) -> dict[str, object]:
@@ -749,6 +823,190 @@ def create_settings_router() -> APIRouter:
         )
         return {"ok": True, "group": _serialize_stock_group(group)}
 
+    @router.get("/custom-sectors")
+    def list_custom_sectors(
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        return {
+            "items": [_serialize_custom_sector(sector) for sector in service.list_sectors()],
+        }
+
+    @router.post("/custom-sectors")
+    def create_custom_sector(
+        payload: CustomSectorCreatePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        sector = service.create_sector(payload.name)
+        append_settings_audit(
+            settings.data_dir,
+            "create_custom_sector",
+            {"sector_id": sector.sector_id, "name": sector.name},
+        )
+        return {"ok": True, "sector": _serialize_custom_sector(sector)}
+
+    @router.get("/custom-sectors/sync-directory")
+    def get_custom_sector_sync_config(
+        settings: WorkbenchSettings = Depends(get_settings),
+    ) -> dict[str, object]:
+        config = read_custom_sector_sync_config(settings.data_dir)
+        return {"ok": True, "config": _serialize_custom_sector_sync_config(config)}
+
+    @router.put("/custom-sectors/sync-directory")
+    def update_custom_sector_sync_config(
+        payload: CustomSectorSyncConfigPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+    ) -> dict[str, object]:
+        current = read_custom_sector_sync_config(settings.data_dir)
+        config = current.model_copy(
+            update={
+                "directory_path": payload.directory_path.strip(),
+                "auto_sync_enabled": payload.auto_sync_enabled,
+                "interval_seconds": payload.interval_seconds,
+            }
+        )
+        write_custom_sector_sync_config(settings.data_dir, config)
+        append_settings_audit(
+            settings.data_dir,
+            "update_custom_sector_sync_config",
+            {
+                "directory_path": config.directory_path,
+                "auto_sync_enabled": config.auto_sync_enabled,
+                "interval_seconds": config.interval_seconds,
+            },
+        )
+        return {"ok": True, "config": _serialize_custom_sector_sync_config(config)}
+
+    @router.post("/custom-sectors/pick-directory")
+    def pick_custom_sector_directory(
+        payload: CustomSectorPickDirectoryPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+    ) -> dict[str, object]:
+        initial = (payload.initial_path or "").strip()
+        if not initial:
+            config = read_custom_sector_sync_config(settings.data_dir)
+            initial = config.directory_path.strip()
+        try:
+            selected = pick_directory(initial or None)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"folder picker failed: {error}") from error
+        if not selected:
+            return {"ok": True, "cancelled": True, "directory_path": ""}
+        return {"ok": True, "cancelled": False, "directory_path": selected}
+
+    @router.post("/custom-sectors/sync-directory")
+    def sync_custom_sector_directory(
+        payload: CustomSectorSyncRunPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        directory = (payload.directory_path or "").strip()
+        if not directory:
+            config = read_custom_sector_sync_config(settings.data_dir)
+            directory = config.directory_path.strip()
+        if not directory:
+            raise HTTPException(status_code=400, detail="directory path must not be blank")
+        path = Path(directory)
+        if not path.is_dir():
+            raise HTTPException(status_code=400, detail=f"directory not found: {directory}")
+        try:
+            summary = run_custom_sector_directory_sync(settings, directory=directory)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        service = CustomSectorService(meta)
+        append_settings_audit(
+            settings.data_dir,
+            "sync_custom_sector_directory",
+            {
+                "directory": directory,
+                "files_seen": summary.get("files_seen", 0),
+                "sectors_updated": summary.get("sectors_updated", 0),
+            },
+        )
+        return {
+            "ok": True,
+            "summary": summary,
+            "items": [_serialize_custom_sector(sector) for sector in service.list_sectors()],
+            "config": _serialize_custom_sector_sync_config(
+                read_custom_sector_sync_config(settings.data_dir)
+            ),
+        }
+
+    @router.put("/custom-sectors/{sector_id}")
+    def rename_custom_sector(
+        sector_id: str,
+        payload: CustomSectorRenamePayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        try:
+            sector = service.rename_sector(sector_id, payload.name)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "rename_custom_sector",
+            {"sector_id": sector.sector_id, "name": sector.name},
+        )
+        return {"ok": True, "sector": _serialize_custom_sector(sector)}
+
+    @router.delete("/custom-sectors/{sector_id}")
+    def delete_custom_sector(
+        sector_id: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        try:
+            service.delete_sector(sector_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(settings.data_dir, "delete_custom_sector", {"sector_id": sector_id})
+        return {"ok": True}
+
+    @router.post("/custom-sectors/{sector_id}/members")
+    def add_custom_sector_members(
+        sector_id: str,
+        payload: CustomSectorMembersPayload,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        try:
+            sector = service.add_members(sector_id, payload.symbols)
+        except ValueError as error:
+            message = str(error)
+            status = 400 if "limit" in message else 404
+            raise HTTPException(status_code=status, detail=message) from error
+        append_settings_audit(
+            settings.data_dir,
+            "add_custom_sector_members",
+            {"sector_id": sector.sector_id, "count": len(sector.symbols)},
+        )
+        return {"ok": True, "sector": _serialize_custom_sector(sector)}
+
+    @router.delete("/custom-sectors/{sector_id}/members/{symbol}")
+    def remove_custom_sector_member(
+        sector_id: str,
+        symbol: str,
+        settings: WorkbenchSettings = Depends(get_settings),
+        meta: MetaStore = Depends(get_meta_store),
+    ) -> dict[str, object]:
+        service = CustomSectorService(meta)
+        try:
+            sector = service.remove_member(sector_id, symbol)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        append_settings_audit(
+            settings.data_dir,
+            "remove_custom_sector_member",
+            {"sector_id": sector.sector_id, "symbol": symbol.upper()},
+        )
+        return {"ok": True, "sector": _serialize_custom_sector(sector)}
+
     return router
 
 
@@ -805,8 +1063,13 @@ def create_sector_router() -> APIRouter:
             sector_id,
             sector_name=sector_name,
         )
-        symbols = meta.memberships_for(effective_sector_id)
-        names = meta.security_names(symbols)
+        if is_custom_sector_id(effective_sector_id):
+            custom_sector = CustomSectorService(meta).get_sector(effective_sector_id)
+            symbols = custom_sector.symbols
+            names = {member.symbol: member.name for member in custom_sector.members}
+        else:
+            symbols = meta.memberships_for(effective_sector_id)
+            names = meta.security_names(symbols)
         snapshot = meta.catalog_snapshot()
         return SectorCatalogMembersResponse(
             sector_id=effective_sector_id,
@@ -837,21 +1100,30 @@ def create_sector_router() -> APIRouter:
             sector_id,
             sector_name=sector_name,
         )
-        catalog_members = meta.memberships_for(effective_sector_id)
+        catalog_members = (
+            CustomSectorService(meta).symbols_for(effective_sector_id)
+            if is_custom_sector_id(effective_sector_id)
+            else meta.memberships_for(effective_sector_id)
+        )
 
         live_members = None
         quote_client = None
         try:
             enhanced = get_hot_enhanced_client(request)
             quote_client = enhanced
-            live_members = fetch_live_board_members_cached(
-                enhanced,
-                effective_sector_id,
-                limit=limit,
-                member_count=len(catalog_members) or None,
-            )
         except (RuntimeError, OSError, ValueError, TypeError):
-            live_members = None
+            enhanced = None
+
+        if enhanced is not None and not is_custom_sector_id(effective_sector_id):
+            try:
+                live_members = fetch_live_board_members_cached(
+                    enhanced,
+                    effective_sector_id,
+                    limit=limit,
+                    member_count=len(catalog_members) or None,
+                )
+            except (RuntimeError, OSError, ValueError, TypeError):
+                live_members = None
 
         return SectorQueryService(meta, hot).member_ranking(
             effective_sector_id,

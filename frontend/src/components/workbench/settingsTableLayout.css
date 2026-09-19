@@ -1,0 +1,147 @@
+.settings-table-panel {
+  --table-row-height: 36px;
+  --table-visible-rows: 12;
+  --table-max-height: calc(var(--table-visible-rows) * var(--table-row-height) + 40px);
+
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.settings-table-panel .error-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger, #dc2626);
+}
+
+.settings-table-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-table-top .create-input {
+  width: min(160px, 34vw);
+}
+
+.settings-table-top .hint {
+  margin: 0;
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-table-split {
+  display: grid;
+  grid-template-columns: minmax(148px, 200px) minmax(0, 1fr);
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-table-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.settings-table-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.settings-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-table-toolbar .name-input {
+  width: min(180px, 100%);
+}
+
+.settings-table-toolbar .spacer {
+  flex: 1;
+}
+
+.settings-table-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-table-add .type-filter {
+  width: 108px;
+}
+
+.settings-table-add .search-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.settings-table-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.settings-table-panel :deep(.n-data-table) {
+  --n-th-padding: 6px 8px;
+  --n-td-padding: 5px 8px;
+}
+
+.settings-table-panel :deep(.row-selected td) {
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel)) !important;
+}
+
+.settings-table-panel :deep(.n-data-table-tr:hover td) {
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+}
+
+.settings-table-search {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel));
+  flex-shrink: 0;
+}
+
+.settings-table-search-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.settings-table-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+}
+
+@media (max-width: 900px) {
+  .settings-table-split {
+    grid-template-columns: 1fr;
+  }
+}

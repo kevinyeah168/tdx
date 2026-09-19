@@ -20,6 +20,11 @@ export function isWeekdayDate(dateStr: string): boolean {
   return weekday >= 1 && weekday <= 5
 }
 
+/** Whether intraday/replay APIs should be called for this calendar date. */
+export function shouldFetchMarketDataForDate(dateStr: string): boolean {
+  return isWeekdayDate(dateStr)
+}
+
 function clockMinutes(now: Date): number {
   return now.getHours() * 60 + now.getMinutes()
 }

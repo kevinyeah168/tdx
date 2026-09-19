@@ -1,0 +1,274 @@
+.settings-panel-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent) 8%);
+  flex-shrink: 0;
+  margin-top: 0;
+}
+
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  gap: 2px;
+}
+
+.segmented-control button {
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.segmented-control button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel));
+}
+
+.segmented-control button.active {
+  color: var(--accent);
+  background: var(--panel);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.toolbar-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbar-create .create-input {
+  width: min(168px, 34vw);
+}
+
+.toolbar-meta {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.overview-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.overview-table-wrap {
+  flex: 1 1 auto;
+  min-height: 120px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: auto;
+  background: var(--panel);
+}
+
+.overview-table-wrap :deep(.n-data-table) {
+  --n-th-color: color-mix(in srgb, var(--panel) 90%, var(--accent) 10%);
+  --n-td-color: transparent;
+  --n-th-font-weight: 600;
+}
+
+.overview-table-wrap :deep(.n-data-table-th) {
+  font-size: 12px;
+}
+
+.overview-table-wrap :deep(.n-data-table-td) {
+  font-size: 12px;
+}
+
+.overview-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+}
+
+.overview-panel .error-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger, #dc2626);
+}
+
+.overview-panel :deep(.action-cell) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.overview-panel :deep(.action-cell .n-button) {
+  min-width: 40px;
+}
+
+.overview-panel :deep(.n-data-table-td) {
+  vertical-align: top;
+}
+
+.overview-panel :deep(.n-data-table-td[data-col-key='name']) {
+  white-space: nowrap;
+}
+
+.sector-top-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .sector-top-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sector-panel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 132px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--accent) 6%);
+}
+
+.manual-card :deep(.manual-name-input) {
+  width: 100%;
+}
+
+.manual-card :deep(.manual-name-input .n-input) {
+  background: var(--panel);
+}
+
+.sync-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sync-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sync-card-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.sync-card-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.sync-path-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px dashed color-mix(in srgb, var(--border) 88%, var(--accent) 12%);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sync-path-picker:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent) 8%);
+}
+
+.sync-path-picker:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.sync-path-prefix {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.sync-path-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-path-picker.is-empty .sync-path-text {
+  color: var(--muted);
+}
+
+.sync-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.sync-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sync-auto-row :deep(.n-input-number) {
+  width: 64px;
+}
+
+.sync-status-pill {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent) 18%);
+  line-height: 1.3;
+}

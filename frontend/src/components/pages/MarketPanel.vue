@@ -21,6 +21,7 @@ const {
   stockLoadingHint,
   linkageSectorName,
   highlightedStock,
+  highlightedSector,
   sectorGroups,
   activeSectorGroupId,
   stockSourceMode,
@@ -46,8 +47,23 @@ const title = computed(() => {
 
 const soloStockLabel = computed(() => highlightedStockSeries.value?.name ?? null)
 
+const soloSectorLabel = computed(() => {
+  if (!highlightedSector.value) return null
+  return (
+    board.value.sector_series.find((item) => item.id === highlightedSector.value)?.name ??
+    board.value.selected_boards.find((item) => item.id === highlightedSector.value)?.name ??
+    null
+  )
+})
+
 const count = computed(() => {
-  if (props.mode === 'stock') return board.value.stock_series?.length ?? 0
+  if (props.mode === 'stock') {
+    if (stockSourceMode.value === 'linkage') {
+      const watchlistCount = board.value.watchlist?.length ?? 0
+      if (watchlistCount > 0) return watchlistCount
+    }
+    return board.value.stock_series?.length ?? 0
+  }
   return board.value.sector_series?.length ?? 0
 })
 
@@ -101,6 +117,10 @@ const loadingHint = computed(() => {
             v-if="mode === 'stock' && soloStockLabel"
             class="truncate text-[var(--primary)]"
           >· {{ soloStockLabel }}</span>
+          <span
+            v-if="mode === 'sector' && soloSectorLabel"
+            class="truncate text-[var(--primary)]"
+          >· {{ soloSectorLabel }}</span>
         </h2>
         <span class="shrink-0 text-xs text-[var(--muted)]">{{ countLabel }}</span>
       </div>
@@ -136,7 +156,8 @@ const loadingHint = computed(() => {
 
 <style scoped>
 .group-select {
-  width: 132px;
+  width: min(188px, 34vw);
+  min-width: 148px;
   flex-shrink: 0;
 }
 
@@ -150,6 +171,12 @@ const loadingHint = computed(() => {
 .group-select :deep(.n-base-selection) {
   --n-height: 26px;
   font-size: 12px;
+}
+
+.group-select :deep(.n-base-selection-label) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-spin {

@@ -12,6 +12,8 @@ import {
   setSectorGroupMemberChartVisible,
   type SectorGroup,
 } from '@/api/sectorGroups'
+import { fetchCustomSectors } from '@/api/customSectors'
+import { fetchSectorCatalogMembers } from '@/api/sectors'
 import {
   loadAutoSectorCount,
   loadLinkageTopK,
@@ -22,11 +24,11 @@ import {
   saveLinkageTopK,
   saveSectorSourceMode,
   saveStockSourceMode,
-  syncLinkageSector,
   fetchWorkbenchStockPanel,
   type SectorSourceMode,
   type StockSourceMode,
 } from '@/api/workbenchBoard'
+import { shouldFetchMarketDataForDate } from '@/utils/tradingSession'
 import { useSectorStore } from '@/stores/sectorStore'
 import { WORKBENCH_REFRESH_SECONDS } from '@/constants/refresh'
 import { todayTradeDate } from '@/utils/tradeDate'
@@ -49,6 +51,7 @@ const emptyBoard = (): BoardPayload => ({
   board_type: 'HY',
   sector_mode: 'auto',
   selected_boards: [],
+  imported_sector_boards: [],
   stock_mode: 'linkage',
   selected_stocks: [],
   watchlist: [],
@@ -101,6 +104,9 @@ export const useBoardStore = defineStore('board', () => {
   let stockLoadSeq = 0
   let sectorLoadSeq = 0
   let boardLoadChain: Promise<void> = Promise.resolve()
+  let stockPanelLoadChain: Promise<void> = Promise.resolve()
+  let cachedLinkageCatalogSignature = ''
+  let cachedImportedSectorSignature = ''
 
   const isPanelBusy = computed(() => stockLoading.value || sectorLoading.value || loading.value)
   /** @deprecated alias — some callers still use isBoardBusy */
@@ -221,9 +227,13 @@ export const useBoardStore = defineStore('board', () => {
               sector_series: board.value.sector_series,
               timeline: board.value.timeline,
               selected_boards: board.value.selected_boards,
+              imported_sector_boards: board.value.imported_sector_boards,
             }
           : {}),
       }
+      cachedImportedSectorSignature = importedSectorSignature(
+        (board.value.imported_sector_boards ?? []).map((item) => item.id),
+      )
       // View dates are controlled by panel pickers / TopBar — do not clobber from a stale response.
     } catch (error) {
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
@@ -237,7 +247,25 @@ export const useBoardStore = defineStore('board', () => {
     }
   }
 
+  function linkageMemberSignature(symbols: string[]): string {
+    return symbols
+      .map((symbol) => symbol.toUpperCase())
+      .sort()
+      .join(',')
+  }
+
+  function resetLinkageCatalogSignature() {
+    cachedLinkageCatalogSignature = ''
+  }
+
   async function loadStockPanel(opts?: { stockSeq?: number }) {
+    let release!: () => void
+    const slot = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const previous = stockPanelLoadChain
+    stockPanelLoadChain = slot
+    await previous
     try {
       const data = await fetchWorkbenchStockPanel(boardFetchOptions())
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
@@ -251,12 +279,67 @@ export const useBoardStore = defineStore('board', () => {
         selected_stocks: data.selected_stocks,
         stock_view_date: resolvedStockViewDate() ?? data.stock_view_date,
       }
+      cachedLinkageCatalogSignature = linkageMemberSignature(
+        (data.watchlist ?? []).map((item) => item.symbol),
+      )
     } catch (error) {
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
       board.value = {
         ...board.value,
         error: error instanceof Error ? error.message : String(error),
       }
+    } finally {
+      release()
+    }
+  }
+
+  function importedSectorSignature(sectorIds: string[]): string {
+    return sectorIds
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .sort()
+      .join(',')
+  }
+
+  /** Reload board when directory-imported custom sectors change (file sync). */
+  async function refreshImportedSectorsIfChanged() {
+    try {
+      const { items } = await fetchCustomSectors()
+      const signature = importedSectorSignature(
+        items.filter((item) => item.source_type === 'directory').map((item) => item.sector_id),
+      )
+      if (signature === cachedImportedSectorSignature) return
+      cachedImportedSectorSignature = signature
+      await loadBoard()
+    } catch {
+      /* background refresh should not surface */
+    }
+  }
+
+  async function refreshHomeCatalogIfChanged() {
+    await refreshLinkageCatalogIfChanged()
+    await refreshImportedSectorsIfChanged()
+  }
+
+  /** Lightweight poll: reload stock panel only when linkage catalog members changed. */
+  async function refreshLinkageCatalogIfChanged() {
+    if (stockSourceMode.value !== 'linkage' || !linkageSectorId.value) return
+
+    const sectorDate = resolvedSectorViewDate()
+    if (!sectorDate || !shouldFetchMarketDataForDate(sectorDate)) return
+
+    try {
+      const catalog = await fetchSectorCatalogMembers(
+        linkageSectorId.value,
+        linkageSectorName.value ?? undefined,
+      )
+      const signature = linkageMemberSignature(catalog.items.map((item) => item.symbol))
+      const current = linkageMemberSignature((board.value.watchlist ?? []).map((item) => item.symbol))
+      if (signature === cachedLinkageCatalogSignature && signature === current) return
+      cachedLinkageCatalogSignature = signature
+      await loadStockPanel()
+    } catch {
+      /* background refresh should not surface */
     }
   }
 
@@ -433,11 +516,18 @@ export const useBoardStore = defineStore('board', () => {
 
     const sameLinkage = linkageSectorId.value === sectorId
     const sectorSoloActive = highlightedSector.value === sectorId
+    const hasLinkedStockData = (board.value.stock_series?.length ?? 0) > 0
 
-    // 再次点击已联动板块：仅取消左侧板块 solo，保留联动
-    if (sameLinkage && sectorSoloActive && !highlightedStock.value) {
-      highlightedSector.value = null
-      return
+    // 已联动同一板块：只切换左侧 solo，不重复拉成分股
+    if (sameLinkage && !highlightedStock.value) {
+      if (sectorSoloActive) {
+        highlightedSector.value = null
+        return
+      }
+      if (hasLinkedStockData) {
+        highlightedSector.value = sectorId
+        return
+      }
     }
 
     // 切换板块后必须清掉个股 solo，否则会一直只画一条旧曲线
@@ -452,6 +542,7 @@ export const useBoardStore = defineStore('board', () => {
     const linkageChanged = !sameLinkage
     linkageSectorId.value = sectorId
     linkageSectorName.value = sectorName
+    if (linkageChanged) resetLinkageCatalogSignature()
 
     const tradeDate = resolvedSectorViewDate()
     if (tradeDate) {
@@ -471,7 +562,6 @@ export const useBoardStore = defineStore('board', () => {
         stock_timeline: [],
         watchlist: [],
       }
-      void syncLinkageSector(sectorId, sectorName)
     }
 
     try {
@@ -699,6 +789,8 @@ export const useBoardStore = defineStore('board', () => {
     isBoardBusy,
     loadBoard,
     loadStockPanel,
+    refreshLinkageCatalogIfChanged,
+    refreshHomeCatalogIfChanged,
     loadCatalog,
     openPicker,
     closePicker,

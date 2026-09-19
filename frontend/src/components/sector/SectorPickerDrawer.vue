@@ -27,7 +27,7 @@ import {
   type SectorGroup,
 } from '@/api/sectorGroups'
 import { fetchSectors } from '@/api/sectors'
-import { MAX_CHART_SECTORS } from '@/api/workbenchBoard'
+import { invalidateSectorCatalogCache, MAX_CHART_SECTORS } from '@/api/workbenchBoard'
 import { useBoardStore } from '@/stores/boardStore'
 import { useSectorStore } from '@/stores/sectorStore'
 import type { BoardCatalogType, BoardItem } from '@/types/board'
@@ -57,10 +57,13 @@ const typeTabs: { label: string; value: BoardCatalogType }[] = [
   { label: '概念', value: 'GN' },
   { label: '二级行业', value: 'HY2' },
   { label: '板块指数', value: 'IDX' },
+  { label: '自定义', value: 'CUSTOM' },
 ]
 
 const { width: windowWidth } = useWindowSize()
-const drawerWidth = computed(() => Math.round(windowWidth.value * 0.8))
+const drawerWidth = computed(() =>
+  Math.min(Math.max(Math.round(windowWidth.value * 0.92), 1080), 1560),
+)
 
 const groups = ref<SectorGroup[]>([])
 const groupsLoading = ref(false)
@@ -110,6 +113,12 @@ const pasteCanAdd = computed(
     !pasteAdding.value,
 )
 
+const catalogEmptyHint = computed(() => {
+  if (pickerSearchHint.value) return pickerSearchHint.value
+  if (pickerType.value === 'CUSTOM') return '还没有自定义板块，去设置页创建或导入'
+  return '无匹配板块'
+})
+
 const debouncedSearch = useDebounceFn(() => {
   boardStore.loadCatalog()
 }, 250)
@@ -124,20 +133,21 @@ watch(pickerQuery, () => {
 
 watch(pickerOpen, (open) => {
   if (open) {
+    invalidateSectorCatalogCache()
     groupsDirty.value = false
     pasteView.value = 'catalog'
     pasteText.value = ''
     pasteRows.value = []
     pasteError.value = ''
+    pasteCatalog.value = []
     void loadGroups()
     void loadPasteCatalog()
   }
 })
 
 async function loadPasteCatalog() {
-  if (pasteCatalog.value.length) return
   try {
-    const response = await fetchSectors()
+    const response = await fetchSectors({ limit: 1500 })
     pasteCatalog.value = response.items
   } catch {
     pasteCatalog.value = []
@@ -505,40 +515,43 @@ async function handleClose() {
 
         <div class="picker-main" :class="{ 'picker-main--paste': pasteView === 'paste' }">
           <template v-if="pasteView === 'catalog'">
-            <div class="toolbar-row">
-              <div class="type-tabs">
-                <button
-                  v-for="tab in typeTabs"
-                  :key="tab.value"
-                  type="button"
-                  class="type-tab"
-                  :class="[tabToneClass(tab.value), { active: pickerType === tab.value }]"
-                  @click="setType(tab.value)"
-                >
-                  <span class="type-tab-dot" aria-hidden="true" />
-                  {{ tab.label }}
-                </button>
+            <div class="catalog-toolbar">
+              <div class="catalog-toolbar-left">
+                <div class="type-tabs">
+                  <button
+                    v-for="tab in typeTabs"
+                    :key="tab.value"
+                    type="button"
+                    class="type-tab"
+                    :class="[tabToneClass(tab.value), { active: pickerType === tab.value }]"
+                    @click="setType(tab.value)"
+                  >
+                    <span class="type-tab-dot" aria-hidden="true" />
+                    {{ tab.label }}
+                  </button>
+                </div>
               </div>
 
-              <NInput
-                :value="pickerQuery ?? ''"
-                clearable
-                size="medium"
-                placeholder="搜索名称或代码（全市场 1000+ 板块）"
-                class="search-input"
-                @update:value="(v) => (pickerQuery = v ?? '')"
-              />
-
-              <NButton
-                size="small"
-                type="primary"
-                ghost
-                class="paste-entry-btn"
-                :disabled="!editingGroup"
-                @click="openPasteView"
-              >
-                粘贴导入
-              </NButton>
+              <div class="catalog-toolbar-right">
+                <NInput
+                  :value="pickerQuery ?? ''"
+                  clearable
+                  size="medium"
+                  placeholder="搜索名称或代码（全市场 1000+ 板块）"
+                  class="search-input"
+                  @update:value="(v) => (pickerQuery = v ?? '')"
+                />
+                <NButton
+                  size="medium"
+                  type="primary"
+                  ghost
+                  class="paste-entry-btn"
+                  :disabled="!editingGroup"
+                  @click="openPasteView"
+                >
+                  粘贴导入
+                </NButton>
+              </div>
             </div>
 
             <div v-if="!editingGroup" class="catalog-hint">请先创建并选择一个分组</div>
@@ -589,7 +602,7 @@ async function handleClose() {
                   </button>
                 </div>
               </NScrollbar>
-              <NEmpty v-else class="py-12" :description="pickerSearchHint || '无匹配板块'" size="small" />
+              <NEmpty v-else class="py-12" :description="catalogEmptyHint" size="small" />
             </div>
           </template>
 
@@ -924,12 +937,30 @@ async function handleClose() {
   gap: 12px;
 }
 
-.type-tabs {
-  flex: 1;
+.catalog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.catalog-toolbar-left {
+  flex: 3;
   min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.catalog-toolbar-right {
+  flex: 2;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.type-tabs {
+  display: flex;
+  flex-wrap: nowrap;
   gap: 6px;
+  width: 100%;
   padding: 4px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--muted) 8%, transparent);
@@ -940,8 +971,10 @@ async function handleClose() {
   align-items: center;
   justify-content: center;
   gap: 5px;
+  flex: 1 1 0;
+  min-width: 0;
   height: 34px;
-  padding: 0 4px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 9px;
   background: transparent;
@@ -968,10 +1001,12 @@ async function handleClose() {
 }
 
 .search-input {
-  flex: 0 1 300px;
-  width: 300px;
-  max-width: 36%;
-  min-width: 180px;
+  flex: 1;
+  min-width: 0;
+}
+
+.paste-entry-btn {
+  flex-shrink: 0;
 }
 
 .catalog-hint {
@@ -994,7 +1029,7 @@ async function handleClose() {
 
 .grid-scroll {
   height: 100%;
-  max-height: calc(100vh - 220px);
+  max-height: calc(100vh - 240px);
 }
 
 .sector-grid {

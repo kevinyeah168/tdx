@@ -646,3 +646,107 @@ def test_sector_snapshot_omits_sectors_without_hot_rows(tmp_path: Path) -> None:
     )
 
     assert response.items == []
+
+
+def test_custom_sector_member_ranking_includes_net_ratio_with_quote_client(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    from workbench.domain import CollectionStatus, DataQuality, FundFlow, SectorMinute, StockMinute, TierPoint
+    from workbench.services.custom_sectors import CustomSectorService
+
+    meta = MetaStore(tmp_path / "meta.sqlite")
+    meta.initialize()
+    meta.replace_catalog(
+        securities=[Security(symbol="SH600000", code="600000", name="浦发银行", market="SH")],
+        sectors=[],
+        memberships=[],
+        version="catalog-test",
+        source="test",
+    )
+    service = CustomSectorService(meta)
+    sector = service.create_sector("哨兵仓")
+    service.add_members(sector.sector_id, ["SH600000"])
+
+    hot = HotStore(tmp_path / "hot.sqlite")
+    hot.initialize()
+
+    def tier(delta: float, cumulative: float) -> TierPoint:
+        return TierPoint(delta=delta, cumulative=cumulative, source="test", quality=DataQuality.OFFICIAL)
+
+    trade_date = date(2026, 8, 20)
+    minute = "09:31"
+    batch_id = "2026-08-20T09:31"
+    hot.write_complete_batch(
+        [
+            StockMinute(
+                trade_date=trade_date,
+                minute=minute,
+                symbol="SH600000",
+                close=10.0,
+                change_pct=1.0,
+                amount_delta=1000,
+                funds=FundFlow(
+                    main=tier(100, 300),
+                    super=tier(0, 0),
+                    large=tier(0, 0),
+                    medium=tier(0, 0),
+                    small=tier(0, 0),
+                ),
+                observed_at=datetime(2026, 8, 20, 9, 31),
+                batch_id=batch_id,
+            )
+        ],
+        [
+            SectorMinute(
+                trade_date=trade_date,
+                minute=minute,
+                sector_id=sector.sector_id,
+                change_pct=1.0,
+                member_count=1,
+                funds=FundFlow(
+                    main=tier(100, 300),
+                    super=tier(0, 0),
+                    large=tier(0, 0),
+                    medium=tier(0, 0),
+                    small=tier(0, 0),
+                ),
+                observed_at=datetime(2026, 8, 20, 9, 31),
+                batch_id=batch_id,
+            )
+        ],
+        CollectionStatus(
+            trade_date=trade_date,
+            minute=minute,
+            batch_id=batch_id,
+            catalog_version="catalog-test",
+            expected_stocks=1,
+            collected_stocks=1,
+            expected_sectors=1,
+            collected_sectors=1,
+            duration_ms=1,
+            coverage_pct=100.0,
+            status="complete",
+        ),
+        started_at=0.0,
+    )
+
+    class QuoteClient:
+        def get_stock_quotes(self, stocks):  # noqa: ANN001
+            return [
+                {
+                    "market": 1,
+                    "code": "600000",
+                    "price": 10.0,
+                    "circulating_capital_z": 100.0,
+                }
+            ]
+
+    response = SectorQueryService(meta, hot).member_ranking(
+        sector.sector_id,
+        trade_date="2026-08-20",
+        minute="09:31",
+        quote_client=QuoteClient(),
+    )
+
+    assert len(response.items) == 1
+    assert response.items[0].main_net_ratio == 0.003

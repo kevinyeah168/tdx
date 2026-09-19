@@ -55,6 +55,7 @@ const SECTOR_TYPE_LABELS: Record<string, string> = {
   classic_index: '板块指数',
   style: '风格',
   region: '地域',
+  custom: '自定义',
 }
 
 export function fmtSectorType(type: string | null | undefined): string {
@@ -64,6 +65,7 @@ export function fmtSectorType(type: string | null | undefined): string {
 
 export function inferSectorTypeFromId(id: string): string | undefined {
   const code = id.trim()
+  if (code.startsWith('custom_')) return 'custom'
   if (/^880\d{3}$/.test(code)) return 'classic_index'
   return undefined
 }
@@ -85,6 +87,7 @@ export function sectorTypeShort(type: string | null | undefined, id?: string): s
     classic_index: '指数',
     style: '风格',
     region: '地域',
+    custom: '自定义',
   }
   return shorts[resolved.toLowerCase()] ?? fmtSectorType(resolved)
 }

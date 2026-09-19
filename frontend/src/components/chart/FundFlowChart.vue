@@ -3,6 +3,7 @@ import * as echarts from 'echarts'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChartEmptyState from '@/components/chart/ChartEmptyState.vue'
+import { NButton } from 'naive-ui'
 import { useChartTheme } from '@/composables/useChartTheme'
 import { useThemeStore } from '@/stores/themeStore'
 import { useBoardStore } from '@/stores/boardStore'
@@ -60,20 +61,69 @@ const showPriceOverlay = computed(() => {
 })
 
 const showGrayOverlay = computed(() => {
-  if (props.mode !== 'stock') return false
   const solo = soloSeries.value
   if (!solo) return false
   return Boolean(solo.gray_values?.some((value) => value != null))
 })
 
+const isSoloMode = computed(() => Boolean(highlighted.value && soloSeries.value))
+
+const soloOverlayActive = computed(() => isSoloMode.value && (showPriceOverlay.value || showGrayOverlay.value))
+
+const soloLegend = computed(() => {
+  if (!soloOverlayActive.value || !soloSeries.value) return []
+  const mainColor = seriesColor(seriesList.value, soloSeries.value, props.mode)
+  const items = [{ label: '明盘', color: mainColor, dashed: false }]
+  if (showGrayOverlay.value) {
+    items.push({
+      label: '暗盘',
+      color: themeStore.isDark ? '#c084fc' : '#9333ea',
+      dashed: false,
+    })
+  }
+  if (showPriceOverlay.value) {
+    const hasAvg = Boolean(soloSeries.value.avg_price_values?.some((value) => value != null))
+    if (props.mode === 'stock' && hasAvg) {
+      items.push({
+        label: '均价',
+        color: themeStore.isDark ? '#60a5fa' : '#2563eb',
+        dashed: false,
+      })
+    }
+    items.push({
+      label: props.mode === 'sector' ? '指数' : '股价',
+      color: themeStore.isDark ? '#94a3b8' : '#64748b',
+      dashed: true,
+    })
+  }
+  return items
+})
+
+function exitSolo() {
+  if (props.mode === 'sector') {
+    highlightedSector.value = null
+  } else {
+    highlightedStock.value = null
+  }
+}
+
 const PRICE_SERIES_PREFIX = '__price__:'
 const AVG_PRICE_SERIES_PREFIX = '__avg_price__:'
 const GRAY_SERIES_PREFIX = '__gray__:'
 
-/** 全部曲线都展示末端标签的上限；超出后只展示 Top-K，避免 shiftY 把标签挤离曲线 */
+/** 不超过该条数：全部展示末端标签，仅靠 shiftY 错开 */
+const END_LABEL_SHOW_ALL_MAX = 8
+/** 超过 SHOW_ALL 后，中等密度曲线的标签上限 */
 const END_LABEL_ALL_MAX = 15
-const END_LABEL_TOP_K = 12
-const END_LABEL_LAYOUT = { hideOverlap: false }
+const END_LABEL_TOP_K = 10
+/** 密集场景下，末值相差小于该值（亿）时只保留更重要的一条 */
+const END_LABEL_MIN_GAP_YI = 0.55
+
+function endLabelLayoutFor(seriesCount: number) {
+  return seriesCount <= END_LABEL_SHOW_ALL_MAX
+    ? { hideOverlap: false, moveOverlap: 'shiftY' as const }
+    : { hideOverlap: true, moveOverlap: 'shiftY' as const }
+}
 
 const hasChartData = computed(() => {
   const tl = sourceTimeline.value || []
@@ -175,21 +225,45 @@ function seriesLastYi(item: FlowSeries, tl: string[]): number | null {
   return null
 }
 
+function pickSpacedEndLabelIds(
+  renderList: FlowSeries[],
+  tl: string[],
+  maxCount: number,
+): Set<string> {
+  const ranked = [...renderList]
+    .map((series) => ({ id: series.id, lastYi: seriesLastYi(series, tl) }))
+    .filter(
+      (item): item is { id: string; lastYi: number } =>
+        item.lastYi != null && Number.isFinite(item.lastYi),
+    )
+    .sort((a, b) => Math.abs(b.lastYi) - Math.abs(a.lastYi))
+
+  const picked: Array<{ id: string; lastYi: number }> = []
+  for (const item of ranked) {
+    if (picked.length >= maxCount) break
+    const crowded = picked.some(
+      (other) => Math.abs(other.lastYi - item.lastYi) < END_LABEL_MIN_GAP_YI,
+    )
+    if (crowded) continue
+    picked.push(item)
+  }
+  return new Set(picked.map((item) => item.id))
+}
+
 function resolveEndLabelIds(
   renderList: FlowSeries[],
   hl: string | null,
   tl: string[],
 ): Set<string> {
   if (hl) return new Set([hl])
-  if (renderList.length <= END_LABEL_ALL_MAX) {
-    return new Set(renderList.map((s) => s.id))
+  if (renderList.length <= END_LABEL_SHOW_ALL_MAX) {
+    return new Set(renderList.map((series) => series.id))
   }
-  return new Set(
-    [...renderList]
-      .sort((a, b) => Math.abs(seriesLastYi(b, tl) ?? 0) - Math.abs(seriesLastYi(a, tl) ?? 0))
-      .slice(0, END_LABEL_TOP_K)
-      .map((s) => s.id),
-  )
+  const maxCount =
+    renderList.length <= END_LABEL_ALL_MAX
+      ? Math.min(10, renderList.length)
+      : END_LABEL_TOP_K
+  return pickSpacedEndLabelIds(renderList, tl, maxCount)
 }
 
 /** Solo + 价格叠加时，资金轴必须按「亿」独立定标，否则会被指数/股价（千级）压成平线。 */
@@ -432,7 +506,8 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[], soloOn
   const renderList = soloOnly && hl ? list.filter((s) => s.id === hl) : list
   const endLabelIds = resolveEndLabelIds(renderList, hl, tl)
   const endLabelCount = hl ? 1 : endLabelIds.size
-  const gridRight = Math.max(132, Math.min(220, 88 + endLabelCount * 13))
+  const gridRight = Math.max(136, Math.min(248, 92 + endLabelCount * 15))
+  const labelLayout = endLabelLayoutFor(renderList.length)
 
   const series = renderList.map((s) => {
     const active = !hl || hl === s.id
@@ -468,7 +543,7 @@ function buildSeries(list: FlowSeries[], hl: string | null, tl: string[], soloOn
         showEndLabel
           ? endLabelStyle(color, hl === s.id, list, lastYi)
           : { show: false },
-      labelLayout: END_LABEL_LAYOUT,
+      labelLayout,
     }
   })
 
@@ -531,7 +606,7 @@ function buildOverlayPriceSeries(
       padding: [2, 5, 2, 5],
       borderRadius: 4,
     },
-    labelLayout: END_LABEL_LAYOUT,
+    labelLayout: endLabelLayoutFor(1),
   }
 }
 
@@ -592,7 +667,7 @@ function buildGrayOverlaySeries(item: FlowSeries, tl: string[]): echarts.SeriesO
       padding: [2, 5, 2, 5],
       borderRadius: 4,
     },
-    labelLayout: END_LABEL_LAYOUT,
+    labelLayout: endLabelLayoutFor(1),
   }
 }
 
@@ -812,6 +887,21 @@ defineExpose({ renderChart, resizeChart })
 
 <template>
   <section class="panel-card flex min-h-0 flex-1 flex-col p-2.5">
+    <div v-if="soloOverlayActive" class="solo-toolbar">
+      <div class="solo-legend">
+        <span v-for="item in soloLegend" :key="item.label" class="solo-legend-item">
+          <span
+            class="solo-legend-line"
+            :class="{ dashed: item.dashed }"
+            :style="item.dashed ? { borderColor: item.color } : { background: item.color }"
+          />
+          {{ item.label }}
+        </span>
+      </div>
+      <NButton size="tiny" quaternary @click="exitSolo">
+        {{ mode === 'sector' ? '返回多板块' : '返回多股' }}
+      </NButton>
+    </div>
     <div class="relative min-h-[420px] flex-1 w-full">
       <div
         ref="chartEl"
@@ -827,3 +917,42 @@ defineExpose({ renderChart, resizeChart })
     </div>
   </section>
 </template>
+
+<style scoped>
+.solo-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 0 2px;
+}
+
+.solo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.solo-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.solo-legend-line {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.solo-legend-line.dashed {
+  background: transparent !important;
+  border-top: 2px dashed currentColor;
+  height: 0;
+  color: inherit;
+}
+</style>
