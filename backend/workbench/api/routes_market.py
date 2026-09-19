@@ -1137,15 +1137,22 @@ def create_sector_router() -> APIRouter:
     @router.get("/{sector_id}/breadth", response_model=SectorBreadthResponse)
     def sector_breadth(
         sector_id: str,
+        request: Request,
         trade_date: date = Query(alias="date"),
         minute: str = Query(default="09:31"),
         meta: MetaStore = Depends(get_meta_store),
         hot: HotStore = Depends(get_hot_store),
     ) -> SectorBreadthResponse:
+        quote_client = None
+        try:
+            quote_client = get_hot_enhanced_client(request)
+        except (RuntimeError, OSError, ValueError, TypeError):
+            quote_client = None
         return SectorQueryService(meta, hot).member_breadth(
             sector_id,
             trade_date=trade_date.isoformat(),
             minute=minute,
+            quote_client=quote_client,
         )
 
     return router

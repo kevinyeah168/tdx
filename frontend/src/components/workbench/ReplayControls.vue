@@ -26,7 +26,7 @@ function isDateDisabled(ts: number): boolean {
   return !selectableDates.value.includes(d)
 }
 
-async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
+async function loadMinutes(tradeDate?: string, opts?: { resetToLatest?: boolean }) {
   const date = tradeDate || replayStore.tradeDate
   if (!shouldFetchMarketDataForDate(date)) {
     minuteOptions.value = []
@@ -52,11 +52,11 @@ async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
       '09:31'
     const isToday = date === todayTradeDate()
     replayStore.mode = isToday ? 'live' : 'replay'
-    if (opts?.pinMinute || replayStore.mode === 'replay') {
-      if (!minuteOptions.value.some((item) => item.value === replayStore.minute)) {
-        replayStore.minute = latest
-      }
-    } else {
+    const shouldUseLatest =
+      opts?.resetToLatest === true ||
+      replayStore.mode === 'live' ||
+      !minuteOptions.value.some((item) => item.value === replayStore.minute)
+    if (shouldUseLatest) {
       replayStore.minute = latest
     }
   } catch {
@@ -71,7 +71,7 @@ async function loadMinutes(tradeDate?: string, opts?: { pinMinute?: boolean }) {
 async function onDateChange(date: string | null) {
   if (!date || !isWeekdayDate(date) || !selectableDates.value.includes(date)) return
   replayStore.tradeDate = date
-  await loadMinutes(date)
+  await loadMinutes(date, { resetToLatest: true })
 }
 
 async function setLive() {
@@ -100,7 +100,7 @@ onBeforeUnmount(() => {
 watch(
   () => replayStore.tradeDate,
   (date) => {
-    void loadMinutes(date)
+    void loadMinutes(date, { resetToLatest: true })
   },
   { immediate: true },
 )

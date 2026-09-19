@@ -9,14 +9,16 @@ import {
   NSpin,
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
-import { computed, h, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref } from 'vue'
+
+import { CATALOG_REFRESH_MS } from '@/constants/refresh'
 
 import MemberListDrawer, { type MemberListKind } from '@/components/workbench/MemberListDrawer.vue'
 import SectorFundChart from '@/components/workbench/SectorFundChart.vue'
 import SectorHeader, { type StatKind } from '@/components/workbench/SectorHeader.vue'
 import SessionSkeleton from '@/components/workbench/SessionSkeleton.vue'
 import { useSectorStore, type SectorTypeFilter } from '@/stores/sectorStore'
-import { fmtMoneyCompact, fmtPct, chgTone, toneClass } from '@/utils/format'
+import { fmtMoneyCompact, fmtNetRatio, fmtPct, chgTone, toneClass } from '@/utils/format'
 import { todayTradeDate } from '@/utils/tradeDate'
 import type { SectorMemberRankItem } from '@/api/sectors'
 
@@ -29,6 +31,7 @@ const sectorStore = useSectorStore()
 const {
   selected,
   filteredItems,
+  importedFilteredItems,
   fundFlow,
   memberRanks,
   breadth,
@@ -46,27 +49,49 @@ const quickCreateOpen = ref(false)
 const newGroupName = ref('')
 const creatingGroup = ref(false)
 
-const drawerTitle = computed(() => {
-  const map: Record<MemberListKind, string> = {
-    limit_up: '涨停个股',
-    limit_down: '跌停个股',
-    up: '上涨个股',
-    down: '下跌个股',
-  }
-  return drawerKind.value ? map[drawerKind.value] : ''
-})
-
-const drawerItems = computed((): SectorMemberRankItem[] => {
-  if (!drawerKind.value || !breadth.value) return []
-  return breadth.value[drawerKind.value] ?? []
-})
-
 const chartTitle = computed(() => {
-  if (!selected.value) return '主力净额分时'
-  return `${selected.value.name} · 主力净额`
+  if (!selected.value) return '明盘净额分时'
+  return `${selected.value.name} · 明盘净额`
 })
 
 const isCustomGroup = computed(() => sectorStore.activeGroupId !== 'all')
+
+const sidebarSections = computed(() => {
+  const sections: Array<{ key: string; title: string; items: typeof filteredItems.value }> = []
+  if (importedFilteredItems.value.length) {
+    sections.push({
+      key: 'imported',
+      title: `导入板块 (${importedFilteredItems.value.length})`,
+      items: importedFilteredItems.value,
+    })
+  }
+  if (filteredItems.value.length) {
+    const title = isCustomGroup.value
+      ? `${activeGroup.value?.name ?? '分组'} (${filteredItems.value.length})`
+      : `板块 (${filteredItems.value.length})`
+    sections.push({
+      key: 'main',
+      title,
+      items: filteredItems.value,
+    })
+  }
+  return sections
+})
+
+let importedCatalogTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  importedCatalogTimer = window.setInterval(() => {
+    void sectorStore.refreshImportedSectorsIfChanged()
+  }, CATALOG_REFRESH_MS)
+})
+
+onUnmounted(() => {
+  if (importedCatalogTimer != null) {
+    window.clearInterval(importedCatalogTimer)
+    importedCatalogTimer = null
+  }
+})
 
 const groupDropdownOptions = computed(() =>
   groups.value.map((group) => ({
@@ -86,41 +111,89 @@ const typeTabs: { key: SectorTypeFilter; label: string }[] = [
   { key: 'concept', label: '概念' },
 ]
 
+function renderMemberMetric(
+  value: number | null | undefined,
+  opts?: { bold?: boolean; pct?: boolean; ratio?: boolean },
+) {
+  const text = opts?.pct ? fmtPct(value) : opts?.ratio ? fmtNetRatio(value) : fmtMoneyCompact(value)
+  return h(
+    'span',
+    {
+      class: [
+        'num money-cell whitespace-nowrap text-[10px]',
+        opts?.bold ? 'font-600' : '',
+        toneClass(chgTone(value)),
+      ].join(' '),
+    },
+    text,
+  )
+}
+
 const memberColumns = [
   {
     title: '个股',
     key: 'name',
-    minWidth: 88,
+    width: 68,
     ellipsis: { tooltip: true },
-    render: (row: { symbol: string; name: string }) =>
-      h('div', { class: 'min-w-0' }, [
-        h('div', { class: 'truncate text-xs font-500' }, row.name),
-        h('div', { class: 'num text-[10px] text-[var(--muted)]' }, row.symbol),
-      ]),
+    render: (row: SectorMemberRankItem) =>
+      h(
+        'div',
+        { class: 'member-row-name truncate text-[11px] font-500', title: `${row.name} ${row.symbol}` },
+        row.name,
+      ),
   },
   {
-    title: '主力',
+    title: '明盘',
     key: 'main_cumulative',
-    width: 92,
+    width: 64,
     align: 'right' as const,
-    render: (row: { main_cumulative: number }) =>
-      h(
-        'span',
-        { class: `num money-cell text-[11px] font-600 ${toneClass(chgTone(row.main_cumulative))}` },
-        fmtMoneyCompact(row.main_cumulative),
-      ),
+    className: 'member-col-main',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) =>
+      Number(a.main_cumulative || 0) - Number(b.main_cumulative || 0),
+    defaultSortOrder: 'descend' as const,
+    render: (row: SectorMemberRankItem) => renderMemberMetric(row.main_cumulative, { bold: true }),
   },
   {
-    title: '涨跌',
-    key: 'change_pct',
-    width: 58,
+    title: '暗盘',
+    key: 'gray_cumulative',
+    width: 64,
     align: 'right' as const,
-    render: (row: { change_pct: number }) =>
-      h(
-        'span',
-        { class: `num money-cell text-[11px] ${toneClass(chgTone(row.change_pct))}` },
-        fmtPct(row.change_pct),
-      ),
+    className: 'member-col-gray',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) => {
+      const av = a.gray_cumulative
+      const bv = b.gray_cumulative
+      if (av == null && bv == null) return 0
+      if (av == null) return -1
+      if (bv == null) return 1
+      return av - bv
+    },
+    render: (row: SectorMemberRankItem) => renderMemberMetric(row.gray_cumulative, { bold: true }),
+  },
+  {
+    title: '净比',
+    key: 'main_net_ratio',
+    width: 44,
+    align: 'right' as const,
+    className: 'member-col-ratio',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) => {
+      const av = a.main_net_ratio
+      const bv = b.main_net_ratio
+      if (av == null && bv == null) return 0
+      if (av == null) return -1
+      if (bv == null) return 1
+      return av - bv
+    },
+    render: (row: SectorMemberRankItem) => renderMemberMetric(row.main_net_ratio, { ratio: true }),
+  },
+  {
+    title: '涨幅',
+    key: 'change_pct',
+    width: 50,
+    align: 'right' as const,
+    className: 'member-col-change',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) =>
+      Number(a.change_pct || 0) - Number(b.change_pct || 0),
+    render: (row: SectorMemberRankItem) => renderMemberMetric(row.change_pct, { pct: true }),
   },
 ]
 
@@ -217,42 +290,47 @@ function removeFromActiveGroup(sectorId: string) {
       <div class="sector-sidebar-body">
         <NSpin :show="sectorStore.loading" class="sector-list-spin">
           <div class="sector-list">
-            <div
-              v-for="sector in filteredItems"
-              :key="sector.sector_id"
-              class="sector-item-wrap"
-            >
-              <button
-                type="button"
-                class="sector-item"
-                :class="{ active: sector.sector_id === sectorStore.selectedId }"
-                @click="sectorStore.selectSector(sector.sector_id)"
+            <template v-for="section in sidebarSections" :key="section.key">
+              <div class="sector-list-section-head">
+                <span class="sector-list-section-title">{{ section.title }}</span>
+              </div>
+              <div
+                v-for="sector in section.items"
+                :key="`${section.key}-${sector.sector_id}`"
+                class="sector-item-wrap"
               >
-                <span class="truncate text-sm font-500">{{ sector.name }}</span>
-                <span class="num text-[10px] text-[var(--muted)]">
-                  {{ sector.sector_id }} · {{ sector.member_count }} 成分
-                </span>
-              </button>
-              <button
-                v-if="isCustomGroup"
-                type="button"
-                class="sector-remove"
-                title="从分组移除"
-                @click.stop="removeFromActiveGroup(sector.sector_id)"
-              >
-                ×
-              </button>
-              <NDropdown
-                v-else-if="groups.length && sector.sector_id === sectorStore.selectedId"
-                trigger="click"
-                :options="groupDropdownOptions"
-                @select="addSelectedToGroup"
-              >
-                <button type="button" class="sector-add-group" title="加入分组">+</button>
-              </NDropdown>
-            </div>
+                <button
+                  type="button"
+                  class="sector-item"
+                  :class="{ active: sector.sector_id === sectorStore.selectedId }"
+                  @click="sectorStore.selectSector(sector.sector_id)"
+                >
+                  <span class="truncate text-sm font-500">{{ sector.name }}</span>
+                  <span class="num text-[10px] text-[var(--muted)]">
+                    {{ sector.sector_id }} · {{ sector.member_count }} 成分
+                  </span>
+                </button>
+                <button
+                  v-if="isCustomGroup && section.key === 'main'"
+                  type="button"
+                  class="sector-remove"
+                  title="从分组移除"
+                  @click.stop="removeFromActiveGroup(sector.sector_id)"
+                >
+                  ×
+                </button>
+                <NDropdown
+                  v-else-if="groups.length && sector.sector_id === sectorStore.selectedId"
+                  trigger="click"
+                  :options="groupDropdownOptions"
+                  @select="addSelectedToGroup"
+                >
+                  <button type="button" class="sector-add-group" title="加入分组">+</button>
+                </NDropdown>
+              </div>
+            </template>
             <NEmpty
-              v-if="!filteredItems.length"
+              v-if="!sidebarSections.length"
               class="py-8"
               :description="isCustomGroup ? '分组为空，请搜索添加板块' : '无匹配板块'"
               size="small"
@@ -282,9 +360,9 @@ function removeFromActiveGroup(sectorId: string) {
 
       <MemberListDrawer
         v-model:show="drawerOpen"
-        :kind="drawerKind"
-        :title="`${selected?.name ?? ''} · ${drawerTitle}`"
-        :items="drawerItems"
+        v-model:kind="drawerKind"
+        :sector-name="selected?.name ?? ''"
+        :breadth="breadth"
         @open-stock="emit('openStock', $event)"
       />
 
@@ -321,13 +399,14 @@ function removeFromActiveGroup(sectorId: string) {
           <div class="members-head">
             <p class="m-0 text-sm font-600">成分股</p>
             <p class="mt-0.5 text-[10px] text-[var(--muted)]">
-              主力累计降序 · 共 {{ memberRanks.length || selected?.member_count || 0 }} 只
+              点击表头排序 · 共 {{ memberRanks.length || selected?.member_count || 0 }} 只
             </p>
           </div>
           <div class="members-body">
             <NSpin :show="membersLoading && hasSessionData" class="members-spin">
               <NDataTable
                 v-if="memberRanks.length"
+                :key="sectorStore.selectedId"
                 :columns="memberColumns"
                 :data="memberRanks"
                 :bordered="false"
@@ -467,6 +546,26 @@ function removeFromActiveGroup(sectorId: string) {
   padding: 4px;
 }
 
+.sector-list-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 2px 0 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+}
+
+.sector-list-section-head:not(:first-child) {
+  margin-top: 8px;
+}
+
+.sector-list-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .sector-item-wrap {
   display: flex;
   align-items: stretch;
@@ -526,7 +625,7 @@ function removeFromActiveGroup(sectorId: string) {
   display: grid;
   flex: 1;
   min-height: 0;
-  grid-template-columns: minmax(0, 3fr) minmax(220px, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(340px, 1.1fr);
   overflow: hidden;
 }
 
@@ -614,6 +713,59 @@ function removeFromActiveGroup(sectorId: string) {
 .members-table {
   flex: 1;
   min-height: 200px;
+}
+
+:deep(.members-table .n-data-table-table) {
+  table-layout: fixed;
+  width: 100%;
+}
+
+:deep(.members-table .n-data-table-th),
+:deep(.members-table .n-data-table-td) {
+  padding: 5px 3px !important;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+:deep(.members-table .n-data-table-th) {
+  font-weight: 600;
+}
+
+:deep(.members-table .n-data-table-th__title-wrapper),
+:deep(.members-table .n-data-table-th__title),
+:deep(.members-table .n-data-table-sorter) {
+  white-space: nowrap !important;
+  flex-wrap: nowrap !important;
+}
+
+:deep(.members-table .n-data-table-th:first-child),
+:deep(.members-table .n-data-table-td:first-child) {
+  padding-right: 10px !important;
+}
+
+:deep(.members-table .member-col-main) {
+  padding-left: 8px !important;
+  padding-right: 14px !important;
+}
+
+:deep(.members-table .member-col-gray) {
+  padding-left: 8px !important;
+  padding-right: 14px !important;
+}
+
+:deep(.members-table .member-col-ratio) {
+  padding-left: 6px !important;
+  padding-right: 12px !important;
+}
+
+:deep(.members-table .member-col-change) {
+  padding-left: 6px !important;
+  padding-right: 8px !important;
+}
+
+:deep(.member-row-name) {
+  min-width: 0;
+  line-height: 1.25;
 }
 
 .manage-block {

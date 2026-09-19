@@ -43,6 +43,7 @@ import {
   shouldFetchMarketDataForDate,
 } from '@/utils/tradingSession'
 import { todayTradeDate } from '@/utils/tradeDate'
+import { computeAvgPriceValues } from '@/utils/avgPrice'
 import { legacySectorSearchHint, isClassicIndexCodeQuery } from '@/utils/sectorCodeAliases'
 import { inferSectorTypeFromId, resolveSectorType } from '@/utils/format'
 
@@ -243,23 +244,6 @@ function computeMainNetRatio(
     return null
   }
   return Math.round((mainCum / freeFloatMarketCap) * 100 * 10000) / 10000
-}
-
-function computeAvgPriceValues(
-  closes: (number | null)[],
-  amountDeltas: (number | null)[],
-): (number | null)[] {
-  let cumAmount = 0
-  let cumVolume = 0
-  return closes.map((close, index) => {
-    const amountDelta = amountDeltas[index]
-    if (close != null && close > 0 && amountDelta != null && amountDelta > 0) {
-      cumAmount += amountDelta
-      cumVolume += amountDelta / close
-    }
-    if (cumVolume <= 0) return null
-    return cumAmount / cumVolume
-  })
 }
 
 function computeIndexPriceValues(

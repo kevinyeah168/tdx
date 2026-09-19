@@ -477,6 +477,19 @@ export const useBoardStore = defineStore('board', () => {
     }
   }
 
+  function clearBoardError() {
+    if (board.value.error) {
+      board.value = { ...board.value, error: null }
+    }
+  }
+
+  function syncReplayDates(tradeDate: string, minute: string | null) {
+    sectorViewDate.value = tradeDate
+    stockViewDate.value = tradeDate
+    replayMinute.value = minute
+    clearBoardError()
+  }
+
   async function setReplayContext(tradeDate: string, minute: string | null) {
     // Top-bar global date: sync both panels only when the global date actually changes.
     const sectorChanged = sectorViewDate.value !== tradeDate
@@ -809,6 +822,8 @@ export const useBoardStore = defineStore('board', () => {
     setSectorSourceMode,
     setStockSourceMode,
     setReplayContext,
+    syncReplayDates,
+    clearBoardError,
     syncReplayMinute,
     isHistoricalSectorView,
     isHistoricalStockView,

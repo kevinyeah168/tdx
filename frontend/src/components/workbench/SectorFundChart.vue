@@ -75,7 +75,7 @@ function renderChart() {
     },
     series: [
       {
-        name: '主力累计',
+        name: '明盘累计',
         type: 'line',
         smooth: 0.2,
         showSymbol: false,

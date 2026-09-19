@@ -6,6 +6,7 @@ import {
   NDatePicker,
   NEmpty,
   NInput,
+  NScrollbar,
   NSelect,
   NSpin,
   NTag,
@@ -25,6 +26,8 @@ import {
   type CycleReplayEntityMode,
 } from '@/stores/cycleReplayStore'
 import type { SectorSummary } from '@/types/api'
+import type { FlowSeries } from '@/types/board'
+import { seriesColor } from '@/utils/chartColors'
 import {
   CYCLE_REPLAY_RANGE_PRESETS,
   type CycleReplayRangePresetKey,
@@ -69,6 +72,20 @@ const chartTitle = computed(() => {
   return store.entityMode === 'sector'
     ? `板块主力累计趋势 (${count})`
     : `个股主力累计趋势 (${count})`
+})
+
+const selectedRows = computed(() => {
+  const palette: FlowSeries[] = store.selected.map((entity) => ({
+    id: entity.id,
+    name: entity.name,
+    cum_main: 0,
+    values: [],
+  }))
+  const kind = store.entityMode === 'stock' ? 'stock' : 'sector'
+  return store.selected.map((entity, index) => ({
+    ...entity,
+    color: seriesColor(palette, palette[index]!, kind),
+  }))
 })
 
 function isDateDisabled(ts: number): boolean {
@@ -311,30 +328,43 @@ onBeforeUnmount(() => {
 
         <section class="cycle-sidebar-section cycle-selected-section">
           <div class="cycle-selected-header">
-            <h3 class="cycle-sidebar-title">已选 {{ store.selected.length }}/{{ maxLabel }}</h3>
-            <NButton
+            <div class="cycle-selected-heading">
+              <h3 class="cycle-sidebar-title">已选</h3>
+              <span class="cycle-selected-count">{{ store.selected.length }}/{{ maxLabel }}</span>
+            </div>
+            <button
               v-if="store.selected.length"
-              size="tiny"
-              quaternary
+              type="button"
+              class="cycle-clear-btn"
               @click="store.clearSelection"
             >
               清空
-            </NButton>
+            </button>
           </div>
           <div v-if="!store.selected.length" class="cycle-empty-hint">
             选择分组或搜索添加板块/个股
           </div>
-          <div v-else class="cycle-selected-tags">
-            <NTag
-              v-for="item in store.selected"
-              :key="item.id"
-              closable
-              size="small"
-              @close="store.removeEntity(item.id)"
-            >
-              {{ item.name }}
-            </NTag>
-          </div>
+          <NScrollbar v-else class="cycle-selected-scroll" trigger="none">
+            <ul class="cycle-selected-list">
+              <li
+                v-for="item in selectedRows"
+                :key="item.id"
+                class="cycle-selected-item"
+              >
+                <span class="cycle-selected-dot" :style="{ backgroundColor: item.color }" />
+                <span class="cycle-selected-name" :title="item.name">{{ item.name }}</span>
+                <span class="cycle-selected-id num">{{ item.id }}</span>
+                <button
+                  type="button"
+                  class="cycle-selected-remove"
+                  title="移除"
+                  @click="store.removeEntity(item.id)"
+                >
+                  ×
+                </button>
+              </li>
+            </ul>
+          </NScrollbar>
         </section>
       </aside>
 
@@ -458,7 +488,7 @@ onBeforeUnmount(() => {
 
 .cycle-replay-body {
   display: grid;
-  grid-template-columns: minmax(220px, 252px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 272px) minmax(0, 1fr);
   gap: 8px;
   flex: 1;
   min-height: 0;
@@ -468,16 +498,18 @@ onBeforeUnmount(() => {
 .cycle-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
   padding: 10px;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .cycle-sidebar-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-shrink: 0;
+  padding-bottom: 10px;
 }
 
 .cycle-sidebar-title {
@@ -526,6 +558,11 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 10px;
+  padding-bottom: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 
 .cycle-selected-header {
@@ -533,22 +570,123 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
 }
 
-.cycle-selected-tags {
+.cycle-selected-heading {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  align-content: flex-start;
-  max-height: 148px;
-  overflow: auto;
-  padding-right: 2px;
+  min-width: 0;
+}
+
+.cycle-selected-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  white-space: nowrap;
+}
+
+.cycle-clear-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cycle-clear-btn:hover {
+  color: var(--danger, #dc2626);
+}
+
+.cycle-selected-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.cycle-selected-scroll :deep(.n-scrollbar-content) {
+  padding-right: 4px;
+}
+
+.cycle-selected-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cycle-selected-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto 20px;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 4px 0 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition: background-color 0.12s ease;
+}
+
+.cycle-selected-item:hover {
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel));
+}
+
+.cycle-selected-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cycle-selected-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.cycle-selected-id {
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cycle-selected-remove {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.cycle-selected-remove:hover {
+  color: var(--danger, #dc2626);
+  background: color-mix(in srgb, var(--danger, #dc2626) 10%, transparent);
 }
 
 .cycle-empty-hint {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.5;
+  padding: 4px 2px 0;
 }
 
 .cycle-main {

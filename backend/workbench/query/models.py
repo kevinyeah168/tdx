@@ -63,6 +63,7 @@ class SectorMemberRankItem(BaseModel):
     symbol: str
     name: str
     main_cumulative: float
+    gray_cumulative: float | None = None
     change_pct: float
     free_float_market_cap: float | None = None
     main_net_ratio: float | None = None

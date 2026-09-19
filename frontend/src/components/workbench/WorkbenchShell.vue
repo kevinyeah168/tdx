@@ -51,6 +51,19 @@ const coverageLabel = computed(() => {
   return `覆盖率 ${fmtPct(pct).replace('+', '')}`
 })
 
+const shellError = computed(() => {
+  switch (activeView.value) {
+    case 'home':
+      return boardStore.board.error || marketStore.error || ''
+    case 'stock':
+      return stockStore.error || ''
+    case 'sectors':
+      return sectorStore.error || sectorStore.fundError || ''
+    default:
+      return marketStore.error || ''
+  }
+})
+
 function onSearch(symbol: string) {
   selectedStock.value = symbol
   activeView.value = 'stock'
@@ -65,9 +78,17 @@ function onOpenSettings() {
   activeView.value = 'settings'
 }
 
+function replayMinuteForBoard(): string | null {
+  return replayStore.mode === 'live' ? null : replayStore.minute
+}
+
 watch(activeView, (view) => {
+  if (view === 'home') {
+    void boardStore.setReplayContext(replayStore.tradeDate, replayMinuteForBoard())
+  }
   if (view === 'sectors') {
     void sectorStore.loadGroups()
+    void sectorStore.loadImportedSectors()
     // 开盘前 bootstrap 可能判定无数据；进入板块页时重试，避免一直卡在「尚未开盘」
     void sectorStore.reloadForDate()
   }
@@ -104,6 +125,12 @@ watch(
     stockStore.setReplayContext(tradeDate, minute)
     marketStore.tradeDate = tradeDate
     void marketStore.loadOverview()
+    const boardMinute = replayStore.mode === 'live' ? null : minute
+    if (activeView.value === 'home') {
+      void boardStore.setReplayContext(tradeDate, boardMinute)
+    } else {
+      boardStore.syncReplayDates(tradeDate, boardMinute)
+    }
   },
 )
 
@@ -179,8 +206,8 @@ onMounted(async () => {
       <SettingsPage v-else-if="activeView === 'settings'" />
     </main>
 
-    <p v-if="marketStore.error || sectorStore.error || sectorStore.fundError || stockStore.error || boardStore.board.error" class="workbench-error">
-      {{ marketStore.error || sectorStore.error || sectorStore.fundError || stockStore.error || boardStore.board.error }}
+    <p v-if="shellError" class="workbench-error">
+      {{ shellError }}
     </p>
   </div>
 </template>

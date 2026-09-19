@@ -101,7 +101,7 @@ const chartSub = computed(() => {
 const soloLegend = [
   { label: '明盘', color: '#2563eb' },
   { label: '暗盘', color: '#9333ea' },
-  { label: '均价', color: '#2563eb', dashed: false },
+  { label: '均价', color: '#d97706', dashed: false },
   { label: '价格', color: '#64748b', dashed: true },
 ]
 
@@ -276,8 +276,8 @@ watch(
           </NButton>
         </div>
         <div v-else class="sidebar-actions">
-          <NButton size="tiny" quaternary @click="stockStore.selectTop(5); void stockStore.loadChartData()">
-            选前 5
+          <NButton size="tiny" quaternary @click="stockStore.applyGroupChartSelection()">
+            选 TOP {{ MAX_CHART_STOCKS }}
           </NButton>
           <NButton size="tiny" quaternary @click="stockStore.clearChartSelection()">清空曲线</NButton>
         </div>
@@ -302,7 +302,7 @@ watch(
                   :chart-color="chartColorFor(item)"
                   :focused="highlightedSymbol === item.symbol || stockStore.soloSymbol === item.symbol"
                   @toggle="(checked) => onToggle(item.symbol, checked)"
-                  @focus="stockStore.focusSymbol(item.symbol)"
+                  @focus="onEnterSolo(item.symbol)"
                 />
                 <button
                   v-if="isCustomGroup"

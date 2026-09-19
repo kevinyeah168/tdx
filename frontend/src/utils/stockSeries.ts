@@ -1,24 +1,8 @@
 import type { CurvePoint } from '@/api/sectors'
 import type { StockGrayFlowPoint } from '@/api/stocks'
 import type { FlowSeries } from '@/types/board'
+import { computeAvgPriceValues } from '@/utils/avgPrice'
 import { alignValuesToTradingMinutes, TRADING_MINUTES } from '@/utils/tradingTimeline'
-
-function computeAvgPriceValues(
-  closes: (number | null)[],
-  amountDeltas: (number | null)[],
-): (number | null)[] {
-  let cumAmount = 0
-  let cumVolume = 0
-  return closes.map((close, index) => {
-    const amountDelta = amountDeltas[index]
-    if (close != null && close > 0 && amountDelta != null && amountDelta > 0) {
-      cumAmount += amountDelta
-      cumVolume += amountDelta / close
-    }
-    if (cumVolume <= 0) return null
-    return cumAmount / cumVolume
-  })
-}
 
 function trimArraysToMinute(values: (number | null)[], replayMinute: string): (number | null)[] {
   const cutoff = TRADING_MINUTES.indexOf(replayMinute)

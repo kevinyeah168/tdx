@@ -70,7 +70,7 @@ function onClick(kind: StatKind, value: number) {
         </div>
         <div class="metric-divider" />
         <div class="metric-item">
-          <span class="metric-label">主力累计</span>
+          <span class="metric-label">明盘累计</span>
           <span class="metric-value num" :class="empty ? 'is-empty' : toneClass(chgTone(mainFlow))">
             {{ empty || mainFlow == null ? '—' : fmtMoney(mainFlow) }}
           </span>

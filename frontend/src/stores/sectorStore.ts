@@ -10,6 +10,7 @@ import {
   setActiveSectorGroup,
   type SectorGroup,
 } from '@/api/sectorGroups'
+import { fetchCustomSectors, type CustomSector } from '@/api/customSectors'
 import {
   fetchSectorBreadth,
   fetchSectorFundFlow,
@@ -25,9 +26,28 @@ import { todayTradeDate } from '@/utils/tradeDate'
 
 export type SectorTypeFilter = 'all' | 'industry' | 'concept'
 
+function mapImportedSector(item: CustomSector): SectorSummary {
+  return {
+    sector_id: item.sector_id,
+    name: item.name,
+    sector_type: 'custom',
+    member_count: item.members?.length ?? item.symbols?.length ?? 0,
+  }
+}
+
+function importedSectorSignature(sectorIds: string[]): string {
+  return sectorIds
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .sort()
+    .join(',')
+}
+
 export const useSectorStore = defineStore('sector', {
   state: () => ({
     items: [] as SectorSummary[],
+    importedItems: [] as SectorSummary[],
+    cachedImportedSectorSignature: '' as string,
     selectedId: '' as string,
     typeFilter: 'all' as SectorTypeFilter,
     searchQuery: '' as string,
@@ -48,7 +68,18 @@ export const useSectorStore = defineStore('sector', {
   }),
   getters: {
     selected(state): SectorSummary | null {
-      return state.items.find((item) => item.sector_id === state.selectedId) ?? null
+      return (
+        state.importedItems.find((item) => item.sector_id === state.selectedId) ??
+        state.items.find((item) => item.sector_id === state.selectedId) ??
+        null
+      )
+    },
+    importedFilteredItems(state): SectorSummary[] {
+      const q = state.searchQuery.trim().toLowerCase()
+      if (!q) return state.importedItems
+      return state.importedItems.filter(
+        (item) => item.name.toLowerCase().includes(q) || item.sector_id.includes(q),
+      )
     },
     activeGroup(state): SectorGroup | null {
       if (state.activeGroupId === 'all') return null
@@ -56,7 +87,8 @@ export const useSectorStore = defineStore('sector', {
     },
     filteredItems(state): SectorSummary[] {
       const q = state.searchQuery.trim().toLowerCase()
-      let items = state.items
+      const importedIds = new Set(state.importedItems.map((item) => item.sector_id))
+      let items = state.items.filter((item) => !importedIds.has(item.sector_id))
       if (state.activeGroupId !== 'all') {
         const group = state.groups.find((entry) => entry.id === state.activeGroupId)
         if (!group) return []
@@ -79,6 +111,9 @@ export const useSectorStore = defineStore('sector', {
       if (!points.length) return null
       const last = points[points.length - 1]!
       return last.values.main?.cumulative ?? null
+    },
+    visibleSidebarItems(): SectorSummary[] {
+      return [...this.importedFilteredItems, ...this.filteredItems]
     },
   },
   actions: {
@@ -104,7 +139,7 @@ export const useSectorStore = defineStore('sector', {
     },
     async setActiveGroup(groupId: string) {
       this.activeGroupId = await setActiveSectorGroup(groupId)
-      const visible = this.filteredItems
+      const visible = this.visibleSidebarItems
       if (!visible.some((item) => item.sector_id === this.selectedId)) {
         const next = visible[0]
         if (next) {
@@ -137,7 +172,7 @@ export const useSectorStore = defineStore('sector', {
       const group = await removeSectorGroupMember(groupId, sectorId)
       this.replaceGroup(group)
       if (this.activeGroupId === groupId && this.selectedId === sectorId) {
-        const visible = this.filteredItems
+        const visible = this.visibleSidebarItems
         const next = visible[0]
         if (next) {
           await this.selectSector(next.sector_id)
@@ -153,19 +188,60 @@ export const useSectorStore = defineStore('sector', {
       this.memberRanks = []
       this.fundError = ''
     },
+    async loadImportedSectors() {
+      try {
+        const { items } = await fetchCustomSectors()
+        const directoryItems = items.filter((item) => item.source_type === 'directory')
+        this.importedItems = directoryItems.map(mapImportedSector)
+        this.cachedImportedSectorSignature = importedSectorSignature(
+          directoryItems.map((item) => item.sector_id),
+        )
+      } catch {
+        this.importedItems = []
+        this.cachedImportedSectorSignature = ''
+      }
+    },
+    async refreshImportedSectorsIfChanged() {
+      try {
+        const { items } = await fetchCustomSectors()
+        const signature = importedSectorSignature(
+          items.filter((item) => item.source_type === 'directory').map((item) => item.sector_id),
+        )
+        if (signature === this.cachedImportedSectorSignature) return
+        await this.loadImportedSectors()
+        const visible = this.visibleSidebarItems
+        if (this.selectedId && !visible.some((item) => item.sector_id === this.selectedId)) {
+          const next = visible[0]
+          if (next) {
+            await this.selectSector(next.sector_id)
+          } else {
+            this.selectedId = ''
+          }
+        }
+      } catch {
+        /* background refresh should not surface */
+      }
+    },
     async bootstrap() {
       this.loading = true
       this.error = ''
       try {
         this.tradeDate = todayTradeDate()
-        const [sectorsResponse] = await Promise.all([fetchSectors(), this.loadGroups()])
+        const [sectorsResponse] = await Promise.all([
+          fetchSectors(),
+          this.loadGroups(),
+          this.loadImportedSectors(),
+        ])
         this.items = sectorsResponse.items
-        if (!this.selectedId && this.items.length > 0) {
+        if (!this.selectedId) {
+          const visible = this.visibleSidebarItems
           const preferred =
-            this.filteredItems[0] ??
+            visible[0] ??
             this.items.find((item) => item.name.includes('煤炭')) ??
-            this.items[0]!
-          this.selectedId = preferred.sector_id
+            this.items[0]
+          if (preferred) {
+            this.selectedId = preferred.sector_id
+          }
         }
         await this.resolveSessionForDate(this.tradeDate)
       } catch (error) {
@@ -215,6 +291,7 @@ export const useSectorStore = defineStore('sector', {
       await Promise.all([this.loadFundFlow(), this.loadMemberRanks(), this.loadBreadth()])
     },
     async reloadForDate() {
+      await this.loadImportedSectors()
       await this.resolveSessionForDate(this.tradeDate)
     },
     async selectSector(sectorId: string) {

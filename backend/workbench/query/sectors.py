@@ -59,12 +59,25 @@ class SectorQueryService:
         trade_date: str,
         minute: str,
         limit: int,
-    ) -> tuple[str, list[tuple[str, float, float]]]:
+    ) -> tuple[str, list[tuple[str, float, float, float | None]]]:
         if not symbols:
             return minute, []
         effective_minute = minute
-        rows: list[tuple[str, float, float]] = []
+        rows: list[tuple[str, float, float, float | None]] = []
         with self._hot.connect(readonly=True) as connection:  # type: ignore[union-attr]
+            gray_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_gray_minute'"
+            ).fetchone()
+            gray_join = ""
+            gray_select = "NULL"
+            if gray_table:
+                gray_join = """
+                    LEFT JOIN stock_gray_minute AS gray
+                        ON gray.trade_date = stock.trade_date
+                        AND gray.minute = stock.minute
+                        AND gray.symbol = stock.symbol
+                """
+                gray_select = "gray.dark_cum"
             for candidate in (
                 minute,
                 self._hot.latest_stock_minute(trade_date),  # type: ignore[union-attr]
@@ -75,8 +88,9 @@ class SectorQueryService:
                 placeholders = ",".join("?" for _ in symbols)
                 rows = connection.execute(
                     f"""
-                    SELECT stock.symbol, stock.main_cum, stock.change_pct
+                    SELECT stock.symbol, stock.main_cum, stock.change_pct, {gray_select}
                     FROM stock_minute AS stock
+                    {gray_join}
                     WHERE stock.trade_date = ?
                         AND stock.minute = ?
                         AND stock.symbol IN ({placeholders})
@@ -88,7 +102,15 @@ class SectorQueryService:
                 if rows:
                     effective_minute = str(candidate)
                     break
-        return effective_minute, [(str(row[0]), float(row[1]), float(row[2])) for row in rows]
+        return effective_minute, [
+            (
+                str(row[0]),
+                float(row[1]),
+                float(row[2]),
+                float(row[3]) if row[3] is not None else None,
+            )
+            for row in rows
+        ]
 
     def list_sectors(
         self,
@@ -306,7 +328,7 @@ class SectorQueryService:
             limit=limit,
         )
         if hot_rows:
-            ranked_symbols = [symbol for symbol, _, _ in hot_rows]
+            ranked_symbols = [symbol for symbol, _, _, _ in hot_rows]
             names = self._security_names(ranked_symbols)
             symbol_caps = (
                 build_symbol_free_float_cap_details(quote_client, ranked_symbols)
@@ -318,11 +340,12 @@ class SectorQueryService:
                     symbol=symbol,
                     name=names.get(symbol, symbol),
                     main_cum=main_cum,
+                    gray_cum=gray_cum,
                     change_pct=change_pct,
                     free_cap=symbol_caps[symbol].live if symbol in symbol_caps else None,
                     free_cap_avg=symbol_caps[symbol].avg if symbol in symbol_caps else None,
                 )
-                for symbol, main_cum, change_pct in hot_rows
+                for symbol, main_cum, change_pct, gray_cum in hot_rows
             ]
             return SectorMemberRankResponse(
                 sector_id=sector_id,
@@ -359,6 +382,11 @@ class SectorQueryService:
                         fallback=str(item["symbol"]),
                     ),
                     main_cum=float(item["main_cumulative"]),
+                    gray_cum=(
+                        float(item["gray_cumulative"])
+                        if item.get("gray_cumulative") is not None
+                        else None
+                    ),
                     change_pct=float(item.get("change_pct") or 0.0),
                     free_cap=(
                         symbol_caps[str(item["symbol"])].live
@@ -404,6 +432,7 @@ class SectorQueryService:
         symbol: str,
         name: str,
         main_cum: float,
+        gray_cum: float | None = None,
         change_pct: float,
         free_cap: float | None,
         free_cap_avg: float | None = None,
@@ -418,6 +447,7 @@ class SectorQueryService:
             symbol=symbol,
             name=name,
             main_cumulative=main_cum,
+            gray_cumulative=gray_cum,
             change_pct=change_pct,
             free_float_market_cap=free_cap if free_cap else None,
             main_net_ratio=ratio,
@@ -431,6 +461,7 @@ class SectorQueryService:
         *,
         trade_date: str,
         minute: str,
+        quote_client: object | None = None,
     ) -> SectorBreadthResponse:
         if self._hot is None:
             raise ValueError("hot store is required for member breadth")
@@ -462,30 +493,64 @@ class SectorQueryService:
                 ),
             )
         names = self._security_names(symbols)
+        effective_minute = minute
+        rows: list[tuple[object, ...]] = []
         with self._hot.connect(readonly=True) as connection:
+            gray_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_gray_minute'"
+            ).fetchone()
+            gray_join = ""
+            gray_select = "NULL"
+            if gray_table:
+                gray_join = """
+                    LEFT JOIN stock_gray_minute AS gray
+                        ON gray.trade_date = stock.trade_date
+                        AND gray.minute = stock.minute
+                        AND gray.symbol = stock.symbol
+                """
+                gray_select = "gray.dark_cum"
             placeholders = ",".join("?" for _ in symbols)
-            rows = connection.execute(
-                f"""
-                SELECT stock.symbol, stock.main_cum, stock.change_pct
-                FROM stock_minute AS stock
-                INNER JOIN collection_status AS status
-                    ON status.trade_date = stock.trade_date
-                    AND status.minute = stock.minute
-                    AND status.batch_id = stock.batch_id
-                    AND status.status = 'complete'
-                WHERE stock.trade_date = ?
-                    AND stock.minute = ?
-                    AND stock.symbol IN ({placeholders})
-                ORDER BY stock.change_pct DESC, stock.symbol
-                """,
-                (trade_date, minute, *symbols),
-            ).fetchall()
+            for candidate in (
+                minute,
+                self._hot.latest_complete_minute(trade_date),  # type: ignore[union-attr]
+            ):
+                if not candidate:
+                    continue
+                rows = connection.execute(
+                    f"""
+                    SELECT stock.symbol, stock.main_cum, stock.change_pct, {gray_select}
+                    FROM stock_minute AS stock
+                    INNER JOIN collection_status AS status
+                        ON status.trade_date = stock.trade_date
+                        AND status.minute = stock.minute
+                        AND status.batch_id = stock.batch_id
+                        AND status.status = 'complete'
+                    {gray_join}
+                    WHERE stock.trade_date = ?
+                        AND stock.minute = ?
+                        AND stock.symbol IN ({placeholders})
+                    ORDER BY stock.change_pct DESC, stock.symbol
+                    """,
+                    (trade_date, candidate, *symbols),
+                ).fetchall()
+                if rows:
+                    effective_minute = str(candidate)
+                    break
+        ranked_symbols = [str(row[0]) for row in rows]
+        symbol_caps = (
+            build_symbol_free_float_cap_details(quote_client, ranked_symbols)
+            if quote_client is not None
+            else {}
+        )
         items = [
-            SectorMemberRankItem(
+            self._member_rank_item(
                 symbol=str(row[0]),
                 name=names.get(str(row[0]), str(row[0])),
-                main_cumulative=float(row[1]),
+                main_cum=float(row[1]),
+                gray_cum=float(row[3]) if row[3] is not None else None,
                 change_pct=float(row[2]),
+                free_cap=symbol_caps[str(row[0])].live if str(row[0]) in symbol_caps else None,
+                free_cap_avg=symbol_caps[str(row[0])].avg if str(row[0]) in symbol_caps else None,
             )
             for row in rows
         ]
@@ -506,7 +571,7 @@ class SectorQueryService:
         return SectorBreadthResponse(
             sector_id=sector_id,
             trade_date=trade_date,
-            minute=minute,
+            minute=effective_minute,
             counts=counts,
             limit_up=sorted(limit_up, key=lambda item: item.change_pct, reverse=True),
             limit_down=sorted(limit_down, key=lambda item: item.change_pct),

@@ -29,6 +29,7 @@ export interface SectorMemberRankItem {
   symbol: string
   name: string
   main_cumulative: number
+  gray_cumulative?: number | null
   change_pct: number
   free_float_market_cap?: number | null
   main_net_ratio?: number | null

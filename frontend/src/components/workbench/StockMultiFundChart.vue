@@ -210,7 +210,7 @@ function buildSoloSeries(item: FlowSeries) {
     const avgTipIdx = lastNonNullIndex(avgAligned)
     const avgData = avgAligned.map((value, index) => (index <= avgTipIdx ? value : null))
     const avgLast = avgTipIdx >= 0 ? avgAligned[avgTipIdx] : null
-    const avgColor = themeStore.isDark ? '#60a5fa' : '#2563eb'
+    const avgColor = themeStore.isDark ? '#fbbf24' : '#d97706'
     chartSeries.push({
       id: `__avg__:${item.id}`,
       name: '均价',

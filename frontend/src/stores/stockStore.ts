@@ -29,7 +29,6 @@ import {
 import { todayTradeDate } from '@/utils/tradeDate'
 
 export const MAX_CHART_STOCKS = 60
-export const DEFAULT_CHART_STOCKS = 5
 
 export interface StockListItem {
   symbol: string
@@ -125,12 +124,15 @@ export const useStockStore = defineStore('stock', {
         })
       }
 
-      if (!q) return items
-      return items.filter(
-        (item) =>
-          item.symbol.toLowerCase().includes(q) ||
-          item.name.toLowerCase().includes(q),
-      )
+      if (q) {
+        return items.filter(
+          (item) =>
+            item.symbol.toLowerCase().includes(q) ||
+            item.name.toLowerCase().includes(q),
+        )
+      }
+
+      return items.slice(0, MAX_CHART_STOCKS)
     },
     chartSeries(state): FlowSeries[] {
       const ctx: StockSeriesContext = {
@@ -203,7 +205,20 @@ export const useStockStore = defineStore('stock', {
       }
     },
     async setActiveGroup(groupId: string) {
+      if (this.activeGroupId === groupId) return
       this.activeGroupId = await setActiveStockGroup(groupId)
+      this.searchQuery = ''
+      this.applyGroupChartSelection()
+    },
+    applyGroupChartSelection() {
+      this.soloSymbol = ''
+      const symbols = this.filteredListItems
+        .slice(0, MAX_CHART_STOCKS)
+        .map((item) => item.symbol)
+      this.chartSymbols = symbols
+      this.highlightedSymbol = symbols[0] ?? ''
+      this.chartError = ''
+      void this.loadChartData()
     },
     async createGroup(name: string) {
       const group = await createStockGroup(name)
@@ -304,15 +319,16 @@ export const useStockStore = defineStore('stock', {
         await Promise.all([this.loadMarketList(), this.loadGroups()])
         if (initialSymbol) {
           this.selectForChart(initialSymbol, true)
-        } else if (!this.chartSymbols.length) {
-          this.selectTop(DEFAULT_CHART_STOCKS)
+          await this.loadChartData()
+        } else {
+          this.applyGroupChartSelection()
         }
       } else if (initialSymbol) {
         this.selectForChart(initialSymbol, true)
+        await this.loadChartData()
       }
 
       this.bootstrapped = true
-      await this.loadChartData()
     },
     async enterSolo(symbol: string) {
       const normalized = symbol.toUpperCase()
@@ -387,7 +403,8 @@ export const useStockStore = defineStore('stock', {
       this.selectForChart(normalized, true)
       return normalized
     },
-    selectTop(count: number) {
+    selectTop(count: number = MAX_CHART_STOCKS) {
+      this.soloSymbol = ''
       const symbols = this.filteredListItems
         .slice()
         .sort((a, b) => Number(b.main_cumulative || 0) - Number(a.main_cumulative || 0))
@@ -396,6 +413,7 @@ export const useStockStore = defineStore('stock', {
       this.chartSymbols = symbols
       this.highlightedSymbol = symbols[0] ?? ''
       this.chartError = ''
+      void this.loadChartData()
     },
     clearChartSelection() {
       this.chartSymbols = []
@@ -438,10 +456,11 @@ export const useStockStore = defineStore('stock', {
       this.fundCache = {}
       this.grayCache = {}
       await this.loadMarketList()
-      if (!this.chartSymbols.length && this.filteredListItems.length) {
-        this.selectTop(DEFAULT_CHART_STOCKS)
+      if (this.filteredListItems.length) {
+        this.applyGroupChartSelection()
+      } else {
+        this.clearChartSelection()
       }
-      await this.loadChartData()
     },
   },
 })
