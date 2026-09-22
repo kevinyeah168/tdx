@@ -3,10 +3,14 @@ import FundFlowChart from '@/components/chart/FundFlowChart.vue'
 import FundRankPanel from '@/components/common/FundRankPanel.vue'
 import IntradayDatePicker from '@/components/common/IntradayDatePicker.vue'
 import MarketScopePanel from '@/components/workbench/MarketScopePanel.vue'
-import { NButton, NSelect, NSpin } from 'naive-ui'
+import { ChevronDownOutline } from '@vicons/ionicons5'
+import { NButton, NDropdown, NIcon, NSpin } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 import { useBoardStore } from '@/stores/boardStore'
+import type { SectorGroup } from '@/api/sectorGroups'
+
+const MAX_VISIBLE_SECTOR_GROUPS = 6
 
 const props = defineProps<{
   mode: 'sector' | 'stock'
@@ -28,8 +32,9 @@ const {
   sectorViewDate,
 } = storeToRefs(boardStore)
 
+/** 首页板块日期由顶栏 ReplayControls 统一控制；个股自选模式仍保留独立日期。 */
 const showDatePicker = computed(
-  () => props.mode === 'sector' || stockSourceMode.value !== 'linkage',
+  () => props.mode === 'stock' && stockSourceMode.value !== 'linkage',
 )
 
 const highlightedStockSeries = computed(() => {
@@ -77,17 +82,41 @@ const countLabel = computed(() => {
   return `(${count.value})`
 })
 
-const groupSelectOptions = computed(() =>
-  sectorGroups.value.map((group) => ({
-    label: `${group.name} (${group.sector_ids.length})`,
-    value: group.id,
-  })),
-)
-
-function switchGroup(groupId: string | null) {
-  if (!groupId) return
+function switchGroup(groupId: string) {
   void boardStore.switchSectorGroup(groupId)
 }
+
+function pickOverflowGroup(key: string | number) {
+  switchGroup(String(key))
+}
+
+/** 最多展示 6 个；当前选中若在溢出区则替换最后一个 Tab 以保证可见。 */
+const visibleSectorGroups = computed((): SectorGroup[] => {
+  const groups = sectorGroups.value
+  if (groups.length <= MAX_VISIBLE_SECTOR_GROUPS) return groups
+
+  const activeId = activeSectorGroupId.value
+  const activeIndex = groups.findIndex((group) => group.id === activeId)
+  if (activeIndex < 0 || activeIndex < MAX_VISIBLE_SECTOR_GROUPS) {
+    return groups.slice(0, MAX_VISIBLE_SECTOR_GROUPS)
+  }
+
+  const head = groups.slice(0, MAX_VISIBLE_SECTOR_GROUPS - 1)
+  const active = groups[activeIndex]
+  return active ? [...head, active] : groups.slice(0, MAX_VISIBLE_SECTOR_GROUPS)
+})
+
+const overflowSectorGroups = computed(() => {
+  const visibleIds = new Set(visibleSectorGroups.value.map((group) => group.id))
+  return sectorGroups.value.filter((group) => !visibleIds.has(group.id))
+})
+
+const overflowDropdownOptions = computed(() =>
+  overflowSectorGroups.value.map((group) => ({
+    label: `${group.name} (${group.sector_ids.length})`,
+    key: group.id,
+  })),
+)
 
 const showLoading = computed(() =>
   props.mode === 'stock' ? stockLoading.value : sectorLoading.value,
@@ -101,18 +130,10 @@ const loadingHint = computed(() => {
 
 <template>
   <section class="flex h-full min-h-0 flex-col gap-2">
-    <div class="flex shrink-0 items-center justify-between gap-2 px-1">
-      <div class="flex min-w-0 items-center gap-2">
-        <h2 class="m-0 flex min-w-0 items-center gap-1.5 text-sm font-600 text-[var(--text)]">
+    <div class="panel-header">
+      <div class="panel-header-left">
+        <h2 class="panel-title">
           <span class="truncate">{{ title }}</span>
-          <NSelect
-            v-if="mode === 'sector' && sectorGroups.length"
-            :value="activeSectorGroupId"
-            :options="groupSelectOptions"
-            size="small"
-            class="group-select"
-            @update:value="switchGroup"
-          />
           <span
             v-if="mode === 'stock' && soloStockLabel"
             class="truncate text-[var(--primary)]"
@@ -122,9 +143,43 @@ const loadingHint = computed(() => {
             class="truncate text-[var(--primary)]"
           >· {{ soloSectorLabel }}</span>
         </h2>
-        <span class="shrink-0 text-xs text-[var(--muted)]">{{ countLabel }}</span>
+        <span class="panel-count">{{ countLabel }}</span>
       </div>
-      <div class="flex shrink-0 items-center gap-2">
+
+      <div v-if="mode === 'sector' && sectorGroups.length" class="group-tabs">
+        <button
+          v-for="group in visibleSectorGroups"
+          :key="group.id"
+          type="button"
+          class="group-tab"
+          :class="{ active: activeSectorGroupId === group.id }"
+          :disabled="sectorLoading"
+          :title="group.name"
+          @click="switchGroup(group.id)"
+        >
+          <span class="group-tab-name">{{ group.name }}</span>
+          <span class="group-count">{{ group.sector_ids.length }}</span>
+        </button>
+        <NDropdown
+          v-if="overflowSectorGroups.length"
+          trigger="click"
+          placement="bottom"
+          :options="overflowDropdownOptions"
+          @select="pickOverflowGroup"
+        >
+          <button
+            type="button"
+            class="group-tab group-tab-more"
+            :disabled="sectorLoading"
+          >
+            更多
+            <span class="group-count">{{ overflowSectorGroups.length }}</span>
+            <NIcon :component="ChevronDownOutline" :size="14" />
+          </button>
+        </NDropdown>
+      </div>
+
+      <div class="panel-header-right">
         <NButton v-if="mode === 'sector'" size="tiny" quaternary @click="boardStore.openPicker">
           管理分组
         </NButton>
@@ -155,27 +210,114 @@ const loadingHint = computed(() => {
 </template>
 
 <style scoped>
-.group-select {
-  width: min(188px, 34vw);
-  min-width: 148px;
+.panel-header {
+  display: flex;
   flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 4px;
+}
+
+.panel-header-left {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.panel-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.panel-header-right {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.group-tab {
+  display: inline-flex;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 120px;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.group-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-tab-more {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+.group-tab:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--text);
+}
+
+.group-tab.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.group-tab:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.group-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
 }
 
 .linked-date-hint {
   font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.group-select :deep(.n-base-selection) {
-  --n-height: 26px;
-  font-size: 12px;
-}
-
-.group-select :deep(.n-base-selection-label) {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
