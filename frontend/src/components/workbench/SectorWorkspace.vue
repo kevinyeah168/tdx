@@ -14,6 +14,7 @@ import { computed, h, onMounted, onUnmounted, ref } from 'vue'
 import { CATALOG_REFRESH_MS } from '@/constants/refresh'
 
 import MemberListDrawer, { type MemberListKind } from '@/components/workbench/MemberListDrawer.vue'
+import MemberStockFlowModal from '@/components/workbench/MemberStockFlowModal.vue'
 import SectorFundChart from '@/components/workbench/SectorFundChart.vue'
 import SectorHeader, { type StatKind } from '@/components/workbench/SectorHeader.vue'
 import SessionSkeleton from '@/components/workbench/SessionSkeleton.vue'
@@ -23,7 +24,6 @@ import { todayTradeDate } from '@/utils/tradeDate'
 import type { SectorMemberRankItem } from '@/api/sectors'
 
 const emit = defineEmits<{
-  openStock: [symbol: string]
   openSettings: []
 }>()
 
@@ -45,6 +45,8 @@ const {
 
 const drawerOpen = ref(false)
 const drawerKind = ref<MemberListKind | null>(null)
+const memberFlowOpen = ref(false)
+const memberFlowTarget = ref<SectorMemberRankItem | null>(null)
 const quickCreateOpen = ref(false)
 const newGroupName = ref('')
 const creatingGroup = ref(false)
@@ -138,7 +140,10 @@ const memberColumns = [
     render: (row: SectorMemberRankItem) =>
       h(
         'div',
-        { class: 'member-row-name truncate text-[11px] font-500', title: `${row.name} ${row.symbol}` },
+        {
+          class: 'member-row-name member-row-link truncate text-[11px] font-500',
+          title: `${row.name} ${row.symbol}`,
+        },
         row.name,
       ),
   },
@@ -186,6 +191,23 @@ const memberColumns = [
     render: (row: SectorMemberRankItem) => renderMemberMetric(row.main_net_ratio, { ratio: true }),
   },
   {
+    title: '占比',
+    key: 'main_amount_ratio',
+    width: 44,
+    align: 'right' as const,
+    className: 'member-col-ratio',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) => {
+      const av = a.main_amount_ratio
+      const bv = b.main_amount_ratio
+      if (av == null && bv == null) return 0
+      if (av == null) return -1
+      if (bv == null) return 1
+      return av - bv
+    },
+    render: (row: SectorMemberRankItem) =>
+      renderMemberMetric(row.main_amount_ratio, { ratio: true }),
+  },
+  {
     title: '涨幅',
     key: 'change_pct',
     width: 50,
@@ -203,6 +225,15 @@ const headerTime = computed(() => {
   const minute = fundFlow.value?.latest_complete_minute || sectorStore.replayMinute
   return `${date} ${minute}`
 })
+
+const memberReplayMinute = computed(
+  () => fundFlow.value?.latest_complete_minute || sectorStore.replayMinute,
+)
+
+function openMemberFlow(row: SectorMemberRankItem) {
+  memberFlowTarget.value = row
+  memberFlowOpen.value = true
+}
 
 async function createGroup() {
   const name = newGroupName.value.trim()
@@ -363,7 +394,18 @@ function removeFromActiveGroup(sectorId: string) {
         v-model:kind="drawerKind"
         :sector-name="selected?.name ?? ''"
         :breadth="breadth"
-        @open-stock="emit('openStock', $event)"
+        @open-member-flow="openMemberFlow"
+      />
+
+      <MemberStockFlowModal
+        v-model:show="memberFlowOpen"
+        :symbol="memberFlowTarget?.symbol ?? ''"
+        :name="memberFlowTarget?.name ?? ''"
+        :trade-date="sectorStore.tradeDate"
+        :replay-minute="memberReplayMinute"
+        :change-pct="memberFlowTarget?.change_pct"
+        :cum-main="memberFlowTarget?.main_cumulative"
+        :cum-gray="memberFlowTarget?.gray_cumulative"
       />
 
       <div v-if="selected" class="chart-members-row panel-card">
@@ -414,7 +456,7 @@ function removeFromActiveGroup(sectorId: string) {
                 flex-height
                 :single-line="false"
                 class="members-table"
-                :row-props="(row) => ({ style: 'cursor: pointer', onClick: () => emit('openStock', row.symbol) })"
+                :row-props="(row) => ({ style: 'cursor: pointer', onClick: () => openMemberFlow(row) })"
               />
               <NEmpty
                 v-else
@@ -766,6 +808,14 @@ function removeFromActiveGroup(sectorId: string) {
 :deep(.member-row-name) {
   min-width: 0;
   line-height: 1.25;
+}
+
+:deep(.member-row-link) {
+  color: var(--primary);
+}
+
+:deep(.members-table .n-data-table-tr:hover) .member-row-link {
+  text-decoration: underline;
 }
 
 .manage-block {

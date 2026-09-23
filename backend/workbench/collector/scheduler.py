@@ -32,6 +32,7 @@ class MinuteScheduler:
         gray_collect: CollectFn | None = None,
         gray_interval_seconds: float = 15.0,
         yuntu_finalize: Callable[[date], dict[str, object] | None] | None = None,
+        yuntu_close_reconcile: Callable[[date, datetime], dict[str, object] | None] | None = None,
         on_tick: TickFn | None = None,
         mode: CollectorMode = "combined",
     ) -> None:
@@ -48,6 +49,7 @@ class MinuteScheduler:
         self._session_backfill = session_backfill
         self._gray_collect = gray_collect
         self._yuntu_finalize = yuntu_finalize
+        self._yuntu_close_reconcile = yuntu_close_reconcile
         self._sleep = sleep
         self._quote_interval_seconds = quote_interval_seconds
         self._priority_interval_seconds = priority_interval_seconds
@@ -87,6 +89,15 @@ class MinuteScheduler:
                             )
                     except Exception as error:
                         print(f"yuntu finalize failed: {error}", file=sys.stderr)
+                if self._yuntu_close_reconcile is not None:
+                    try:
+                        reconciled = self._yuntu_close_reconcile(now.date(), now)
+                        if reconciled is not None:
+                            print(
+                                json.dumps(reconciled, ensure_ascii=False, separators=(",", ":"))
+                            )
+                    except Exception as error:
+                        print(f"yuntu close reconcile failed: {error}", file=sys.stderr)
                 if self._mode != "hot" and self._session_backfill is not None:
                     try:
                         self._session_backfill(now.date(), now)

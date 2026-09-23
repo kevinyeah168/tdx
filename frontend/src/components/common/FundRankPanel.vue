@@ -58,10 +58,20 @@ function stockValueAtHover(series: FlowSeries): FlowSeries {
   const gray = series.gray_values?.length
     ? valueAtTradingMinute(timeline, series.gray_values, minute)
     : null
+  const cumMain = main ?? series.cum_main
+  const mainAmountRatio =
+    series.daily_amount != null &&
+    Number.isFinite(series.daily_amount) &&
+    series.daily_amount > 0 &&
+    cumMain != null &&
+    Number.isFinite(cumMain)
+      ? Math.round((cumMain / series.daily_amount) * 100 * 10000) / 10000
+      : series.main_amount_ratio ?? null
   return {
     ...series,
-    cum_main: main ?? series.cum_main,
+    cum_main: cumMain,
     cum_gray: gray ?? series.cum_gray ?? null,
+    main_amount_ratio: mainAmountRatio,
   }
 }
 
@@ -218,6 +228,23 @@ const stockColumns = computed(() => [
     },
     render(row: FlowSeries) {
       return renderRankMetric(row.main_net_ratio, { ratio: true })
+    },
+  },
+  {
+    title: rankHeader('占比'),
+    key: 'main_amount_ratio',
+    width: 40,
+    align: 'right' as const,
+    sorter: (a: FlowSeries, b: FlowSeries) => {
+      const av = a.main_amount_ratio
+      const bv = b.main_amount_ratio
+      if (av == null && bv == null) return 0
+      if (av == null) return -1
+      if (bv == null) return 1
+      return av - bv
+    },
+    render(row: FlowSeries) {
+      return renderRankMetric(row.main_amount_ratio, { ratio: true })
     },
   },
   {

@@ -24,18 +24,23 @@ def _tier_point(
     return TierPoint(delta=delta, cumulative=cumulative, source=source, quality=quality)
 
 
-def _main_from_row(row: object) -> float:
+def live_main_cum_from_quote_row(row: object) -> float | None:
+    """Official TDX main net cumulative (元) when present on an enhanced quote row."""
     if isinstance(row, dict):
         for key in ("main_net_amount", "main_net", "main_cum"):
             if key in row and row[key] is not None:
                 return float(row[key])
-        return 0.0
+        return None
     for key in ("main_net_amount", "main_net", "main_cum"):
         if hasattr(row, key):
             value = getattr(row, key)
             if value is not None:
                 return float(value)
-    return 0.0
+    return None
+
+
+def _main_from_row(row: object) -> float:
+    return live_main_cum_from_quote_row(row) or 0.0
 
 
 def build_stock_minutes(

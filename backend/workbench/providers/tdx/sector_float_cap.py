@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from workbench.providers.tdx.catalog import _iter_response_rows
+from workbench.providers.tdx.fund_flow import live_main_cum_from_quote_row
 from workbench.providers.tdx.symbols import market_from_label, parse_symbol
 
 # Cache only 自由流通股本 (万股). Price / avg must stay live so 净比 moves with quotes.
@@ -15,10 +16,11 @@ _QUOTE_BATCH_SIZE = 80
 
 @dataclass(frozen=True, slots=True)
 class SymbolFreeFloatCaps:
-    """自由流通市值：现价口径 + 均价口径（元）。"""
+    """自由流通市值：现价口径 + 均价口径（元）；当日成交额（元）。"""
 
     live: float
     avg: float
+    daily_amount: float = 0.0
 
 
 def _row_value(row: object, key: str, default: object = None) -> object:
@@ -47,6 +49,13 @@ def live_price_from_quote_row(row: object) -> float:
         or _row_value(row, "last", None)
         or _row_value(row, "close", None)
         or 0.0
+    )
+
+
+def daily_amount_from_quote_row(row: object) -> float:
+    """Session turnover / 当日成交额（元）."""
+    return float(
+        _row_value(row, "amount", None) or _row_value(row, "turnover", 0.0) or 0.0
     )
 
 
@@ -138,15 +147,59 @@ def build_symbol_free_float_cap_details(
             shares_wan = _resolve_shares_wan(symbol, row, now)
             price = live_price_from_quote_row(row)
             avg_price = avg_price_from_quote_row(row)
-            if shares_wan <= 0:
+            daily_amount = daily_amount_from_quote_row(row)
+            if shares_wan > 0:
+                live_cap = shares_wan * 10_000.0 * price if price > 0 else 0.0
+                avg_cap = shares_wan * 10_000.0 * avg_price if avg_price > 0 else 0.0
+            else:
+                live_cap = 0.0
+                avg_cap = 0.0
+            if live_cap <= 0 and avg_cap <= 0 and daily_amount <= 0:
                 continue
-            live_cap = shares_wan * 10_000.0 * price if price > 0 else 0.0
-            avg_cap = shares_wan * 10_000.0 * avg_price if avg_price > 0 else 0.0
-            if live_cap <= 0 and avg_cap <= 0:
-                continue
-            caps[symbol] = SymbolFreeFloatCaps(live=live_cap, avg=avg_cap)
+            caps[symbol] = SymbolFreeFloatCaps(
+                live=live_cap,
+                avg=avg_cap,
+                daily_amount=daily_amount,
+            )
 
     return caps
+
+
+def build_symbol_live_main_cum(
+    quote_client: object,
+    symbols: list[str],
+) -> dict[str, float]:
+    """Live official main net cumulative per symbol from enhanced quotes."""
+    if not symbols:
+        return {}
+
+    get_quotes = getattr(quote_client, "get_stock_quotes", None)
+    if get_quotes is None:
+        return {}
+
+    unique_symbols = list(dict.fromkeys(symbols))
+    live_main: dict[str, float] = {}
+
+    for offset in range(0, len(unique_symbols), _QUOTE_BATCH_SIZE):
+        batch = unique_symbols[offset : offset + _QUOTE_BATCH_SIZE]
+        try:
+            response = get_quotes([_quote_tuple(symbol) for symbol in batch])
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        for row in _iter_response_rows(response):
+            code = str(_row_value(row, "code", "")).strip()
+            market = int(_row_value(row, "market", -1))
+            if not code:
+                continue
+            market_label = {0: "SZ", 1: "SH", 2: "BJ"}.get(market)
+            if not market_label:
+                continue
+            symbol = f"{market_label}{code}"
+            main_cum = live_main_cum_from_quote_row(row)
+            if main_cum is not None:
+                live_main[symbol] = main_cum
+
+    return live_main
 
 
 def build_symbol_free_float_caps(

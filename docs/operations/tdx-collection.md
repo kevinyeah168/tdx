@@ -16,11 +16,11 @@ easy_tdx 节点池        ──►  CatalogSync / MinuteCollector ─► meta/m
 东财 darktrade API     ──►  GrayStockCollector      ──►  stock_gray_minute 表
 ```
 
-| 角色 | 说明 |
-|------|------|
-| **盘中主路径** | 云图 `real_hq` 全市场轮询（默认每 **18s**），写入个股/板块分钟主力与涨跌 |
-| **目录元数据** | `easy_tdx`（TdxClient + MacClient）同步证券列表、板块、成分股 |
-| **暗盘** | 东财 `darktrade` 独立进程，写 `stock_gray_minute` |
+| 角色                    | 说明                                                                                                     |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| **盘中主路径**    | 云图`real_hq` 全市场轮询（默认每 **18s**），写入个股/板块分钟主力与涨跌                          |
+| **目录元数据**    | `easy_tdx`（TdxClient + MacClient）同步证券列表、板块、成分股                                          |
+| **暗盘**          | 东财`darktrade` 独立进程，写 `stock_gray_minute`                                                     |
 | **全量 TDX 报价** | `MinuteCollector`：仅用于 `--once`、session backfill（可选）、非盘中补数；**不在盘中常规调度** |
 
 前端通过 Vite 代理 `/api` → `http://127.0.0.1:8877` 读取数据，采集器不对外暴露端口。
@@ -35,12 +35,12 @@ easy_tdx 节点池        ──►  CatalogSync / MinuteCollector ─► meta/m
 python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path> --tdx-home <tdx安装目录>
 ```
 
-| 模式 | 状态 | 行为 |
-|------|------|------|
-| **combined** | ✅ 推荐默认 | 盘中云图采集 + 午休/收盘后 session backfill 补缺口 |
-| **hot** | ✅ | 仅云图采集，无 backfill |
-| **gray** | ✅ 独立进程 | 东财暗盘全市场，与 yuntu 写不同表 |
-| **archive** | ❌ 已废弃 | 调度器仅 sleep，脚本 `start-workbench-collector-archive.ps1` 会 exit 1 |
+| 模式               | 状态        | 行为                                                                    |
+| ------------------ | ----------- | ----------------------------------------------------------------------- |
+| **combined** | ✅ 推荐默认 | 盘中云图采集 + 午休/收盘后 session backfill 补缺口                      |
+| **hot**      | ✅          | 仅云图采集，无 backfill                                                 |
+| **gray**     | ✅ 独立进程 | 东财暗盘全市场，与 yuntu 写不同表                                       |
+| **archive**  | ❌ 已废弃   | 调度器仅 sleep，脚本`start-workbench-collector-archive.ps1` 会 exit 1 |
 
 ### 2.1 调度逻辑（`MinuteScheduler`）
 
@@ -60,22 +60,28 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 - 默认补采函数：`collect_yuntu`（云图）
 - 若 `workbench_config.json` 中 `collect_mode=full` 且 `archive_full_enabled=true`：改为 `collect_once`（全量 TDX 报价路径）
 
+### 2.2.1 收盘终值校准（YuntuCloseReconcile）
+
+云图 `f_amo_sum_wan`（主力净额）在收盘后仍可能下调修正。采集器在 **15:00 之后**（非交易分钟循环内）会对当日 **15:00** 分钟 **强制重拉云图 2 次**（间隔 ≥2 分钟），覆盖 hot 库中该分钟的 `main_cum`，使分时曲线终值与云图页面对齐。
+
+实现：`collector/yuntu_close_reconcile.py`；`hot` / `combined` 模式启用。
+
 ### 2.3 进程锁与心跳
 
-| 文件 | 用途 |
-|------|------|
+| 文件                                     | 用途                          |
+| ---------------------------------------- | ----------------------------- |
 | `{data_dir}/run/collector-{role}.lock` | PID 锁，防重复写入同一 hot DB |
-| `{data_dir}/run/collector-{role}.json` | 心跳，2 分钟无更新视为离线 |
+| `{data_dir}/run/collector-{role}.json` | 心跳，2 分钟无更新视为离线    |
 
 ### 2.4 启动脚本
 
-| 脚本 | 说明 |
-|------|------|
-| `scripts/start-workbench-collector.ps1` | `--mode combined` |
-| `scripts/start-workbench-collector-hot.ps1` | `--mode hot` |
-| `scripts/start-workbench-collector-gray.ps1` | `--mode gray` |
-| `scripts/start-workbench-all.ps1` | API + 前端 + combined + gray 一键后台启动 |
-| `scripts/start-workbench-api.ps1` | 仅 API，`WORKBENCH_DATA_DIR` + uvicorn :8877 |
+| 脚本                                           | 说明                                           |
+| ---------------------------------------------- | ---------------------------------------------- |
+| `scripts/start-workbench-collector.ps1`      | `--mode combined`                            |
+| `scripts/start-workbench-collector-hot.ps1`  | `--mode hot`                                 |
+| `scripts/start-workbench-collector-gray.ps1` | `--mode gray`                                |
+| `scripts/start-workbench-all.ps1`            | API + 前端 + combined + gray 一键后台启动      |
+| `scripts/start-workbench-api.ps1`            | 仅 API，`WORKBENCH_DATA_DIR` + uvicorn :8877 |
 
 ---
 
@@ -83,13 +89,13 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 ### 3.1 外部接口
 
-| 项 | 值 |
-|----|-----|
-| URL | `https://data.tdx.com.cn/yuntujsdata/real_hq.js?ver={timestamp//10000}` |
-| Referer | `https://data.tdx.com.cn/www/pages/tdx-yuntu/page-dp.html` |
-| 格式 | JS 内嵌 `G_REAL_HQ` 数组 → Base64 → Protobuf `GGList` |
-| 实现 | `providers/tdx/yuntu_sector_flow.py` |
-| 超时 | `enhanced_node_timeout_seconds`（默认 5s）；失败时 fallback `curl_cffi` |
+| 项      | 值                                                                          |
+| ------- | --------------------------------------------------------------------------- |
+| URL     | `https://data.tdx.com.cn/yuntujsdata/real_hq.js?ver={timestamp//10000}`   |
+| Referer | `https://data.tdx.com.cn/www/pages/tdx-yuntu/page-dp.html`                |
+| 格式    | JS 内嵌`G_REAL_HQ` 数组 → Base64 → Protobuf `GGList`                  |
+| 实现    | `providers/tdx/yuntu_sector_flow.py`                                      |
+| 超时    | `enhanced_node_timeout_seconds`（默认 5s）；失败时 fallback `curl_cffi` |
 
 ### 3.2 单轮采集流程（`YuntuSnapshotCollector`）
 
@@ -106,14 +112,14 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 ### 3.3 云图原始字段（Protobuf GGData）
 
-| 字段号 | 字段 | 含义 |
-|--------|------|------|
-| 1 | setcode | 市场标识 |
-| 2 | stockcode | 6 位代码（个股或板块 ID） |
-| 4 | z_close | 昨收（解析有，**未写入 hot 表**） |
-| 5 | now | 现价 |
-| 6 | dqzf | 涨跌幅比例（0.05 = 5%，入库 ×100） |
-| 11 | f_amo_sum_wan | 主力累计成交额（**万元**） |
+| 字段号 | 字段          | 含义                                    |
+| ------ | ------------- | --------------------------------------- |
+| 1      | setcode       | 市场标识                                |
+| 2      | stockcode     | 6 位代码（个股或板块 ID）               |
+| 4      | z_close       | 昨收（解析有，**未写入 hot 表**） |
+| 5      | now           | 现价                                    |
+| 6      | dqzf          | 涨跌幅比例（0.05 = 5%，入库 ×100）     |
+| 11     | f_amo_sum_wan | 主力净额（**万元**；云图 tooltip 同口径，盘中可能事后修正） |
 
 板块识别：`stockcode` 匹配 `88\d{4}` 时视为板块指数，只进 `sector_minute`，不进 `stock_minute`。
 
@@ -121,27 +127,27 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 **个股 `stock_minute`**
 
-| 存储字段 | 来源 | 说明 |
-|----------|------|------|
-| trade_date, minute, symbol | 系统 + catalog | |
-| close | `now` | |
-| change_pct | `dqzf × 100` | 保留 2 位小数 |
-| amount_delta | — | **恒为 0**（云图无分钟成交额） |
-| main_cum | `f_amo_sum_wan × 10000` | 万元→元 |
-| main_delta | 与上一轮 main_cum 差分 | |
-| super/large/medium/small | — | **gap**，delta/cum 均为 0 |
-| tier_meta_json | main=`official`，其余=`gap` | source: `tdx.yuntu.real_hq` / `-` |
-| observed_at, batch_id | 系统 | |
+| 存储字段                   | 来源                            | 说明                                 |
+| -------------------------- | ------------------------------- | ------------------------------------ |
+| trade_date, minute, symbol | 系统 + catalog                  |                                      |
+| close                      | `now`                         |                                      |
+| change_pct                 | `dqzf × 100`                 | 保留 2 位小数                        |
+| amount_delta               | —                              | **恒为 0**（云图无分钟成交额） |
+| main_cum                   | `f_amo_sum_wan × 10000`      | 万元→元（与云图「主力净额」同字段） |
+| main_delta                 | 与上一轮 main_cum 差分          |                                      |
+| super/large/medium/small   | —                              | **gap**，delta/cum 均为 0      |
+| tier_meta_json             | main=`official`，其余=`gap` | source:`tdx.yuntu.real_hq` / `-` |
+| observed_at, batch_id      | 系统                            |                                      |
 
 **板块 `sector_minute`**
 
-| 存储字段 | 来源 | 说明 |
-|----------|------|------|
-| sector_id | catalog + 云图 `stockcode` | |
-| change_pct | `dqzf × 100` | |
-| member_count | `sector_membership` 统计 | 非云图字段 |
-| main_delta / main_cum | 同个股 | |
-| 五档其他 tier | gap | 同个股 |
+| 存储字段              | 来源                        | 说明       |
+| --------------------- | --------------------------- | ---------- |
+| sector_id             | catalog + 云图`stockcode` |            |
+| change_pct            | `dqzf × 100`             |            |
+| member_count          | `sector_membership` 统计  | 非云图字段 |
+| main_delta / main_cum | 同个股                      |            |
+| 五档其他 tier         | gap                         | 同个股     |
 
 **Gap 行**（分钟切换 finalize 或拉取失败）：`close=0`、`change_pct=0`、`main` 维持上次 cum、`quality=gap`、`batch_id` 含 `yuntu-gap`。
 
@@ -151,21 +157,21 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 实现：`providers/tdx/runtime.py` → `create_real_provider`
 
-| 客户端 | 节点 | 用途 |
-|--------|------|------|
-| `TdxClient` | `KNOWN_HOSTS:7709` | 证券列表、普通报价、逐笔、基础 K 线 |
-| `MacClient` | `MAC_HOSTS:7709` | 板块列表/成分、增强报价（含主力净额）、增强 K 线 |
+| 客户端        | 节点                 | 用途                                             |
+| ------------- | -------------------- | ------------------------------------------------ |
+| `TdxClient` | `KNOWN_HOSTS:7709` | 证券列表、普通报价、逐笔、基础 K 线              |
+| `MacClient` | `MAC_HOSTS:7709`   | 板块列表/成分、增强报价（含主力净额）、增强 K 线 |
 
 ### 4.1 目录同步（`CatalogSyncService` / `TdxCatalogLoader`）
 
 写入 `meta/market_meta.sqlite`：
 
-| 表 | 内容 |
-|----|------|
-| `security_master` | symbol, code, name, market, active |
-| `sector_master` | sector_id, name, sector_type（industry/concept/…） |
-| `sector_membership` | sector_id ↔ symbol |
-| `catalog_state` | version（SHA256 摘要）、synced_at、stale |
+| 表                    | 内容                                                |
+| --------------------- | --------------------------------------------------- |
+| `security_master`   | symbol, code, name, market, active                  |
+| `sector_master`     | sector_id, name, sector_type（industry/concept/…） |
+| `sector_membership` | sector_id ↔ symbol                                 |
+| `catalog_state`     | version（SHA256 摘要）、synced_at、stale            |
 
 证券列表来源优先级：
 
@@ -212,26 +218,26 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 ## 5. 东财暗盘采集（独立）
 
-| 项 | 值 |
-|----|-----|
-| 采集器 | `GrayStockCollector` |
-| Provider | `providers/eastmoney/gray_market.py` |
-| API | `https://quotederivates.eastmoney.com/datacenter/darktrade` |
-| Referer | `https://emrnweb.eastmoney.com/graymarket/home` |
-| 依赖 | `curl_cffi`（必须） |
-| 间隔 | `gray_collect_interval_seconds`，默认 **15s** |
-| 范围 | 全市场分页（page_size=100，最多约 120 页） |
+| 项       | 值                                                            |
+| -------- | ------------------------------------------------------------- |
+| 采集器   | `GrayStockCollector`                                        |
+| Provider | `providers/eastmoney/gray_market.py`                        |
+| API      | `https://quotederivates.eastmoney.com/datacenter/darktrade` |
+| Referer  | `https://emrnweb.eastmoney.com/graymarket/home`             |
+| 依赖     | `curl_cffi`（必须）                                         |
+| 间隔     | `gray_collect_interval_seconds`，默认 **15s**         |
+| 范围     | 全市场分页（page_size=100，最多约 120 页）                    |
 
 ### 5.1 字段映射 → `stock_gray_minute`
 
-| 东财字段 | 存储列 | 说明 |
-|----------|--------|------|
-| `4` / code | code, symbol | 6 位 → SH/SZ 前缀 |
-| `6` | dark_cum | 暗盘净流入累计（元） |
-| `7` | open_cum | 开盘竞价净流入累计 |
-| `8` | total_cum | 合计（缺省 6+7） |
-| `5` | observed_at | 更新时间 |
-| — | source | `eastmoney:graymarket:darktrade` |
+| 东财字段     | 存储列       | 说明                               |
+| ------------ | ------------ | ---------------------------------- |
+| `4` / code | code, symbol | 6 位 → SH/SZ 前缀                 |
+| `6`        | dark_cum     | 暗盘净流入累计（元）               |
+| `7`        | open_cum     | 开盘竞价净流入累计                 |
+| `8`        | total_cum    | 合计（缺省 6+7）                   |
+| `5`        | observed_at  | 更新时间                           |
+| —           | source       | `eastmoney:graymarket:darktrade` |
 
 分钟桶按写入时墙钟对齐；同 symbol 同分钟 **UPSERT**。
 
@@ -262,13 +268,13 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 ### 6.2 Hot 库表
 
-| 表 | 主键 | 说明 |
-|----|------|------|
-| `stock_minute` | trade_date, minute, symbol | 个股分钟 |
-| `sector_minute` | trade_date, minute, sector_id | 板块分钟 |
-| `stock_gray_minute` | trade_date, minute, symbol | 暗盘分钟 |
-| `collection_status` | trade_date, minute | 采集覆盖率、状态 |
-| `data_gap` | entity_type, entity_id, trade_date, minute | 缺口追踪 |
+| 表                    | 主键                                       | 说明             |
+| --------------------- | ------------------------------------------ | ---------------- |
+| `stock_minute`      | trade_date, minute, symbol                 | 个股分钟         |
+| `sector_minute`     | trade_date, minute, sector_id              | 板块分钟         |
+| `stock_gray_minute` | trade_date, minute, symbol                 | 暗盘分钟         |
+| `collection_status` | trade_date, minute                         | 采集覆盖率、状态 |
+| `data_gap`          | entity_type, entity_id, trade_date, minute | 缺口追踪         |
 
 写入语义：
 
@@ -283,7 +289,7 @@ python -m workbench.collector.main --real --serve --mode <mode> --data-dir <path
 
 ---
 
-## 7. 采集范围说明
+## 7围说明
 
 ### 7.1 云图路径 = catalog 全市场
 
@@ -310,19 +316,19 @@ Base：`http://127.0.0.1:8877`
 
 ### 8.1 健康
 
-| 方法 | 路径 |
-|------|------|
-| GET | `/api/v1/health` |
-| GET | `/api/v1/health/detail` |
+| 方法 | 路径                      |
+| ---- | ------------------------- |
+| GET  | `/api/v1/health`        |
+| GET  | `/api/v1/health/detail` |
 
 ### 8.2 资金流曲线（hot）
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/v1/stocks/{symbol}/fund-flow?date=` | 个股主力曲线 |
-| GET | `/api/v1/sectors/{sector_id}/minutes?date=` | 板块分钟序列 |
-| POST | `/api/v1/stocks/fund-flow/batch` | 批量个股 |
-| POST | `/api/v1/sectors/fund-flow/batch` | 批量板块 |
+| 方法 | 路径                                          | 说明         |
+| ---- | --------------------------------------------- | ------------ |
+| GET  | `/api/v1/stocks/{symbol}/fund-flow?date=`   | 个股主力曲线 |
+| GET  | `/api/v1/sectors/{sector_id}/minutes?date=` | 板块分钟序列 |
+| POST | `/api/v1/stocks/fund-flow/batch`            | 批量个股     |
+| POST | `/api/v1/sectors/fund-flow/batch`           | 批量板块     |
 
 曲线点结构（摘要）：
 
@@ -342,39 +348,41 @@ Base：`http://127.0.0.1:8877`
 
 ### 8.3 暗盘
 
-| 方法 | 路径 |
-|------|------|
-| GET | `/api/v1/stocks/{symbol}/gray-flow?date=` |
-| POST | `/api/v1/stocks/gray-flow/batch` |
+| 方法 | 路径                                        |
+| ---- | ------------------------------------------- |
+| GET  | `/api/v1/stocks/{symbol}/gray-flow?date=` |
+| POST | `/api/v1/stocks/gray-flow/batch`          |
 
 ### 8.4 市场 / 排行 / 目录
 
-| 方法 | 路径 |
-|------|------|
-| GET | `/api/v1/market/overview?date=` |
-| GET | `/api/v1/market/search?q=` |
-| GET | `/api/v1/sectors` |
-| GET | `/api/v1/sectors/rank?date=` |
-| GET | `/api/v1/sectors/snapshot?date=&ids=` |
-| GET | `/api/v1/sectors/{id}/catalog-members` |
-| GET | `/api/v1/sectors/{id}/members?date=` |
-| GET | `/api/v1/sectors/{id}/breadth?date=` |
-| GET | `/api/v1/stocks/rank?date=` |
-| GET | `/api/v1/stocks/catalog` |
-| POST | `/api/v1/stocks/resolve` |
-| GET | `/api/v1/stocks/{symbol}/intraday?date=` |
-| GET | `/api/v1/stocks/{symbol}/bars` |
+| 方法 | 路径                                       |
+| ---- | ------------------------------------------ |
+| GET  | `/api/v1/market/overview?date=`          |
+| GET  | `/api/v1/market/search?q=`               |
+| GET  | `/api/v1/sectors`                        |
+| GET  | `/api/v1/sectors/rank?date=`             |
+| GET  | `/api/v1/sectors/snapshot?date=&ids=`    |
+| GET  | `/api/v1/sectors/{id}/catalog-members`   |
+| GET  | `/api/v1/sectors/{id}/members?date=`     |
+| GET  | `/api/v1/sectors/{id}/breadth?date=`     |
+
+`/members` 与 `/breadth`：当 API 进程可连 TDX 增强报价时，**明盘主力净额**用实时 `main_net_amount` 覆盖 hot 库快照（与云图页面对齐）；净比/占比同步重算。历史回放无 live 报价时仍用 hot 库。
+| GET  | `/api/v1/stocks/rank?date=`              |
+| GET  | `/api/v1/stocks/catalog`                 |
+| POST | `/api/v1/stocks/resolve`                 |
+| GET  | `/api/v1/stocks/{symbol}/intraday?date=` |
+| GET  | `/api/v1/stocks/{symbol}/bars`           |
 
 ### 8.5 回放与设置
 
-| 方法 | 路径 |
-|------|------|
-| GET | `/api/v1/replay/dates` |
-| GET | `/api/v1/replay/minutes?date=` |
-| GET/PUT | `/api/v1/settings` |
+| 方法    | 路径                                    |
+| ------- | --------------------------------------- |
+| GET     | `/api/v1/replay/dates`                |
+| GET     | `/api/v1/replay/minutes?date=`        |
+| GET/PUT | `/api/v1/settings`                    |
 | GET/PUT | `/api/v1/settings/collection-targets` |
-| GET/PUT | `/api/v1/settings/sector-groups` |
-| GET/PUT | `/api/v1/settings/stock-groups` |
+| GET/PUT | `/api/v1/settings/sector-groups`      |
+| GET/PUT | `/api/v1/settings/stock-groups`       |
 
 ---
 
@@ -382,15 +390,15 @@ Base：`http://127.0.0.1:8877`
 
 ### 9.1 环境变量（`WORKBENCH_*` 前缀）
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `WORKBENCH_DATA_DIR` | `../data` | 数据根目录 |
-| `WORKBENCH_TDX_HOME` | `C:/new_tdx64` | 通达信安装目录 |
-| `WORKBENCH_YUNTU_COLLECT_INTERVAL_SECONDS` | 18 | 云图轮询间隔 |
-| `WORKBENCH_GRAY_COLLECT_INTERVAL_SECONDS` | 15 | 暗盘轮询间隔 |
-| `WORKBENCH_FULL_COLLECT_INTERVAL_SECONDS` | 45 | 全量周期（盘中基本不触发） |
-| `WORKBENCH_QUOTE_INTERVAL_SECONDS` | 5 | 调度循环 sleep 基准 |
-| `WORKBENCH_RETENTION_TRADING_DAYS` | 365 | hot 库保留交易日数 |
+| 变量                                         | 默认             | 说明                       |
+| -------------------------------------------- | ---------------- | -------------------------- |
+| `WORKBENCH_DATA_DIR`                       | `../data`      | 数据根目录                 |
+| `WORKBENCH_TDX_HOME`                       | `C:/new_tdx64` | 通达信安装目录             |
+| `WORKBENCH_YUNTU_COLLECT_INTERVAL_SECONDS` | 18               | 云图轮询间隔               |
+| `WORKBENCH_GRAY_COLLECT_INTERVAL_SECONDS`  | 15               | 暗盘轮询间隔               |
+| `WORKBENCH_FULL_COLLECT_INTERVAL_SECONDS`  | 45               | 全量周期（盘中基本不触发） |
+| `WORKBENCH_QUOTE_INTERVAL_SECONDS`         | 5                | 调度循环 sleep 基准        |
+| `WORKBENCH_RETENTION_TRADING_DAYS`         | 365              | hot 库保留交易日数         |
 
 ### 9.2 用户配置 `{data_dir}/run/workbench_config.json`
 
@@ -402,19 +410,19 @@ Base：`http://127.0.0.1:8877`
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `collect_mode` | `selective`（默认）/ `full` |
+| 字段                     | 说明                                         |
+| ------------------------ | -------------------------------------------- |
+| `collect_mode`         | `selective`（默认）/ `full`              |
 | `archive_full_enabled` | `full` 时 session backfill 走 TDX 全量报价 |
 
 ### 9.3 功能开关（`config.py` 默认）
 
-| 设置 | 默认 | 说明 |
-|------|------|------|
-| `estimate_transaction_tiers` | false | 逐笔估算 super/large/medium/small |
-| `sector_official_main_enabled` | false | MAC 官方板块主力 |
-| `enhanced_quote_enabled` | true | 增强报价 |
-| `sync_history_bars_on_collect` | false | 采集时同步日 K |
+| 设置                             | 默认  | 说明                              |
+| -------------------------------- | ----- | --------------------------------- |
+| `estimate_transaction_tiers`   | false | 逐笔估算 super/large/medium/small |
+| `sector_official_main_enabled` | false | MAC 官方板块主力                  |
+| `enhanced_quote_enabled`       | true  | 增强报价                          |
+| `sync_history_bars_on_collect` | false | 采集时同步日 K                    |
 
 ---
 
@@ -445,39 +453,39 @@ Base：`http://127.0.0.1:8877`
 
 ## 11. 已知限制
 
-| 限制 | 说明 |
-|------|------|
-| `amount_delta = 0` | 云图路径无分钟成交额，均价线暂无数据 |
-| 五档仅 main 有效 | super/large/medium/small 为 gap |
-| 盘中不做全量 TDX | 避免 5000+ 股阻塞漏分钟 |
-| archive 模式废弃 | 请用 combined |
-| 交易日历简化 | `is_trading_day` 仅判工作日，不含法定节假日 |
-| 暗盘依赖 curl_cffi | 未安装则 gray 采集失败 |
-| 无登录鉴权 | API 只读 hot 库，设置接口可写分组 |
-| order-book | 固定返回 gap，未采集盘口 |
+| 限制                 | 说明                                          |
+| -------------------- | --------------------------------------------- |
+| `amount_delta = 0` | 云图路径无分钟成交额，均价线暂无数据          |
+| 五档仅 main 有效     | super/large/medium/small 为 gap               |
+| 盘中不做全量 TDX     | 避免 5000+ 股阻塞漏分钟                       |
+| archive 模式废弃     | 请用 combined                                 |
+| 交易日历简化         | `is_trading_day` 仅判工作日，不含法定节假日 |
+| 暗盘依赖 curl_cffi   | 未安装则 gray 采集失败                        |
+| 无登录鉴权           | API 只读 hot 库，设置接口可写分组             |
+| order-book           | 固定返回 gap，未采集盘口                      |
 
 ---
 
 ## 12. 关键源码索引
 
-| 路径 | 职责 |
-|------|------|
-| `backend/workbench/collector/main.py` | CLI、模式分发 |
-| `backend/workbench/collector/scheduler.py` | 交易时钟调度 |
-| `backend/workbench/collector/yuntu_snapshot_collector.py` | 云图分钟采集 |
-| `backend/workbench/collector/gray_stock_collector.py` | 暗盘采集 |
-| `backend/workbench/collector/minute_collector.py` | 全量 TDX 分钟 |
-| `backend/workbench/collector/catalog_sync.py` | 目录同步 |
-| `backend/workbench/providers/tdx/yuntu_sector_flow.py` | real_hq 拉取与解析 |
-| `backend/workbench/providers/tdx/yuntu_minute_records.py` | 云图 → 领域模型 |
-| `backend/workbench/providers/tdx/runtime.py` | easy_tdx 节点池 |
-| `backend/workbench/providers/tdx/catalog.py` | 目录加载 |
-| `backend/workbench/providers/eastmoney/gray_market.py` | 东财暗盘 |
-| `backend/workbench/storage/schema.py` | SQLite DDL |
-| `backend/workbench/storage/hot_store.py` | 热库读写 |
-| `backend/workbench/storage/meta_store.py` | 元数据库 |
-| `backend/workbench/api/main.py` | 资金流 / 暗盘 API |
-| `backend/workbench/config.py` | 全局配置 |
+| 路径                                                        | 职责               |
+| ----------------------------------------------------------- | ------------------ |
+| `backend/workbench/collector/main.py`                     | CLI、模式分发      |
+| `backend/workbench/collector/scheduler.py`                | 交易时钟调度       |
+| `backend/workbench/collector/yuntu_snapshot_collector.py` | 云图分钟采集       |
+| `backend/workbench/collector/gray_stock_collector.py`     | 暗盘采集           |
+| `backend/workbench/collector/minute_collector.py`         | 全量 TDX 分钟      |
+| `backend/workbench/collector/catalog_sync.py`             | 目录同步           |
+| `backend/workbench/providers/tdx/yuntu_sector_flow.py`    | real_hq 拉取与解析 |
+| `backend/workbench/providers/tdx/yuntu_minute_records.py` | 云图 → 领域模型   |
+| `backend/workbench/providers/tdx/runtime.py`              | easy_tdx 节点池    |
+| `backend/workbench/providers/tdx/catalog.py`              | 目录加载           |
+| `backend/workbench/providers/eastmoney/gray_market.py`    | 东财暗盘           |
+| `backend/workbench/storage/schema.py`                     | SQLite DDL         |
+| `backend/workbench/storage/hot_store.py`                  | 热库读写           |
+| `backend/workbench/storage/meta_store.py`                 | 元数据库           |
+| `backend/workbench/api/main.py`                           | 资金流 / 暗盘 API  |
+| `backend/workbench/config.py`                             | 全局配置           |
 
 ---
 

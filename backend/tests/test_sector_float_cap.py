@@ -1,9 +1,11 @@
 from workbench.providers.tdx.sector_float_cap import (
     avg_price_from_quote_row,
+    build_symbol_free_float_cap_details,
+    build_symbol_free_float_caps,
+    build_symbol_live_main_cum,
+    daily_amount_from_quote_row,
     free_float_cap_from_quote_row,
     live_price_from_quote_row,
-    build_symbol_free_float_caps,
-    build_symbol_free_float_cap_details,
 )
 
 
@@ -29,6 +31,26 @@ def test_avg_price_from_amount_vol() -> None:
 def test_avg_price_prefers_explicit_field() -> None:
     row = {"avg_price": 10.2, "amount": 1_050_000.0, "vol": 1000.0, "price": 11.0}
     assert avg_price_from_quote_row(row) == 10.2
+
+
+def test_daily_amount_from_quote_row() -> None:
+    assert daily_amount_from_quote_row({"amount": 1_050_000.0}) == 1_050_000.0
+    assert daily_amount_from_quote_row({"turnover": 2_000_000.0}) == 2_000_000.0
+
+
+def test_build_live_main_cum_from_quote_client() -> None:
+    class Client:
+        def get_stock_quotes(self, stocks):  # noqa: ANN001
+            return [
+                {
+                    "market": 0,
+                    "code": "301396",
+                    "main_net_amount": 761_428_992.0,
+                }
+            ]
+
+    caps = build_symbol_live_main_cum(Client(), ["SZ301396"])
+    assert caps["SZ301396"] == 761_428_992.0
 
 
 def test_build_caps_uses_live_price_each_call() -> None:

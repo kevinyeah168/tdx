@@ -33,6 +33,9 @@ export interface SectorMemberRankItem {
   change_pct: number
   free_float_market_cap?: number | null
   main_net_ratio?: number | null
+  /** 占比(%) = 主力净流入 / 当日成交额 * 100 */
+  main_amount_ratio?: number | null
+  daily_amount?: number | null
   free_float_market_cap_avg?: number | null
   main_net_ratio_avg?: number | null
 }

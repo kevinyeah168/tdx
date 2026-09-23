@@ -24,6 +24,7 @@ from workbench.collector.process_lock import acquire_collector_lock, release_col
 from workbench.collector.retention import purge_expired_hot_databases
 from workbench.collector.scheduler import CollectFn, MinuteScheduler
 from workbench.collector.session_backfill import SessionBackfillService
+from workbench.collector.yuntu_close_reconcile import YuntuCloseReconcileService
 from workbench.config import WorkbenchSettings, merge_user_config
 from workbench.providers.fake import FakeMarketProvider
 from workbench.providers.tdx.provider import TdxMarketProvider
@@ -334,24 +335,32 @@ def serve(arguments: argparse.Namespace) -> int:
         return collect_yuntu(trade_date, minute)
 
     backfill = SessionBackfillService(hot, archive_backfill_collect)
+    close_reconcile = YuntuCloseReconcileService(collect_yuntu)
 
     def run_session_backfill(trade_date: date, now: datetime) -> dict[str, object] | None:
         write_collector_heartbeat(settings.data_dir, role=collector_role)
         return backfill.next_missing_minute(trade_date, now)
+
+    def run_yuntu_close_reconcile(trade_date: date, now: datetime) -> dict[str, object] | None:
+        write_collector_heartbeat(settings.data_dir, role=collector_role)
+        return close_reconcile.reconcile_if_due(trade_date, now)
 
     # gray runs in a dedicated process (--mode gray); yuntu paths never embed it.
     if collector_role == "hot":
         priority_fn: CollectFn | None = collect_yuntu
         backfill_fn = None
         yuntu_finalize_fn = finalize_yuntu
+        yuntu_close_reconcile_fn = run_yuntu_close_reconcile
     elif collector_role == "archive":
         priority_fn = None
         backfill_fn = run_session_backfill
         yuntu_finalize_fn = None
+        yuntu_close_reconcile_fn = None
     else:
         priority_fn = collect_yuntu
         backfill_fn = run_session_backfill
         yuntu_finalize_fn = finalize_yuntu
+        yuntu_close_reconcile_fn = run_yuntu_close_reconcile
 
     scheduler = MinuteScheduler(
         collect=collect,
@@ -359,6 +368,7 @@ def serve(arguments: argparse.Namespace) -> int:
         gray_collect=None,
         gray_interval_seconds=settings.gray_collect_interval_seconds,
         yuntu_finalize=yuntu_finalize_fn,
+        yuntu_close_reconcile=yuntu_close_reconcile_fn,
         session_backfill=backfill_fn,
         quote_interval_seconds=settings.quote_interval_seconds,
         priority_interval_seconds=settings.yuntu_collect_interval_seconds,

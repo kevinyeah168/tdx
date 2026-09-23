@@ -13,7 +13,10 @@ from workbench.query.models import (
     SectorSnapshotResponse,
     SectorSummary,
 )
-from workbench.providers.tdx.sector_float_cap import build_symbol_free_float_cap_details
+from workbench.providers.tdx.sector_float_cap import (
+    build_symbol_free_float_cap_details,
+    build_symbol_live_main_cum,
+)
 from workbench.providers.tdx.text_clean import clean_tdx_text
 from workbench.query.custom_sector_flow import CustomSectorFlowService
 from workbench.query.custom_sector_ids import CUSTOM_SECTOR_TYPE, is_custom_sector_id
@@ -335,23 +338,32 @@ class SectorQueryService:
                 if quote_client is not None
                 else {}
             )
+            live_main = (
+                build_symbol_live_main_cum(quote_client, ranked_symbols)
+                if quote_client is not None
+                else {}
+            )
             items = [
                 self._member_rank_item(
                     symbol=symbol,
                     name=names.get(symbol, symbol),
-                    main_cum=main_cum,
+                    main_cum=self._resolve_main_cum(symbol, main_cum, live_main),
                     gray_cum=gray_cum,
                     change_pct=change_pct,
                     free_cap=symbol_caps[symbol].live if symbol in symbol_caps else None,
                     free_cap_avg=symbol_caps[symbol].avg if symbol in symbol_caps else None,
+                    daily_amount=(
+                        symbol_caps[symbol].daily_amount if symbol in symbol_caps else None
+                    ),
                 )
                 for symbol, main_cum, change_pct, gray_cum in hot_rows
             ]
+            items.sort(key=lambda item: (-item.main_cumulative, item.symbol))
             return SectorMemberRankResponse(
                 sector_id=sector_id,
                 trade_date=trade_date,
                 minute=effective_minute,
-                items=items,
+                items=items[:limit],
                 metadata=QueryMetadata(
                     catalog_version=snapshot.catalog_version,
                     stale=snapshot.stale,
@@ -398,6 +410,11 @@ class SectorQueryService:
                         if str(item["symbol"]) in symbol_caps
                         else None
                     ),
+                    daily_amount=(
+                        symbol_caps[str(item["symbol"])].daily_amount
+                        if str(item["symbol"]) in symbol_caps
+                        else None
+                    ),
                 )
                 for item in ranked
             ]
@@ -427,6 +444,17 @@ class SectorQueryService:
         )
 
     @staticmethod
+    def _resolve_main_cum(
+        symbol: str,
+        hot_cum: float,
+        live_main: dict[str, float],
+    ) -> float:
+        overlay = live_main.get(symbol)
+        if overlay is not None:
+            return overlay
+        return hot_cum
+
+    @staticmethod
     def _member_rank_item(
         *,
         symbol: str,
@@ -436,10 +464,14 @@ class SectorQueryService:
         change_pct: float,
         free_cap: float | None,
         free_cap_avg: float | None = None,
+        daily_amount: float | None = None,
     ) -> SectorMemberRankItem:
         ratio = None
         if free_cap is not None and free_cap > 0:
             ratio = round(main_cum / free_cap * 100.0, 4)
+        amount_ratio = None
+        if daily_amount is not None and daily_amount > 0:
+            amount_ratio = round(main_cum / daily_amount * 100.0, 4)
         ratio_avg = None
         if free_cap_avg is not None and free_cap_avg > 0:
             ratio_avg = round(main_cum / free_cap_avg * 100.0, 4)
@@ -451,6 +483,8 @@ class SectorQueryService:
             change_pct=change_pct,
             free_float_market_cap=free_cap if free_cap else None,
             main_net_ratio=ratio,
+            main_amount_ratio=amount_ratio,
+            daily_amount=daily_amount if daily_amount else None,
             free_float_market_cap_avg=free_cap_avg if free_cap_avg else None,
             main_net_ratio_avg=ratio_avg,
         )
@@ -542,15 +576,23 @@ class SectorQueryService:
             if quote_client is not None
             else {}
         )
+        live_main = (
+            build_symbol_live_main_cum(quote_client, ranked_symbols)
+            if quote_client is not None
+            else {}
+        )
         items = [
             self._member_rank_item(
                 symbol=str(row[0]),
                 name=names.get(str(row[0]), str(row[0])),
-                main_cum=float(row[1]),
+                main_cum=self._resolve_main_cum(str(row[0]), float(row[1]), live_main),
                 gray_cum=float(row[3]) if row[3] is not None else None,
                 change_pct=float(row[2]),
                 free_cap=symbol_caps[str(row[0])].live if str(row[0]) in symbol_caps else None,
                 free_cap_avg=symbol_caps[str(row[0])].avg if str(row[0]) in symbol_caps else None,
+                daily_amount=(
+                    symbol_caps[str(row[0])].daily_amount if str(row[0]) in symbol_caps else None
+                ),
             )
             for row in rows
         ]

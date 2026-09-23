@@ -10,10 +10,14 @@ export interface BoardItem {
   chart_visible?: boolean
   /** 个股榜单用：净比(%) = 主力净流入 / 自由流通市值 * 100 */
   main_net_ratio?: number | null
+  /** 占比(%) = 主力净流入 / 当日成交额 * 100 */
+  main_amount_ratio?: number | null
   /** 净比(均)(%) = 主力净流入 / (自由流通股本×均价) * 100 */
   main_net_ratio_avg?: number | null
   /** 自由流通市值（元），用于随明盘重算净比 */
   free_float_market_cap?: number | null
+  /** 当日成交额（元），用于随明盘重算占比 */
+  daily_amount?: number | null
   /** 均价口径自由流通市值（元） */
   free_float_market_cap_avg?: number | null
 }
@@ -27,10 +31,14 @@ export interface FlowSeries {
   change_pct?: number | null
   /** 个股净比(%) = 主力净流入 / 自由流通市值 * 100 */
   main_net_ratio?: number | null
+  /** 占比(%) = 主力净流入 / 当日成交额 * 100 */
+  main_amount_ratio?: number | null
   /** 净比(均)(%) = 主力净流入 / (自由流通股本×均价) * 100 */
   main_net_ratio_avg?: number | null
   /** 自由流通市值（元） */
   free_float_market_cap?: number | null
+  /** 当日成交额（元） */
+  daily_amount?: number | null
   /** 均价口径自由流通市值（元） */
   free_float_market_cap_avg?: number | null
   values: (number | null)[]

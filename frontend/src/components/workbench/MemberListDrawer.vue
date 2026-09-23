@@ -23,7 +23,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  openStock: [symbol: string]
+  openMemberFlow: [row: SectorMemberRankItem]
 }>()
 
 const activeTab = computed({
@@ -118,6 +118,22 @@ const columns = computed(() => [
     render: (row: SectorMemberRankItem) => renderMetric(row.main_net_ratio, { ratio: true }),
   },
   {
+    title: '占比',
+    key: 'main_amount_ratio',
+    width: 64,
+    align: 'right' as const,
+    className: 'drawer-col-ratio',
+    sorter: (a: SectorMemberRankItem, b: SectorMemberRankItem) => {
+      const av = a.main_amount_ratio
+      const bv = b.main_amount_ratio
+      if (av == null && bv == null) return 0
+      if (av == null) return -1
+      if (bv == null) return 1
+      return av - bv
+    },
+    render: (row: SectorMemberRankItem) => renderMetric(row.main_amount_ratio, { ratio: true }),
+  },
+  {
     title: '涨幅',
     key: 'change_pct',
     width: 72,
@@ -163,7 +179,7 @@ const columns = computed(() => [
           :bordered="false"
           size="small"
           :single-line="true"
-          :row-props="(row) => ({ style: 'cursor: pointer', onClick: () => emit('openStock', row.symbol) })"
+          :row-props="(row) => ({ style: 'cursor: pointer', onClick: () => emit('openMemberFlow', row) })"
         />
         <NEmpty v-else class="member-drawer-empty" description="该分类暂无个股" />
       </div>

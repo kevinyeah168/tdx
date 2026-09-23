@@ -67,6 +67,8 @@ class SectorMemberRankItem(BaseModel):
     change_pct: float
     free_float_market_cap: float | None = None
     main_net_ratio: float | None = None
+    main_amount_ratio: float | None = None
+    daily_amount: float | None = None
     free_float_market_cap_avg: float | None = None
     main_net_ratio_avg: float | None = None
 

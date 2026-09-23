@@ -190,7 +190,6 @@ onMounted(async () => {
 
       <SectorWorkspace
         v-else-if="activeView === 'sectors'"
-        @open-stock="onOpenStock"
         @open-settings="onOpenSettings"
       />
 

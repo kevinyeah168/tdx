@@ -221,7 +221,9 @@ interface RawSeries {
   cum_main: number
   change_pct: number | null
   main_net_ratio?: number | null
+  main_amount_ratio?: number | null
   free_float_market_cap?: number | null
+  daily_amount?: number | null
   main_net_ratio_avg?: number | null
   free_float_market_cap_avg?: number | null
   timeline: string[]
@@ -246,6 +248,22 @@ function computeMainNetRatio(
   return Math.round((mainCum / freeFloatMarketCap) * 100 * 10000) / 10000
 }
 
+function computeMainAmountRatio(
+  mainCum: number | null | undefined,
+  dailyAmount: number | null | undefined,
+): number | null {
+  if (
+    mainCum == null ||
+    dailyAmount == null ||
+    !Number.isFinite(mainCum) ||
+    !Number.isFinite(dailyAmount) ||
+    dailyAmount <= 0
+  ) {
+    return null
+  }
+  return Math.round((mainCum / dailyAmount) * 100 * 10000) / 10000
+}
+
 function computeIndexPriceValues(
   changePcts: (number | null)[],
   preClose: number | null | undefined,
@@ -265,7 +283,9 @@ function buildRawSeries(
     symbol?: string
     sector_type?: string | null
     main_net_ratio?: number | null
+    main_amount_ratio?: number | null
     free_float_market_cap?: number | null
+    daily_amount?: number | null
     main_net_ratio_avg?: number | null
     free_float_market_cap_avg?: number | null
     pre_close?: number | null
@@ -311,8 +331,11 @@ function buildRawSeries(
   const cumMain = last.values.main?.cumulative ?? 0
   const freeCap = extra?.free_float_market_cap ?? null
   const freeCapAvg = extra?.free_float_market_cap_avg ?? null
+  const dailyAmount = extra?.daily_amount ?? null
   const ratio =
     computeMainNetRatio(cumMain, freeCap) ?? extra?.main_net_ratio ?? null
+  const amountRatio =
+    computeMainAmountRatio(cumMain, dailyAmount) ?? extra?.main_amount_ratio ?? null
   const ratioAvg =
     computeMainNetRatio(cumMain, freeCapAvg) ?? extra?.main_net_ratio_avg ?? null
   return {
@@ -323,7 +346,9 @@ function buildRawSeries(
     cum_main: cumMain,
     change_pct: changePct,
     main_net_ratio: ratio,
+    main_amount_ratio: amountRatio,
     free_float_market_cap: freeCap,
+    daily_amount: dailyAmount,
     main_net_ratio_avg: ratioAvg,
     free_float_market_cap_avg: freeCapAvg,
     timeline,
@@ -341,6 +366,8 @@ function extendSeriesWithLivePoint(
 ): RawSeries {
   const ratio =
     computeMainNetRatio(liveMain, series.free_float_market_cap) ?? series.main_net_ratio ?? null
+  const amountRatio =
+    computeMainAmountRatio(liveMain, series.daily_amount) ?? series.main_amount_ratio ?? null
   const ratioAvg =
     computeMainNetRatio(liveMain, series.free_float_market_cap_avg) ??
     series.main_net_ratio_avg ??
@@ -355,6 +382,7 @@ function extendSeriesWithLivePoint(
       cum_main: liveMain,
       change_pct: changePct ?? series.change_pct,
       main_net_ratio: ratio,
+      main_amount_ratio: amountRatio,
       main_net_ratio_avg: ratioAvg,
       values,
     }
@@ -365,6 +393,7 @@ function extendSeriesWithLivePoint(
       cum_main: liveMain,
       change_pct: changePct ?? series.change_pct,
       main_net_ratio: ratio,
+      main_amount_ratio: amountRatio,
       main_net_ratio_avg: ratioAvg,
       timeline: [...series.timeline, minute],
       values: [...series.values, liveMain],
@@ -375,6 +404,7 @@ function extendSeriesWithLivePoint(
     cum_main: liveMain,
     change_pct: changePct ?? series.change_pct,
     main_net_ratio: ratio,
+    main_amount_ratio: amountRatio,
     main_net_ratio_avg: ratioAvg,
   }
 }
@@ -435,7 +465,9 @@ function alignToTimeline(item: RawSeries, boardTimeline: string[]): FlowSeries {
     cum_main: item.cum_main,
     change_pct: item.change_pct,
     main_net_ratio: item.main_net_ratio ?? null,
+    main_amount_ratio: item.main_amount_ratio ?? null,
     free_float_market_cap: item.free_float_market_cap ?? null,
+    daily_amount: item.daily_amount ?? null,
     main_net_ratio_avg: item.main_net_ratio_avg ?? null,
     free_float_market_cap_avg: item.free_float_market_cap_avg ?? null,
     values,
@@ -734,7 +766,9 @@ async function loadStockTargets(
         change_pct: item.change_pct,
         cum_main: item.main_cumulative,
         main_net_ratio: item.main_net_ratio ?? null,
+        main_amount_ratio: item.main_amount_ratio ?? null,
         free_float_market_cap: item.free_float_market_cap ?? null,
+        daily_amount: item.daily_amount ?? null,
         main_net_ratio_avg: item.main_net_ratio_avg ?? null,
         free_float_market_cap_avg: item.free_float_market_cap_avg ?? null,
       }))
@@ -816,7 +850,9 @@ async function loadStockPanelBundle(
       let raw = buildRawSeries(stock.id, stock.name, points, stock.change_pct ?? null, {
         symbol: stock.id,
         main_net_ratio: stock.main_net_ratio ?? null,
+        main_amount_ratio: stock.main_amount_ratio ?? null,
         free_float_market_cap: stock.free_float_market_cap ?? null,
+        daily_amount: stock.daily_amount ?? null,
         main_net_ratio_avg: stock.main_net_ratio_avg ?? null,
         free_float_market_cap_avg: stock.free_float_market_cap_avg ?? null,
         trade_date: stockDate,
