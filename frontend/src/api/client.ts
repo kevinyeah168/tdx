@@ -1,5 +1,7 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
+const inflightGets = new Map<string, Promise<unknown>>()
+
 export function isApiNotFound(error: unknown): boolean {
   return error instanceof Error && /\b404\b/.test(error.message)
 }
@@ -11,11 +13,26 @@ export async function apiGet<T>(path: string, params?: Record<string, string>): 
       url.searchParams.set(key, value)
     }
   }
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`API ${response.status}: ${await response.text()}`)
+  const key = url.toString()
+  const pending = inflightGets.get(key)
+  if (pending) return pending as Promise<T>
+
+  const promise = (async () => {
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`API ${response.status}: ${await response.text()}`)
+    }
+    return response.json() as Promise<T>
+  })()
+
+  inflightGets.set(key, promise)
+  try {
+    return (await promise) as T
+  } finally {
+    if (inflightGets.get(key) === promise) {
+      inflightGets.delete(key)
+    }
   }
-  return response.json() as Promise<T>
 }
 
 export async function apiPost<T>(

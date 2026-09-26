@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { NTag } from 'naive-ui'
-import { onBeforeUnmount, onMounted, watch } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 
 import MarketPanel from '@/components/pages/MarketPanel.vue'
 import SectorPickerDrawer from '@/components/sector/SectorPickerDrawer.vue'
@@ -20,14 +20,7 @@ let tickTimer: ReturnType<typeof setInterval> | undefined
 let pollInFlight = false
 let catalogPollInFlight = false
 
-async function syncFromReplay() {
-  const minute = replayStore.mode === 'live' ? null : replayStore.minute
-  await boardStore.setReplayContext(replayStore.tradeDate, minute)
-}
-
-onMounted(async () => {
-  await syncFromReplay()
-
+onMounted(() => {
   pollTimer = setInterval(async () => {
     if (pollInFlight || boardStore.isPanelBusy) return
 
@@ -86,21 +79,6 @@ onBeforeUnmount(() => {
   if (catalogTimer) clearInterval(catalogTimer)
   if (tickTimer) clearInterval(tickTimer)
 })
-
-watch(
-  () => replayStore.tradeDate,
-  () => {
-    void syncFromReplay()
-  },
-)
-
-watch(
-  () => replayStore.minute,
-  (minute) => {
-    if (replayStore.mode !== 'replay') return
-    void boardStore.syncReplayMinute(minute)
-  },
-)
 </script>
 
 <template>

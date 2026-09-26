@@ -18,7 +18,8 @@ export const useReplayStore = defineStore('replay', {
     },
   },
   actions: {
-    async loadAvailableDates() {
+    async loadAvailableDates(force = false) {
+      if (!force && this.availableDates.length) return
       const response = await fetchReplayDates()
       this.availableDates = response.dates.filter((d) => isWeekdayDate(d))
     },

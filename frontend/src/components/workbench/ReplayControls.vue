@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { NButton, NDatePicker, NSelect, NTag } from 'naive-ui'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { NDatePicker, NTag } from 'naive-ui'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 
 import { fetchReplayMinutes } from '@/api/replay'
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
@@ -10,8 +10,6 @@ import { filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTim
 import { localDateFromTimestamp, todayTradeDate } from '@/utils/tradeDate'
 
 const replayStore = useReplayStore()
-const minuteOptions = ref<{ label: string; value: string }[]>([])
-const loadingMinutes = ref(false)
 
 const selectableDates = computed(() => {
   const dates = new Set(replayStore.availableDates.filter((d) => isWeekdayDate(d)))
@@ -29,16 +27,13 @@ function isDateDisabled(ts: number): boolean {
 async function loadMinutes(tradeDate?: string, opts?: { resetToLatest?: boolean }) {
   const date = tradeDate || replayStore.tradeDate
   if (!shouldFetchMarketDataForDate(date)) {
-    minuteOptions.value = []
     replayStore.minute = '09:31'
     replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
     return
   }
-  loadingMinutes.value = true
   try {
     const payload = await fetchReplayMinutes(date)
     const minutes = filterLiveReplayMinutes(payload.minutes, date)
-    minuteOptions.value = minutes.map((minute) => ({ label: minute, value: minute }))
     const latest =
       capLiveReplayMinute(
         payload.latest_available_minute ??
@@ -55,32 +50,19 @@ async function loadMinutes(tradeDate?: string, opts?: { resetToLatest?: boolean 
     const shouldUseLatest =
       opts?.resetToLatest === true ||
       replayStore.mode === 'live' ||
-      !minuteOptions.value.some((item) => item.value === replayStore.minute)
+      !minutes.includes(replayStore.minute)
     if (shouldUseLatest) {
       replayStore.minute = latest
     }
   } catch {
-    minuteOptions.value = []
     replayStore.minute = '09:31'
     replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
-  } finally {
-    loadingMinutes.value = false
   }
 }
 
-async function onDateChange(date: string | null) {
+function onDateChange(date: string | null) {
   if (!date || !isWeekdayDate(date) || !selectableDates.value.includes(date)) return
   replayStore.tradeDate = date
-  await loadMinutes(date, { resetToLatest: true })
-}
-
-async function setLive() {
-  replayStore.setLive()
-  await loadMinutes(todayTradeDate())
-}
-
-function onMinutePick(minute: string) {
-  replayStore.setReplay(replayStore.tradeDate, minute)
 }
 
 let liveMinuteTimer: ReturnType<typeof setInterval> | undefined
@@ -123,16 +105,6 @@ defineExpose({ loadMinutes })
       :is-date-disabled="isDateDisabled"
       @update:formatted-value="onDateChange"
     />
-    <NSelect
-      v-model:value="replayStore.minute"
-      :options="minuteOptions"
-      :disabled="!minuteOptions.length"
-      :loading="loadingMinutes"
-      size="small"
-      class="replay-minute"
-      @update:value="onMinutePick"
-    />
-    <NButton size="small" quaternary @click="setLive">回到实时</NButton>
   </div>
 </template>
 
@@ -146,9 +118,5 @@ defineExpose({ loadMinutes })
 
 .replay-date {
   width: 124px;
-}
-
-.replay-minute {
-  width: 84px;
 }
 </style>

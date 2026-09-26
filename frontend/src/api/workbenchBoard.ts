@@ -1,5 +1,6 @@
 import { fetchCustomSectors } from '@/api/customSectors'
 import { fetchMarketOverview, searchSecurities } from '@/api/market'
+import type { MarketOverview } from '@/types/api'
 import { fetchReplayDates, fetchReplayMinutes } from '@/api/replay'
 import {
   addSectorGroupMembers,
@@ -46,6 +47,11 @@ import { todayTradeDate } from '@/utils/tradeDate'
 import { computeAvgPriceValues } from '@/utils/avgPrice'
 import { legacySectorSearchHint, isClassicIndexCodeQuery } from '@/utils/sectorCodeAliases'
 import { inferSectorTypeFromId, resolveSectorType } from '@/utils/format'
+import { LruCache } from '@/utils/lruCache'
+
+const CHART_FUND_TIERS = 'main'
+const HISTORICAL_BATCH_CACHE = new LruCache<string, Awaited<ReturnType<typeof fetchSectorFundFlowBatch>>>(12)
+const HISTORICAL_GRAY_BATCH_CACHE = new LruCache<string, Awaited<ReturnType<typeof fetchSectorGrayFlowBatch>>>(12)
 
 const SELECTED_BOARDS_KEY = 'workbench-selected-boards'
 const SECTOR_GROUP_MIGRATED_KEY = 'workbench-sector-group-migrated'
@@ -417,7 +423,7 @@ function mergeTimeline(items: RawSeries[]): string[] {
   return [...minutes].sort()
 }
 
-function attachGrayToFlowSeries(
+export function attachGrayToFlowSeries(
   series: FlowSeries,
   grayPoints: Array<StockGrayFlowPoint | SectorGrayFlowPoint>,
   boardTimeline: string[],
@@ -612,6 +618,7 @@ async function loadSectorBoards(
   selectedBoards: BoardItem[]
   activeGroupId: string | null
   activeGroupName: string | null
+  sectorGroups: Awaited<ReturnType<typeof fetchSectorGroups>>['items']
 }> {
   await migrateLegacyWatchlistToGroups()
   const [groupsResponse, sectorsResponse] = await Promise.all([
@@ -627,6 +634,7 @@ async function loadSectorBoards(
       selectedBoards: [],
       activeGroupId: null,
       activeGroupName: null,
+      sectorGroups: [],
     }
   }
   if (activeId === 'all' || !groups.some((group) => group.id === activeId)) {
@@ -658,6 +666,7 @@ async function loadSectorBoards(
     selectedBoards,
     activeGroupId: group.id,
     activeGroupName: group.name,
+    sectorGroups: groups,
   }
 }
 
@@ -677,32 +686,188 @@ async function loadImportedCustomSectorBoards(): Promise<BoardItem[]> {
   }
 }
 
-async function enrichSelectedBoardsWithSnapshot(
+function applySnapshotToBoards(
   boards: BoardItem[],
-  tradeDate: string,
-  minute: string,
-): Promise<BoardItem[]> {
-  if (!boards.length) return boards
-  try {
-    const snapshot = await fetchSectorSnapshot(
-      boards.map((board) => board.id),
-      tradeDate,
-      minute,
-    )
-    const byId = new Map(snapshot.items.map((item) => [item.sector_id, item]))
-    return boards.map((board) => {
-      const hit = byId.get(board.id)
-      if (!hit) return board
-      return {
-        ...board,
-        cum_main: hit.main_cumulative,
-        change_pct: hit.change_pct,
-      }
-    })
-  } catch {
-    return boards
+  snapshotById: Map<string, { main_cumulative: number; change_pct: number }>,
+): BoardItem[] {
+  if (!snapshotById.size) return boards
+  return boards.map((board) => {
+    const hit = snapshotById.get(board.id)
+    if (!hit) return board
+    return {
+      ...board,
+      cum_main: hit.main_cumulative,
+      change_pct: hit.change_pct,
+    }
+  })
+}
+
+/** Lightweight minute tick: refresh ranking tables without reloading full-day curves. */
+export async function refreshWorkbenchRankingSnapshot(opts: {
+  sectorDate: string
+  rankingMinute: string
+  importedBoards: BoardItem[]
+  selectedBoards: BoardItem[]
+  sectorSeries: FlowSeries[]
+  stockSeries: FlowSeries[]
+  watchlist: BoardPayload['watchlist']
+  stockSourceMode: StockSourceMode
+  linkageSectorId?: string | null
+  linkageSectorName?: string | null
+  linkageTopK?: number
+}): Promise<{
+  imported_sector_boards: BoardItem[]
+  selected_boards: BoardItem[]
+  sector_series: FlowSeries[]
+  stock_series: FlowSeries[]
+  watchlist: BoardPayload['watchlist']
+}> {
+  const snapshotIds = [
+    ...new Set(
+      [...opts.importedBoards, ...opts.selectedBoards].map((board) => board.id).filter(Boolean),
+    ),
+  ]
+  const snapshotById = await fetchSectorSnapshotMap(
+    snapshotIds,
+    opts.sectorDate,
+    opts.rankingMinute,
+  )
+  const importedBoards = applySnapshotToBoards(opts.importedBoards, snapshotById)
+  const selectedBoards = applySnapshotToBoards(opts.selectedBoards, snapshotById)
+  const sectorSeries = opts.sectorSeries.map((series) => {
+    const hit = snapshotById.get(series.id)
+    if (!hit) return series
+    return {
+      ...series,
+      cum_main: hit.main_cumulative,
+      change_pct: hit.change_pct ?? series.change_pct ?? null,
+    }
+  })
+
+  let stockSeries = opts.stockSeries
+  let watchlist = opts.watchlist
+  if (opts.stockSourceMode === 'linkage' && opts.linkageSectorId) {
+    try {
+      const members = await fetchSectorMembers(
+        opts.linkageSectorId,
+        opts.sectorDate,
+        opts.rankingMinute,
+        opts.linkageTopK ?? DEFAULT_LINKAGE_TOP_K,
+        opts.linkageSectorName ?? undefined,
+      )
+      const memberMap = new Map(
+        members.items.map((item) => [item.symbol.toUpperCase(), item]),
+      )
+      watchlist = members.items.map((item) => ({
+        symbol: item.symbol,
+        name: item.name,
+        cum_main: item.main_cumulative,
+        quote: { change_pct: item.change_pct },
+      }))
+      stockSeries = opts.stockSeries.map((series) => {
+        const hit = memberMap.get(series.id.toUpperCase())
+        if (!hit) return series
+        return {
+          ...series,
+          cum_main: hit.main_cumulative,
+          change_pct: hit.change_pct,
+          main_net_ratio: hit.main_net_ratio ?? series.main_net_ratio ?? null,
+          main_amount_ratio: hit.main_amount_ratio ?? series.main_amount_ratio ?? null,
+        }
+      })
+    } catch {
+      /* keep existing stock panel */
+    }
+  }
+
+  return {
+    imported_sector_boards: importedBoards,
+    selected_boards: selectedBoards,
+    sector_series: sectorSeries,
+    stock_series: stockSeries,
+    watchlist,
   }
 }
+
+function batchCacheKey(kind: string, tradeDate: string, ids: string[]): string {
+  return `${kind}:${tradeDate}:${[...ids].sort().join(',')}`
+}
+
+function grayCumulativeAtMinute(
+  points: SectorGrayFlowPoint[],
+  minute: string,
+): number | null {
+  let last: number | null = null
+  for (const point of points) {
+    if (point.minute <= minute) last = point.dark_cumulative
+  }
+  return last
+}
+
+function applyGrayTipsToBoards(
+  boards: BoardItem[],
+  grayTipsById: Map<string, number | null>,
+): BoardItem[] {
+  return boards.map((board) => {
+    const gray = grayTipsById.get(board.id)
+    if (gray == null) return board
+    return { ...board, cum_gray: gray }
+  })
+}
+
+async function fetchCachedSectorFundBatch(sectorIds: string[], tradeDate: string) {
+  const key = batchCacheKey('fund-main', tradeDate, sectorIds)
+  const isHistorical = tradeDate !== todayTradeDate()
+  if (isHistorical) {
+    const cached = HISTORICAL_BATCH_CACHE.get(key)
+    if (cached) return cached
+  }
+  const result = await fetchSectorFundFlowBatch(sectorIds, tradeDate, { tiers: CHART_FUND_TIERS })
+  if (isHistorical) HISTORICAL_BATCH_CACHE.set(key, result)
+  return result
+}
+
+async function fetchCachedSectorGrayBatch(sectorIds: string[], tradeDate: string) {
+  const key = batchCacheKey('gray', tradeDate, sectorIds)
+  const isHistorical = tradeDate !== todayTradeDate()
+  if (isHistorical) {
+    const cached = HISTORICAL_GRAY_BATCH_CACHE.get(key)
+    if (cached) return cached
+  }
+  const result = await fetchSectorGrayFlowBatch(sectorIds, tradeDate)
+  if (isHistorical) HISTORICAL_GRAY_BATCH_CACHE.set(key, result)
+  return result
+}
+
+async function fetchSectorSnapshotMap(
+  sectorIds: string[],
+  tradeDate: string,
+  minute: string,
+): Promise<Map<string, { main_cumulative: number; change_pct: number }>> {
+  const uniqueIds = [...new Set(sectorIds.filter(Boolean))]
+  if (!uniqueIds.length) return new Map()
+  try {
+    const snapshot = await fetchSectorSnapshot(uniqueIds, tradeDate, minute)
+    return new Map(
+      snapshot.items.map((item) => [
+        item.sector_id,
+        { main_cumulative: item.main_cumulative, change_pct: item.change_pct },
+      ]),
+    )
+  } catch {
+    return new Map()
+  }
+}
+
+export type WorkbenchSectorChartsPartial = Pick<
+  BoardPayload,
+  'sector_series' | 'timeline' | 'sector_view_date' | 'updated_at'
+>
+
+export type WorkbenchSectorGrayPartial = Pick<
+  BoardPayload,
+  'imported_sector_boards' | 'selected_boards' | 'sector_series'
+>
 
 type WorkbenchBoardOptions = {
   stockDate?: string | null
@@ -714,6 +879,10 @@ type WorkbenchBoardOptions = {
   autoSectorCount?: number
   linkageTopK?: number
   replayMinute?: string | null
+  replayDates?: string[]
+  marketOverview?: MarketOverview | null
+  onSectorChartsReady?: (partial: WorkbenchSectorChartsPartial) => void
+  onSectorGrayReady?: (partial: WorkbenchSectorGrayPartial) => void
 }
 
 type StockPanelBundle = {
@@ -722,6 +891,14 @@ type StockPanelBundle = {
   stockSeries: FlowSeries[]
   stockTimeline: string[]
   watchlist: BoardPayload['watchlist']
+}
+
+const EMPTY_STOCK_PANEL_BUNDLE: StockPanelBundle = {
+  stockTargets: [],
+  stockMode: 'empty',
+  stockSeries: [],
+  stockTimeline: [],
+  watchlist: [],
 }
 
 async function loadLinkageCatalogStocks(
@@ -831,7 +1008,7 @@ async function loadStockPanelBundle(
 
   const symbols = stockTargets.map((stock) => stock.id)
   const [fundBatch, grayBatch] = await Promise.all([
-    fetchStockFundFlowBatch(symbols, stockDate),
+    fetchStockFundFlowBatch(symbols, stockDate, { tiers: CHART_FUND_TIERS }),
     fetchStockGrayFlowBatch(symbols, stockDate),
   ])
   const fundBySymbol = new Map(fundBatch.items.map((item) => [item.symbol.toUpperCase(), item]))
@@ -955,22 +1132,26 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   const sectorDate = await resolveTradeDate(opts?.sectorDate)
   const stockDate = await resolveTradeDate(opts?.stockDate ?? sectorDate)
 
-  let replayDates: string[] = []
-  try {
-    replayDates = (await fetchReplayDates()).dates
-  } catch {
-    replayDates = []
+  let replayDates: string[] = opts?.replayDates?.length ? [...opts.replayDates] : []
+  if (!replayDates.length) {
+    try {
+      replayDates = (await fetchReplayDates()).dates
+    } catch {
+      replayDates = []
+    }
   }
 
   let sectorError: string | null = null
   let minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null = null
-  let overview: Awaited<ReturnType<typeof fetchMarketOverview>> | null = null
+  let overview: MarketOverview | null = opts?.marketOverview ?? null
 
   if (shouldFetchMarketDataForDate(sectorDate)) {
-    try {
-      overview = await fetchMarketOverview(sectorDate)
-    } catch {
-      /* optional */
+    if (!overview) {
+      try {
+        overview = await fetchMarketOverview(sectorDate)
+      } catch {
+        /* optional */
+      }
     }
 
     try {
@@ -989,45 +1170,61 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
 
   const rankingMinute = await resolveRankingMinute(sectorDate, opts?.replayMinute, minutesMeta, overview)
 
+  const timelineFallback = (() => {
+    if (minutesMeta?.minutes.length) {
+      const mins = filterLiveReplayMinutes([...minutesMeta.minutes], sectorDate)
+      const first = mins[0]
+      const prev = first ? previousTradingMinute(first) : null
+      if (prev && !mins.includes(prev)) mins.unshift(prev)
+      return mins
+    }
+    return []
+  })()
+  const shouldLoadStockPanel =
+    fetchCurves &&
+    (stockSourceMode === 'selected' ||
+      (stockSourceMode === 'linkage' && Boolean(linkageSectorId)))
+  const stockPanelPromise = shouldLoadStockPanel
+    ? loadStockPanelBundle(opts, rankingMinute, timelineFallback, fetchCurves)
+    : Promise.resolve(EMPTY_STOCK_PANEL_BUNDLE)
+
   const {
     boards: groupChartBoards,
     sectorMode,
     selectedBoards: allSelectedBoards,
     activeGroupId,
     activeGroupName,
+    sectorGroups,
   } = await loadSectorBoards(sectorSourceMode, sectorDate, autoSectorCount, rankingMinute)
   const importedRaw = await loadImportedCustomSectorBoards()
   const importedIdSet = new Set(importedRaw.map((board) => board.id))
-  const enrichedImportedBoards = importedRaw.length
-    ? await enrichSelectedBoardsWithSnapshot(importedRaw, sectorDate, rankingMinute)
-    : []
-  const enrichedSelectedBoards = allSelectedBoards.length
-    ? await enrichSelectedBoardsWithSnapshot(allSelectedBoards, sectorDate, rankingMinute)
-    : allSelectedBoards
-  const importedChartBoards = boardsForChart(enrichedImportedBoards)
-  const sectorBoards = [...importedChartBoards, ...groupChartBoards.filter((board) => !importedIdSet.has(board.id))].slice(
-    0,
-    MAX_CHART_SECTORS,
-  )
+  const importedChartBoards = boardsForChart(importedRaw)
+  const sectorBoards = [
+    ...importedChartBoards,
+    ...groupChartBoards.filter((board) => !importedIdSet.has(board.id)),
+  ].slice(0, MAX_CHART_SECTORS)
 
-  let sectorResults: Array<{ board: BoardItem; series: RawSeries | null; grayPoints: SectorGrayFlowPoint[] | null }>
+  const snapshotIds = [
+    ...new Set(
+      [...importedRaw, ...allSelectedBoards].map((board) => board.id).filter(Boolean),
+    ),
+  ]
+  const chartSectorIds = sectorBoards.map((board) => board.id)
+  const emptySectorBatch = { trade_date: sectorDate, items: [] as Awaited<ReturnType<typeof fetchSectorFundFlowBatch>>['items'] }
+
+  const batch =
+    fetchCurves && chartSectorIds.length
+      ? await fetchCachedSectorFundBatch(chartSectorIds, sectorDate)
+      : emptySectorBatch
+
+  let sectorResults: Array<{ board: BoardItem; series: RawSeries | null }>
   if (!fetchCurves || !sectorBoards.length) {
-    sectorResults = sectorBoards.map((board) => ({ board, series: null, grayPoints: null }))
+    sectorResults = sectorBoards.map((board) => ({ board, series: null }))
   } else {
-    const sectorIds = sectorBoards.map((board) => board.id)
-    const [batch, grayBatch] = await Promise.all([
-      fetchSectorFundFlowBatch(sectorIds, sectorDate),
-      fetchSectorGrayFlowBatch(sectorIds, sectorDate).catch(() => ({
-        trade_date: sectorDate,
-        items: [],
-      })),
-    ])
     const payloadById = new Map(batch.items.map((item) => [item.sector_id, item]))
-    const grayById = new Map(grayBatch.items.map((item) => [item.sector_id, item.points]))
     sectorResults = sectorBoards.map((board) => {
       const payload = payloadById.get(board.id)
-      if (!payload) return { board, series: null, grayPoints: null }
-      const grayPoints = grayById.get(board.id) ?? null
+      if (!payload) return { board, series: null }
       return {
         board,
         series: buildRawSeries(board.id, board.name, payload.points, payload.change_pct ?? null, {
@@ -1035,7 +1232,6 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
           pre_close: payload.pre_close ?? null,
           trade_date: sectorDate,
         }),
-        grayPoints: grayPoints?.length ? grayPoints : null,
       }
     })
   }
@@ -1047,31 +1243,80 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     .map((item) => item.series)
     .filter((item): item is RawSeries => item != null)
   const timeline = (() => {
-    if (minutesMeta?.minutes.length) {
-      const mins = filterLiveReplayMinutes([...minutesMeta.minutes], sectorDate)
-      const first = mins[0]
-      const prev = first ? previousTradingMinute(first) : null
-      if (prev && !mins.includes(prev)) mins.unshift(prev)
-      return mins
-    }
+    if (timelineFallback.length) return timelineFallback
     return mergeTimeline(rawSectorSeries)
   })()
+
+  const sectorSeriesFromBatch = sectorResults
+    .filter((item): item is typeof item & { series: RawSeries } => item.series != null)
+    .map((item) => alignToTimeline(item.series, timeline))
+
+  opts?.onSectorChartsReady?.({
+    sector_series: sectorSeriesFromBatch,
+    timeline,
+    sector_view_date: sectorDate,
+    updated_at: new Date().toISOString(),
+  })
+
+  const emptyGrayBatch = {
+    trade_date: sectorDate,
+    items: [] as Awaited<ReturnType<typeof fetchSectorGrayFlowBatch>>['items'],
+  }
+  const grayPromise = (async () => {
+    if (!fetchCurves || !snapshotIds.length) return emptyGrayBatch
+    try {
+      const batch = await fetchCachedSectorGrayBatch(snapshotIds, sectorDate)
+      const grayTipsById = new Map(
+        batch.items.map((item) => [
+          item.sector_id,
+          grayCumulativeAtMinute(item.points, rankingMinute),
+        ]),
+      )
+      opts?.onSectorGrayReady?.({
+        imported_sector_boards: applyGrayTipsToBoards(importedRaw, grayTipsById),
+        selected_boards: applyGrayTipsToBoards(allSelectedBoards, grayTipsById),
+        sector_series: sectorSeriesFromBatch.map((series) => ({
+          ...series,
+          cum_gray: grayTipsById.get(series.id) ?? null,
+        })),
+      })
+      return batch
+    } catch {
+      return emptyGrayBatch
+    }
+  })()
+
+  const [snapshotById, grayBatch] = await Promise.all([
+    fetchSectorSnapshotMap(snapshotIds, sectorDate, rankingMinute),
+    grayPromise,
+  ])
+
+  const grayTipsById = new Map(
+    grayBatch.items.map((item) => [
+      item.sector_id,
+      grayCumulativeAtMinute(item.points, rankingMinute),
+    ]),
+  )
+
+  const enrichedImportedBoards = applyGrayTipsToBoards(
+    applySnapshotToBoards(importedRaw, snapshotById),
+    grayTipsById,
+  )
+  const enrichedSelectedBoards = applyGrayTipsToBoards(
+    applySnapshotToBoards(allSelectedBoards, snapshotById),
+    grayTipsById,
+  )
+
   const snapshotBySectorId = new Map(
     [...enrichedImportedBoards, ...enrichedSelectedBoards].map((board) => [board.id, board.cum_main ?? null]),
   )
-  const sectorSeries = sectorResults
-    .filter((item): item is typeof item & { series: RawSeries } => item.series != null)
-    .map((item) => {
-      const aligned = alignToTimeline(item.series, timeline)
-      const snapMain = snapshotBySectorId.get(aligned.id)
-      const withMain =
-        snapMain != null && Number.isFinite(snapMain)
-          ? { ...aligned, cum_main: snapMain }
-          : aligned
-      return item.grayPoints?.length
-        ? attachGrayToFlowSeries(withMain, item.grayPoints, timeline)
-        : withMain
-    })
+  const sectorSeries = sectorSeriesFromBatch.map((aligned) => {
+    const snapMain = snapshotBySectorId.get(aligned.id)
+    const withMain =
+      snapMain != null && Number.isFinite(snapMain) ? { ...aligned, cum_main: snapMain } : aligned
+    const gray = grayTipsById.get(aligned.id)
+    return gray != null ? { ...withMain, cum_gray: gray } : withMain
+  })
 
   const seriesBySectorId = new Map(sectorSeries.map((item) => [item.id, item]))
   const attachSeriesMetrics = (board: BoardItem): BoardItem => {
@@ -1087,7 +1332,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   const finalImportedBoards = enrichedImportedBoards.map(attachSeriesMetrics)
   const finalSelectedBoards = enrichedSelectedBoards.map(attachSeriesMetrics)
 
-  const stockBundle = await loadStockPanelBundle(opts, rankingMinute, timeline, fetchCurves)
+  const stockBundle = await stockPanelPromise
   const { stockTargets, stockMode, stockSeries, stockTimeline } = stockBundle
 
   const latestMinute = pickLatestMinute(minutesMeta, overview, sectorDate) ?? rankingMinute
@@ -1149,6 +1394,7 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     sector_mode: sectorMode,
     active_sector_group_id: activeGroupId,
     active_sector_group_name: activeGroupName,
+    sector_groups: sectorGroups,
     imported_sector_boards: finalImportedBoards,
     selected_boards: finalSelectedBoards,
     stock_mode: stockMode,

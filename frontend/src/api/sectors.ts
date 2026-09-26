@@ -175,15 +175,18 @@ export interface SectorFundFlowBatchResponse {
 export async function fetchSectorFundFlowBatch(
   sectorIds: string[],
   tradeDate: string,
+  opts?: { tiers?: string },
 ): Promise<SectorFundFlowBatchResponse> {
   if (!sectorIds.length) {
     return { trade_date: tradeDate, items: [] }
   }
+  const query: Record<string, string> = { date: tradeDate }
+  if (opts?.tiers) query.tiers = opts.tiers
   try {
     return await apiPost<SectorFundFlowBatchResponse>(
       '/api/v1/sectors/fund-flow/batch',
       { ids: sectorIds },
-      { date: tradeDate },
+      query,
     )
   } catch (error) {
     if (!isApiNotFound(error)) throw error

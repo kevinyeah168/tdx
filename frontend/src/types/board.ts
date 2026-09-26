@@ -80,6 +80,7 @@ export interface BoardPayload {
   sector_mode: string
   active_sector_group_id?: string | null
   active_sector_group_name?: string | null
+  sector_groups?: Array<{ id: string; name: string; sector_ids: string[] }>
   /** Directory-synced custom sectors shown above the active group in the sector rank panel. */
   imported_sector_boards?: BoardItem[]
   selected_boards: BoardItem[]

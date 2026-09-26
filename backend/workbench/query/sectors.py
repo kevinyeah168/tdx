@@ -269,11 +269,19 @@ class SectorQueryService:
         effective_minute = minute
         items: list[SectorSnapshotItem] = []
         custom_flow = CustomSectorFlowService(self._meta, self._hot)
+        catalog_ids = [
+            sector_id for sector_id in unique_ids if not is_custom_sector_id(sector_id)
+        ]
+        catalog_tips = (
+            self._hot.sector_fund_tips_batch(trade_date, catalog_ids, minute)
+            if catalog_ids
+            else {}
+        )
         for sector_id in unique_ids:
             if is_custom_sector_id(sector_id):
                 tip = custom_flow.fund_tip_at_minute(trade_date, sector_id, minute)
             else:
-                tip = self._hot.sector_fund_tip(trade_date, sector_id, minute)
+                tip = catalog_tips.get(sector_id)
             if tip is None:
                 continue
             effective_minute = str(tip["minute"])

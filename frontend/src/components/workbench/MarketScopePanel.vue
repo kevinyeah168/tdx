@@ -88,13 +88,6 @@ watch([tradeDate, cutoffMinute], () => {
   void loadMarketScopes()
 })
 
-watch(
-  () => boardStore.board.updated_at,
-  () => {
-    void loadMarketScopes()
-  },
-)
-
 defineExpose({ reload: loadMarketScopes })
 </script>
 

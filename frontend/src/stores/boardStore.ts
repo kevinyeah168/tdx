@@ -13,8 +13,9 @@ import {
   type SectorGroup,
 } from '@/api/sectorGroups'
 import { fetchCustomSectors } from '@/api/customSectors'
-import { fetchSectorCatalogMembers } from '@/api/sectors'
+import { fetchSectorCatalogMembers, fetchSectorGrayFlow } from '@/api/sectors'
 import {
+  attachGrayToFlowSeries,
   loadAutoSectorCount,
   loadLinkageTopK,
   loadStockSourceMode,
@@ -25,10 +26,13 @@ import {
   saveSectorSourceMode,
   saveStockSourceMode,
   fetchWorkbenchStockPanel,
+  refreshWorkbenchRankingSnapshot,
   type SectorSourceMode,
   type StockSourceMode,
 } from '@/api/workbenchBoard'
 import { shouldFetchMarketDataForDate } from '@/utils/tradingSession'
+import { useMarketStore } from '@/stores/marketStore'
+import { useReplayStore } from '@/stores/replayStore'
 import { useSectorStore } from '@/stores/sectorStore'
 import { WORKBENCH_REFRESH_SECONDS } from '@/constants/refresh'
 import { todayTradeDate } from '@/utils/tradeDate'
@@ -161,6 +165,8 @@ export const useBoardStore = defineStore('board', () => {
   function boardFetchOptions() {
     const sectorDate = resolvedSectorViewDate()
     const stockDate = resolvedStockViewDate()
+    const marketStore = useMarketStore()
+    const replayStore = useReplayStore()
     return {
       stockDate,
       sectorDate,
@@ -171,6 +177,8 @@ export const useBoardStore = defineStore('board', () => {
       autoSectorCount: autoSectorCount.value,
       linkageTopK: linkageTopK.value,
       replayMinute: replayMinute.value,
+      replayDates: replayStore.availableDates.length ? [...replayStore.availableDates] : undefined,
+      marketOverview: sectorDate ? marketStore.overviewFor(sectorDate) : null,
     }
   }
 
@@ -188,7 +196,47 @@ export const useBoardStore = defineStore('board', () => {
     const sectorSeqAtStart = opts?.sectorSeq ?? sectorLoadSeq
     await previous
     try {
-      const data = await fetchBoard(boardFetchOptions())
+      const sectorDate = resolvedSectorViewDate()
+      if (sectorDate) {
+        await useMarketStore().ensureOverview(sectorDate)
+      }
+      const data = await fetchBoard({
+        ...boardFetchOptions(),
+        onSectorChartsReady: (partial) => {
+          if (stockLoadSeq !== stockSeqAtStart) return
+          if (sectorLoadSeq !== sectorSeqAtStart) return
+          board.value = {
+            ...board.value,
+            ...partial,
+            error: null,
+          }
+        },
+        onSectorGrayReady: (partial) => {
+          if (stockLoadSeq !== stockSeqAtStart) return
+          if (sectorLoadSeq !== sectorSeqAtStart) return
+          const grayById = new Map(
+            [...partial.imported_sector_boards, ...partial.selected_boards].map((board) => [
+              board.id,
+              board.cum_gray ?? null,
+            ]),
+          )
+          board.value = {
+            ...board.value,
+            imported_sector_boards: (board.value.imported_sector_boards ?? []).map((board) => ({
+              ...board,
+              cum_gray: grayById.get(board.id) ?? board.cum_gray ?? null,
+            })),
+            selected_boards: (board.value.selected_boards ?? []).map((board) => ({
+              ...board,
+              cum_gray: grayById.get(board.id) ?? board.cum_gray ?? null,
+            })),
+            sector_series: board.value.sector_series.map((series) => ({
+              ...series,
+              cum_gray: grayById.get(series.id) ?? series.cum_gray ?? null,
+            })),
+          }
+        },
+      })
       if (opts?.stockSeq != null && opts.stockSeq !== stockLoadSeq) return
       if (opts?.sectorSeq != null && opts.sectorSeq !== sectorLoadSeq) return
 
@@ -196,7 +244,9 @@ export const useBoardStore = defineStore('board', () => {
       const keepStock = stockLoadSeq !== stockSeqAtStart
       const keepSector = sectorLoadSeq !== sectorSeqAtStart
       activeSectorGroupId.value = data.active_sector_group_id ?? null
-      void loadSectorGroups()
+      if (data.sector_groups?.length) {
+        sectorGroups.value = data.sector_groups
+      }
       const resolvedSectorDate = sectorViewDate.value ?? data.sector_view_date ?? null
       if (!sectorViewDate.value && resolvedSectorDate) {
         sectorViewDate.value = resolvedSectorDate
@@ -366,7 +416,6 @@ export const useBoardStore = defineStore('board', () => {
     const seq = ++stockLoadSeq
     stockLoading.value = true
     stockLoadingHint.value = hint
-    clearStockPanelPreview()
     try {
       await task(seq)
     } finally {
@@ -381,7 +430,6 @@ export const useBoardStore = defineStore('board', () => {
     const seq = ++sectorLoadSeq
     sectorLoading.value = true
     sectorLoadingHint.value = hint
-    clearSectorPanelPreview()
     try {
       await task(seq)
     } finally {
@@ -505,12 +553,38 @@ export const useBoardStore = defineStore('board', () => {
   /** Live-mode minute tick: never overwrite panel-selected historical dates. */
   async function syncReplayMinute(minute: string | null) {
     replayMinute.value = minute
+    if (!minute) return
     if (isHistoricalSectorView() && isHistoricalStockView()) return
-    if (isHistoricalSectorView()) {
-      if (!isHistoricalStockView()) await loadStockPanel()
+
+    if (!board.value.sector_series.length) {
+      await loadBoard()
       return
     }
-    await loadBoard()
+
+    const sectorDate = resolvedSectorViewDate()
+    if (!sectorDate || !shouldFetchMarketDataForDate(sectorDate)) return
+
+    try {
+      const refreshed = await refreshWorkbenchRankingSnapshot({
+        sectorDate,
+        rankingMinute: minute,
+        importedBoards: board.value.imported_sector_boards ?? [],
+        selectedBoards: board.value.selected_boards ?? [],
+        sectorSeries: board.value.sector_series ?? [],
+        stockSeries: board.value.stock_series ?? [],
+        watchlist: board.value.watchlist ?? [],
+        stockSourceMode: stockSourceMode.value,
+        linkageSectorId: linkageSectorId.value,
+        linkageSectorName: linkageSectorName.value,
+        linkageTopK: linkageTopK.value,
+      })
+      board.value = {
+        ...board.value,
+        ...refreshed,
+      }
+    } catch {
+      /* keep stale ranking */
+    }
   }
 
   function isHistoricalSectorView(): boolean {
@@ -546,6 +620,7 @@ export const useBoardStore = defineStore('board', () => {
     // 切换板块后必须清掉个股 solo，否则会一直只画一条旧曲线
     highlightedStock.value = null
     highlightedSector.value = sectorId
+    void ensureSectorGrayOverlay(sectorId)
 
     const sectorName =
       board.value.sector_series.find((item) => item.id === sectorId)?.name ||
@@ -702,12 +777,35 @@ export const useBoardStore = defineStore('board', () => {
     chartHoverSource.value = null
   }
 
+  async function ensureSectorGrayOverlay(sectorId: string) {
+    const timeline = board.value.timeline || []
+    const existing = board.value.sector_series.find((item) => item.id === sectorId)
+    if (!existing || existing.gray_values?.some((value) => value != null)) return
+    const sectorDate = resolvedSectorViewDate()
+    if (!sectorDate) return
+    try {
+      const payload = await fetchSectorGrayFlow(sectorId, sectorDate)
+      if (!payload.points.length) return
+      const patched = attachGrayToFlowSeries(existing, payload.points, timeline)
+      board.value = {
+        ...board.value,
+        sector_series: board.value.sector_series.map((item) =>
+          item.id === sectorId ? patched : item,
+        ),
+      }
+    } catch {
+      /* gray optional */
+    }
+  }
+
   function toggleHighlight(id: string, mode: 'sector' | 'stock' = 'sector') {
     if (mode === 'stock') {
       highlightedStock.value = highlightedStock.value === id ? null : id
-    } else {
-      highlightedSector.value = highlightedSector.value === id ? null : id
+      return
     }
+    const next = highlightedSector.value === id ? null : id
+    highlightedSector.value = next
+    if (next) void ensureSectorGrayOverlay(next)
   }
 
   function selectStock(symbol: string) {

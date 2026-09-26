@@ -13,8 +13,16 @@ export interface ReplayMinutesResponse {
   latest_available_minute?: string | null
 }
 
-export function fetchReplayDates(): Promise<ReplayDatesResponse> {
-  return apiGet<ReplayDatesResponse>('/api/v1/replay/dates')
+let cachedReplayDates: ReplayDatesResponse | null = null
+
+export function clearReplayDatesCache(): void {
+  cachedReplayDates = null
+}
+
+export async function fetchReplayDates(): Promise<ReplayDatesResponse> {
+  if (cachedReplayDates) return cachedReplayDates
+  cachedReplayDates = await apiGet<ReplayDatesResponse>('/api/v1/replay/dates')
+  return cachedReplayDates
 }
 
 export function fetchReplayMinutes(tradeDate: string): Promise<ReplayMinutesResponse> {

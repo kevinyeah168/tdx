@@ -569,7 +569,30 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
             return SectorFundFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
         trade_date_str = trade_date.isoformat()
         items: list[SectorFundFlowPayload] = []
-        for sector_id in _normalize_batch_ids(payload.ids):
+        normalized_ids = _normalize_batch_ids(payload.ids)
+        catalog_ids = [
+            sector_id for sector_id in normalized_ids if not is_custom_sector_id(sector_id)
+        ]
+        custom_ids = [sector_id for sector_id in normalized_ids if is_custom_sector_id(sector_id)]
+        try:
+            catalog_curves = store.complete_sector_fund_curves_batch(trade_date_str, catalog_ids)
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+            catalog_curves = {}
+        for sector_id in catalog_ids:
+            curve = catalog_curves.get(sector_id)
+            if curve is None:
+                continue
+            serialized = _serialize_series_optional(
+                entity_key="sector_id",
+                entity_id=sector_id,
+                latest_complete_minute=curve.latest_complete_minute,
+                rows=curve.rows,
+                tiers=selected_tiers,
+                payload_model=SectorFundFlowPayload,
+            )
+            if serialized is not None:
+                items.append(serialized)
+        for sector_id in custom_ids:
             try:
                 curve = _sector_fund_curve(active_settings, trade_date, sector_id, store)
                 serialized = _serialize_series_optional(
@@ -598,20 +621,23 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
             return StockFundFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
         trade_date_str = trade_date.isoformat()
         items: list[StockFundFlowPayload] = []
-        for raw_symbol in _normalize_batch_ids(payload.ids):
-            symbol = raw_symbol.upper()
-            try:
-                curve = store.live_stock_fund_curve(trade_date_str, symbol)
-                serialized = _serialize_series_optional(
-                    entity_key="symbol",
-                    entity_id=symbol,
-                    latest_complete_minute=curve.latest_complete_minute,
-                    rows=curve.rows,
-                    tiers=selected_tiers,
-                    payload_model=StockFundFlowPayload,
-                )
-            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+        symbols = [raw_symbol.upper() for raw_symbol in _normalize_batch_ids(payload.ids)]
+        try:
+            curves = store.live_stock_fund_curves_batch(trade_date_str, symbols)
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+            curves = {}
+        for symbol in symbols:
+            curve = curves.get(symbol)
+            if curve is None:
                 continue
+            serialized = _serialize_series_optional(
+                entity_key="symbol",
+                entity_id=symbol,
+                latest_complete_minute=curve.latest_complete_minute,
+                rows=curve.rows,
+                tiers=selected_tiers,
+                payload_model=StockFundFlowPayload,
+            )
             if serialized is not None:
                 items.append(serialized)
         return StockFundFlowBatchResponse(trade_date=trade_date_str, items=items)
@@ -626,10 +652,16 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
             return StockGrayFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
         trade_date_str = trade_date.isoformat()
         items: list[StockGrayFlowPayload] = []
-        for raw_symbol in _normalize_batch_ids(payload.ids):
-            symbol = raw_symbol.upper()
+        symbols = [raw_symbol.upper() for raw_symbol in _normalize_batch_ids(payload.ids)]
+        try:
+            curves = store.stock_gray_curves_batch(trade_date_str, symbols)
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+            curves = {}
+        for symbol in symbols:
+            curve = curves.get(symbol)
+            if curve is None:
+                continue
             try:
-                curve = store.stock_gray_curve(trade_date_str, symbol)
                 items.append(_serialize_gray_curve(symbol=symbol, curve=curve))
             except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
                 continue
@@ -645,7 +677,26 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
             return SectorGrayFlowBatchResponse(trade_date=trade_date.isoformat(), items=[])
         trade_date_str = trade_date.isoformat()
         items: list[SectorGrayFlowPayload] = []
-        for sector_id in _normalize_batch_ids(payload.ids):
+        normalized_ids = _normalize_batch_ids(payload.ids)
+        catalog_ids = [
+            sector_id for sector_id in normalized_ids if not is_custom_sector_id(sector_id)
+        ]
+        custom_ids = [sector_id for sector_id in normalized_ids if is_custom_sector_id(sector_id)]
+        try:
+            catalog_curves = store.sector_gray_curves_batch(trade_date_str, catalog_ids)
+        except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+            catalog_curves = {}
+        for sector_id in catalog_ids:
+            curve = catalog_curves.get(sector_id)
+            if curve is None:
+                continue
+            try:
+                serialized = _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)
+            except (sqlite3.DatabaseError, json.JSONDecodeError, KeyError, TypeError, ValidationError):
+                continue
+            if serialized.points:
+                items.append(serialized)
+        for sector_id in custom_ids:
             try:
                 curve = _sector_gray_curve(active_settings, trade_date, sector_id, store)
                 serialized = _serialize_sector_gray_curve(sector_id=sector_id, curve=curve)

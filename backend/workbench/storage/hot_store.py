@@ -769,6 +769,44 @@ class HotStore:
         )
         return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
 
+    def stock_gray_curves_batch(
+        self,
+        trade_date: str,
+        symbols: list[str],
+    ) -> dict[str, CompleteFundCurve]:
+        unique_symbols = list(
+            dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+        )
+        if not unique_symbols:
+            return {}
+        placeholders = ",".join("?" * len(unique_symbols))
+        with self._session(readonly=True) as connection:
+            table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_gray_minute'"
+            ).fetchone()
+            if table is None:
+                return {}
+            raw = connection.execute(
+                "SELECT * FROM stock_gray_minute WHERE trade_date=? AND symbol IN ("
+                f"{placeholders}) ORDER BY symbol, minute",
+                (trade_date, *unique_symbols),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in unique_symbols}
+        for row in raw:
+            symbol = str(row["symbol"]).upper()
+            if symbol in grouped:
+                grouped[symbol].append(dict(row))
+        curves: dict[str, CompleteFundCurve] = {}
+        for symbol, rows in grouped.items():
+            ordered = self._filter_live_rows(trade_date, rows)
+            latest = ordered[-1]["minute"] if ordered else None
+            latest = clip_minute_for_live_session(
+                date_type.fromisoformat(trade_date),
+                str(latest) if latest else None,
+            )
+            curves[symbol] = CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+        return curves
+
     def sector_gray_curve(self, trade_date: str, sector_id: str) -> CompleteFundCurve:
         with self._session(readonly=True) as connection:
             rows = connection.execute(
@@ -783,6 +821,44 @@ class HotStore:
             str(latest) if latest else None,
         )
         return CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+
+    def sector_gray_curves_batch(
+        self,
+        trade_date: str,
+        sector_ids: list[str],
+    ) -> dict[str, CompleteFundCurve]:
+        unique_ids = list(
+            dict.fromkeys(sector_id.strip() for sector_id in sector_ids if sector_id.strip())
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        with self._session(readonly=True) as connection:
+            table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sector_gray_minute'"
+            ).fetchone()
+            if table is None:
+                return {}
+            raw = connection.execute(
+                "SELECT * FROM sector_gray_minute WHERE trade_date=? AND sector_id IN ("
+                f"{placeholders}) ORDER BY sector_id, minute",
+                (trade_date, *unique_ids),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {sector_id: [] for sector_id in unique_ids}
+        for row in raw:
+            sector_id = str(row["sector_id"])
+            if sector_id in grouped:
+                grouped[sector_id].append(dict(row))
+        curves: dict[str, CompleteFundCurve] = {}
+        for sector_id, rows in grouped.items():
+            ordered = self._filter_live_rows(trade_date, rows)
+            latest = ordered[-1]["minute"] if ordered else None
+            latest = clip_minute_for_live_session(
+                date_type.fromisoformat(trade_date),
+                str(latest) if latest else None,
+            )
+            curves[sector_id] = CompleteFundCurve(latest_complete_minute=latest, rows=ordered)
+        return curves
 
     @staticmethod
     def _is_tick_backfill_batch(batch_id: object) -> bool:
@@ -823,20 +899,190 @@ class HotStore:
         return {str(row[0]): str(row[1]) for row in rows}
 
     def _published_snapshot_rows(
-        self, trade_date: str, rows: list[dict[str, Any]]
+        self,
+        trade_date: str,
+        rows: list[dict[str, Any]],
+        status_batches: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         snapshots = self._snapshot_fund_rows(rows)
         if any(self._is_yuntu_batch(row.get("batch_id")) for row in snapshots):
             return snapshots
-        status_batches = self._complete_status_batches(trade_date)
-        if status_batches:
+        batches = status_batches if status_batches is not None else self._complete_status_batches(
+            trade_date
+        )
+        if batches:
             return [
                 row
                 for row in snapshots
-                if str(row["minute"]) in status_batches
-                and str(row.get("batch_id")) == status_batches[str(row["minute"])]
+                if str(row["minute"]) in batches
+                and str(row.get("batch_id")) == batches[str(row["minute"])]
             ]
         return snapshots
+
+    @staticmethod
+    def _parse_fund_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        return [dict(row) | {"tier_meta": json.loads(row["tier_meta_json"])} for row in rows]
+
+    def _finalize_sector_fund_rows(
+        self,
+        trade_date: str,
+        rows: list[dict[str, Any]],
+        status_batches: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._filter_live_rows(
+            trade_date,
+            self._published_snapshot_rows(trade_date, rows, status_batches),
+        )
+
+    def sector_fund_series_map(
+        self,
+        trade_date: str,
+        sector_ids: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        unique_ids = list(
+            dict.fromkeys(sector_id.strip() for sector_id in sector_ids if sector_id.strip())
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        with self._session(readonly=True) as connection:
+            raw = connection.execute(
+                "SELECT * FROM sector_minute WHERE trade_date=? AND sector_id IN ("
+                f"{placeholders}) ORDER BY sector_id, minute",
+                (trade_date, *unique_ids),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {sector_id: [] for sector_id in unique_ids}
+        for row in self._parse_fund_rows(raw):
+            sector_id = str(row["sector_id"])
+            if sector_id in grouped:
+                grouped[sector_id].append(row)
+        status_batches = self._complete_status_batches(trade_date)
+        return {
+            sector_id: self._finalize_sector_fund_rows(trade_date, rows, status_batches)
+            for sector_id, rows in grouped.items()
+            if rows
+        }
+
+    def _sector_fund_tips_at_minute_batch(
+        self,
+        trade_date: str,
+        sector_ids: list[str],
+        minute: str,
+    ) -> dict[str, dict[str, Any]]:
+        unique_ids = list(
+            dict.fromkeys(sector_id.strip() for sector_id in sector_ids if sector_id.strip())
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        status_batches = self._complete_status_batches(trade_date)
+        with self._session(readonly=True) as connection:
+            raw = connection.execute(
+                "SELECT sm.* FROM sector_minute sm "
+                "INNER JOIN ("
+                "SELECT sector_id, MAX(minute) AS target_minute "
+                "FROM sector_minute "
+                f"WHERE trade_date=? AND sector_id IN ({placeholders}) AND minute<=? "
+                "GROUP BY sector_id"
+                ") pick ON sm.trade_date=? "
+                "AND sm.sector_id=pick.sector_id AND sm.minute=pick.target_minute",
+                (trade_date, *unique_ids, minute, trade_date),
+            ).fetchall()
+        tips: dict[str, dict[str, Any]] = {}
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in self._parse_fund_rows(raw):
+            sector_id = str(row["sector_id"])
+            grouped.setdefault(sector_id, []).append(row)
+        for sector_id, rows in grouped.items():
+            finalized = self._finalize_sector_fund_rows(trade_date, rows, status_batches)
+            if finalized:
+                tips[sector_id] = finalized[-1]
+        return tips
+
+    def sector_fund_tips_batch(
+        self,
+        trade_date: str,
+        sector_ids: list[str],
+        minute: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        if minute:
+            return self._sector_fund_tips_at_minute_batch(trade_date, sector_ids, minute)
+        series_map = self.sector_fund_series_map(trade_date, sector_ids)
+        tips: dict[str, dict[str, Any]] = {}
+        for sector_id, series in series_map.items():
+            if not series:
+                continue
+            tips[sector_id] = series[-1]
+        return tips
+
+    def complete_sector_fund_curves_batch(
+        self,
+        trade_date: str,
+        sector_ids: list[str],
+    ) -> dict[str, CompleteFundCurve]:
+        series_map = self.sector_fund_series_map(trade_date, sector_ids)
+        latest = self.latest_available_minute(trade_date)
+        if latest is None:
+            for rows in series_map.values():
+                if rows:
+                    latest = str(rows[-1]["minute"])
+                    break
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            latest,
+        )
+        return {
+            sector_id: CompleteFundCurve(latest_complete_minute=latest, rows=rows)
+            for sector_id, rows in series_map.items()
+        }
+
+    def live_stock_fund_curves_batch(
+        self,
+        trade_date: str,
+        symbols: list[str],
+    ) -> dict[str, CompleteFundCurve]:
+        unique_symbols = list(
+            dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+        )
+        if not unique_symbols:
+            return {}
+        placeholders = ",".join("?" * len(unique_symbols))
+        with self._session(readonly=True) as connection:
+            latest_row = connection.execute(
+                "SELECT MAX(minute) FROM collection_status WHERE trade_date=? AND status='complete'",
+                (trade_date,),
+            ).fetchone()
+            raw = connection.execute(
+                "SELECT * FROM stock_minute WHERE trade_date=? AND symbol IN ("
+                f"{placeholders}) ORDER BY symbol, minute",
+                (trade_date, *unique_symbols),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in unique_symbols}
+        for row in self._parse_fund_rows(raw):
+            symbol = str(row["symbol"]).upper()
+            if symbol in grouped:
+                grouped[symbol].append(row)
+        latest = str(latest_row[0]) if latest_row and latest_row[0] else None
+        latest = clip_minute_for_live_session(
+            date_type.fromisoformat(trade_date),
+            latest,
+        )
+        curves: dict[str, CompleteFundCurve] = {}
+        for symbol, rows in grouped.items():
+            ordered = self._filter_live_rows(
+                trade_date,
+                self._published_snapshot_rows(trade_date, rows),
+            )
+            symbol_latest = latest
+            if symbol_latest is not None:
+                ordered = [row for row in ordered if str(row["minute"]) <= symbol_latest]
+            elif ordered:
+                symbol_latest = str(ordered[-1]["minute"])
+            curves[symbol] = CompleteFundCurve(
+                latest_complete_minute=symbol_latest,
+                rows=ordered,
+            )
+        return curves
 
     @classmethod
     def _prefer_sector_fund_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

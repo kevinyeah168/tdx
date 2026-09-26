@@ -3,7 +3,6 @@ import { MoonOutline, RefreshOutline, SunnyOutline } from '@vicons/ionicons5'
 import { NButton, NDropdown, NIcon, NTag, NTooltip } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 
-import GlobalSearch from '@/components/workbench/GlobalSearch.vue'
 import PrimaryNav from '@/components/workbench/PrimaryNav.vue'
 import PulseHomePage from '@/components/workbench/PulseHomePage.vue'
 import ReplayControls from '@/components/workbench/ReplayControls.vue'
@@ -19,6 +18,7 @@ import { useSectorStore } from '@/stores/sectorStore'
 import { useStockStore } from '@/stores/stockStore'
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { fmtPct } from '@/utils/format'
+import { todayTradeDate } from '@/utils/tradeDate'
 
 const marketStore = useMarketStore()
 const sectorStore = useSectorStore()
@@ -31,6 +31,7 @@ const activeView = ref<'home' | 'sectors' | 'stock' | 'cycle-replay' | 'health' 
 const selectedStock = ref('')
 const refreshing = ref(false)
 const bootstrapped = ref(false)
+let boardDateLoadInFlight = false
 
 const themeLabel = computed(() => {
   if (themeStore.mode === 'system') return '跟随系统'
@@ -64,11 +65,6 @@ const shellError = computed(() => {
   }
 })
 
-function onSearch(symbol: string) {
-  selectedStock.value = symbol
-  activeView.value = 'stock'
-}
-
 function onOpenStock(symbol: string) {
   selectedStock.value = symbol
   activeView.value = 'stock'
@@ -82,15 +78,27 @@ function replayMinuteForBoard(): string | null {
   return replayStore.mode === 'live' ? null : replayStore.minute
 }
 
+function syncViewStores(tradeDate: string, minute: string) {
+  if (activeView.value === 'sectors') {
+    sectorStore.setTradeDate(tradeDate, minute)
+  }
+  if (activeView.value === 'stock') {
+    stockStore.setReplayContext(tradeDate, minute)
+  }
+}
+
 watch(activeView, (view) => {
   if (view === 'home') {
     void boardStore.setReplayContext(replayStore.tradeDate, replayMinuteForBoard())
+    return
   }
+
+  // 子页面 store 默认是今日；从首页带历史回放日期切过来时需先对齐顶栏日期。
+  syncViewStores(replayStore.tradeDate, replayStore.minute)
+
   if (view === 'sectors') {
     void sectorStore.loadGroups()
     void sectorStore.loadImportedSectors()
-    // 开盘前 bootstrap 可能判定无数据；进入板块页时重试，避免一直卡在「尚未开盘」
-    void sectorStore.reloadForDate()
   }
   if (view === 'stock') {
     void stockStore.loadGroups()
@@ -103,12 +111,12 @@ watch(activeView, (view) => {
 async function refreshAll() {
   refreshing.value = true
   try {
-    await marketStore.loadOverview()
+    await marketStore.ensureOverview(replayStore.tradeDate)
     if (activeView.value === 'home') {
       await boardStore.manualRefresh()
     } else if (activeView.value === 'stock') {
       await stockStore.reloadForDate()
-    } else {
+    } else if (activeView.value === 'sectors') {
       await sectorStore.reloadForDate()
       replayStore.minute = sectorStore.replayMinute
     }
@@ -118,16 +126,44 @@ async function refreshAll() {
 }
 
 watch(
-  () => [replayStore.tradeDate, replayStore.minute] as const,
-  ([tradeDate, minute]) => {
+  () => replayStore.tradeDate,
+  async (tradeDate, previousDate) => {
     if (!bootstrapped.value) return
-    sectorStore.setTradeDate(tradeDate, minute)
-    stockStore.setReplayContext(tradeDate, minute)
+    if (previousDate != null && previousDate === tradeDate) return
+
     marketStore.tradeDate = tradeDate
-    void marketStore.loadOverview()
+    await marketStore.ensureOverview(tradeDate)
+
+    const boardMinute = replayStore.mode === 'live' ? null : replayStore.minute
+    if (activeView.value === 'home') {
+      boardDateLoadInFlight = true
+      try {
+        await boardStore.setReplayContext(tradeDate, boardMinute)
+      } finally {
+        boardDateLoadInFlight = false
+      }
+    } else {
+      boardStore.syncReplayDates(tradeDate, boardMinute)
+    }
+
+    syncViewStores(tradeDate, replayStore.minute)
+  },
+)
+
+watch(
+  () => replayStore.minute,
+  (minute, previousMinute) => {
+    if (!bootstrapped.value) return
+    if (previousMinute != null && previousMinute === minute) return
+    if (boardDateLoadInFlight) return
+
+    const tradeDate = replayStore.tradeDate
     const boardMinute = replayStore.mode === 'live' ? null : minute
     if (activeView.value === 'home') {
-      void boardStore.setReplayContext(tradeDate, boardMinute)
+      boardStore.syncReplayDates(tradeDate, boardMinute)
+      if (replayStore.mode === 'replay') {
+        void boardStore.syncReplayMinute(boardMinute)
+      }
     } else {
       boardStore.syncReplayDates(tradeDate, boardMinute)
     }
@@ -136,12 +172,14 @@ watch(
 
 onMounted(async () => {
   await replayStore.loadAvailableDates()
-  await sectorStore.bootstrap()
-  replayStore.tradeDate = sectorStore.tradeDate
-  replayStore.minute = sectorStore.replayMinute
-  marketStore.tradeDate = sectorStore.tradeDate
+  if (!replayStore.tradeDate) {
+    const latest = replayStore.availableDates[replayStore.availableDates.length - 1]
+    replayStore.tradeDate = latest ?? todayTradeDate()
+  }
+  marketStore.tradeDate = replayStore.tradeDate
   bootstrapped.value = true
-  await marketStore.loadOverview()
+  await marketStore.ensureOverview(replayStore.tradeDate)
+  void boardStore.setReplayContext(replayStore.tradeDate, replayMinuteForBoard())
 })
 </script>
 
@@ -163,7 +201,6 @@ onMounted(async () => {
 
       <div class="header-right">
         <ReplayControls />
-        <GlobalSearch @select="onSearch" />
         <NDropdown trigger="click" :options="themeOptions" @select="(k) => themeStore.setMode(k as ThemeMode)">
           <NTooltip>
             <template #trigger>

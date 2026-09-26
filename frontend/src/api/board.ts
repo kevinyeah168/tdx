@@ -9,6 +9,11 @@ import type {
   StockDetail,
   FlowSeries,
 } from '@/types/board'
+import type { MarketOverview } from '@/types/api'
+import type {
+  WorkbenchSectorChartsPartial,
+  WorkbenchSectorGrayPartial,
+} from '@/api/workbenchBoard'
 
 const WORKBENCH_MODE = import.meta.env.VITE_WORKBENCH === 'true'
 
@@ -107,9 +112,14 @@ export async function fetchBoard(opts?: {
   sectorSourceMode?: 'auto' | 'selected'
   stockSourceMode?: 'linkage' | 'selected'
   linkageSectorId?: string | null
+  linkageSectorName?: string | null
   autoSectorCount?: number
   linkageTopK?: number
   replayMinute?: string | null
+  replayDates?: string[]
+  marketOverview?: MarketOverview | null
+  onSectorChartsReady?: (partial: WorkbenchSectorChartsPartial) => void
+  onSectorGrayReady?: (partial: WorkbenchSectorGrayPartial) => void
 }): Promise<BoardPayload> {
   if (WORKBENCH_MODE) {
     const { fetchWorkbenchBoard } = await import('@/api/workbenchBoard')

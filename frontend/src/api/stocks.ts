@@ -142,15 +142,18 @@ export interface StockGrayFlowBatchResponse {
 export async function fetchStockFundFlowBatch(
   symbols: string[],
   tradeDate: string,
+  opts?: { tiers?: string },
 ): Promise<StockFundFlowBatchResponse> {
   if (!symbols.length) {
     return { trade_date: tradeDate, items: [] }
   }
+  const query: Record<string, string> = { date: tradeDate }
+  if (opts?.tiers) query.tiers = opts.tiers
   try {
     return await apiPost<StockFundFlowBatchResponse>(
       '/api/v1/stocks/fund-flow/batch',
       { ids: symbols },
-      { date: tradeDate },
+      query,
     )
   } catch (error) {
     if (!isApiNotFound(error)) throw error
