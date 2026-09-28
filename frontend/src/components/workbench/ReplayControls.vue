@@ -2,14 +2,15 @@
 import { NDatePicker, NTag } from 'naive-ui'
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 
-import { fetchReplayMinutes } from '@/api/replay'
 import { WORKBENCH_REFRESH_MS } from '@/constants/refresh'
+import { useMarketStore } from '@/stores/marketStore'
 import { useReplayStore } from '@/stores/replayStore'
-import { isWeekdayDate, shouldFetchMarketDataForDate } from '@/utils/tradingSession'
-import { filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
+import { isWeekdayDate } from '@/utils/tradingSession'
+import { syncReplayMinuteForDate } from '@/utils/replayMinute'
 import { localDateFromTimestamp, todayTradeDate } from '@/utils/tradeDate'
 
 const replayStore = useReplayStore()
+const marketStore = useMarketStore()
 
 const selectableDates = computed(() => {
   const dates = new Set(replayStore.availableDates.filter((d) => isWeekdayDate(d)))
@@ -24,40 +25,14 @@ function isDateDisabled(ts: number): boolean {
   return !selectableDates.value.includes(d)
 }
 
-async function loadMinutes(tradeDate?: string, opts?: { resetToLatest?: boolean }) {
+function applyLocalMinute(tradeDate?: string, opts?: { resetToLatest?: boolean }) {
   const date = tradeDate || replayStore.tradeDate
-  if (!shouldFetchMarketDataForDate(date)) {
-    replayStore.minute = '09:31'
-    replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
-    return
-  }
-  try {
-    const payload = await fetchReplayMinutes(date)
-    const minutes = filterLiveReplayMinutes(payload.minutes, date)
-    const latest =
-      capLiveReplayMinute(
-        payload.latest_available_minute ??
-          payload.latest_sector_minute ??
-          payload.latest_complete_minute ??
-          minutes[minutes.length - 1] ??
-          '09:31',
-        date,
-      ) ??
-      minutes[minutes.length - 1] ??
-      '09:31'
-    const isToday = date === todayTradeDate()
-    replayStore.mode = isToday ? 'live' : 'replay'
-    const shouldUseLatest =
-      opts?.resetToLatest === true ||
-      replayStore.mode === 'live' ||
-      !minutes.includes(replayStore.minute)
-    if (shouldUseLatest) {
-      replayStore.minute = latest
-    }
-  } catch {
-    replayStore.minute = '09:31'
-    replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
-  }
+  const overview = marketStore.overviewFor(date) ?? marketStore.overview
+  replayStore.minute = syncReplayMinuteForDate(date, overview, {
+    resetToLatest: opts?.resetToLatest,
+    currentMinute: replayStore.minute,
+  })
+  replayStore.mode = date === todayTradeDate() ? 'live' : 'replay'
 }
 
 function onDateChange(date: string | null) {
@@ -70,8 +45,7 @@ let liveMinuteTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   liveMinuteTimer = setInterval(() => {
     if (replayStore.mode !== 'live' || replayStore.tradeDate !== todayTradeDate()) return
-    if (!shouldFetchMarketDataForDate(replayStore.tradeDate)) return
-    void loadMinutes(replayStore.tradeDate)
+    applyLocalMinute(replayStore.tradeDate, { resetToLatest: true })
   }, WORKBENCH_REFRESH_MS)
 })
 
@@ -82,12 +56,12 @@ onBeforeUnmount(() => {
 watch(
   () => replayStore.tradeDate,
   (date) => {
-    void loadMinutes(date, { resetToLatest: true })
+    applyLocalMinute(date, { resetToLatest: true })
   },
   { immediate: true },
 )
 
-defineExpose({ loadMinutes })
+defineExpose({ applyLocalMinute })
 </script>
 
 <template>

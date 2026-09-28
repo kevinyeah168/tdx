@@ -52,7 +52,10 @@ const linkedHoverMinute = computed(() =>
 
 function stockValueAtHover(series: FlowSeries): FlowSeries {
   const minute = linkedHoverMinute.value
-  if (!minute) return series
+  const baseGray = series.cum_gray ?? null
+  if (!minute) {
+    return baseGray != null ? { ...series, cum_gray: baseGray } : series
+  }
   const timeline = board.value.stock_timeline || []
   const main = valueAtTradingMinute(timeline, series.values || [], minute)
   const gray = series.gray_values?.length
@@ -70,15 +73,18 @@ function stockValueAtHover(series: FlowSeries): FlowSeries {
   return {
     ...series,
     cum_main: cumMain,
-    cum_gray: gray ?? series.cum_gray ?? null,
+    cum_gray: gray ?? baseGray,
     main_amount_ratio: mainAmountRatio,
   }
 }
 
 function sectorBoardAtHover(boardItem: BoardItem): BoardItem {
-  const minute = linkedHoverMinute.value
-  if (!minute) return boardItem
   const series = board.value.sector_series.find((item) => item.id === boardItem.id)
+  const baseGray = boardItem.cum_gray ?? series?.cum_gray ?? null
+  const minute = linkedHoverMinute.value
+  if (!minute) {
+    return baseGray != null ? { ...boardItem, cum_gray: baseGray } : boardItem
+  }
   if (!series) return boardItem
   const timeline = board.value.timeline || []
   const main = valueAtTradingMinute(timeline, series.values || [], minute)
@@ -88,7 +94,7 @@ function sectorBoardAtHover(boardItem: BoardItem): BoardItem {
   return {
     ...boardItem,
     ...(main != null ? { cum_main: main } : {}),
-    ...(gray != null ? { cum_gray: gray } : {}),
+    cum_gray: gray ?? baseGray,
   }
 }
 

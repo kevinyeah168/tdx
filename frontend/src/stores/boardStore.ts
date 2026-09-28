@@ -176,7 +176,7 @@ export const useBoardStore = defineStore('board', () => {
       linkageSectorName: linkageSectorName.value,
       autoSectorCount: autoSectorCount.value,
       linkageTopK: linkageTopK.value,
-      replayMinute: replayMinute.value,
+      replayMinute: replayMinute.value ?? replayStore.minute,
       replayDates: replayStore.availableDates.length ? [...replayStore.availableDates] : undefined,
       marketOverview: sectorDate ? marketStore.overviewFor(sectorDate) : null,
     }
@@ -214,26 +214,11 @@ export const useBoardStore = defineStore('board', () => {
         onSectorGrayReady: (partial) => {
           if (stockLoadSeq !== stockSeqAtStart) return
           if (sectorLoadSeq !== sectorSeqAtStart) return
-          const grayById = new Map(
-            [...partial.imported_sector_boards, ...partial.selected_boards].map((board) => [
-              board.id,
-              board.cum_gray ?? null,
-            ]),
-          )
           board.value = {
             ...board.value,
-            imported_sector_boards: (board.value.imported_sector_boards ?? []).map((board) => ({
-              ...board,
-              cum_gray: grayById.get(board.id) ?? board.cum_gray ?? null,
-            })),
-            selected_boards: (board.value.selected_boards ?? []).map((board) => ({
-              ...board,
-              cum_gray: grayById.get(board.id) ?? board.cum_gray ?? null,
-            })),
-            sector_series: board.value.sector_series.map((series) => ({
-              ...series,
-              cum_gray: grayById.get(series.id) ?? series.cum_gray ?? null,
-            })),
+            imported_sector_boards: partial.imported_sector_boards ?? board.value.imported_sector_boards,
+            selected_boards: partial.selected_boards ?? board.value.selected_boards,
+            sector_series: partial.sector_series ?? board.value.sector_series,
           }
         },
       })

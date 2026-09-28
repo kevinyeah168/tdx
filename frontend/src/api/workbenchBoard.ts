@@ -1,7 +1,7 @@
 import { fetchCustomSectors } from '@/api/customSectors'
 import { fetchMarketOverview, searchSecurities } from '@/api/market'
 import type { MarketOverview } from '@/types/api'
-import { fetchReplayDates, fetchReplayMinutes } from '@/api/replay'
+import { fetchReplayDates } from '@/api/replay'
 import {
   addSectorGroupMembers,
   createSectorGroup,
@@ -37,7 +37,13 @@ import type {
   StockCatalogResponse,
   StockDetail,
 } from '@/types/board'
-import { TRADING_MINUTES, withoutPrematureClosingPoint, filterLiveReplayMinutes, capLiveReplayMinute } from '@/utils/tradingTimeline'
+import {
+  defaultBoardTimeline,
+  hasIntradaySamplesFromOverview,
+  resolveLocalRankingMinute,
+  shouldFetchCurvesForDate,
+} from '@/utils/replayMinute'
+import { TRADING_MINUTES, withoutPrematureClosingPoint } from '@/utils/tradingTimeline'
 import {
   isWeekdayDate,
   resolveLiveMarketStatus,
@@ -364,12 +370,64 @@ function buildRawSeries(
   }
 }
 
+function lastNonNullSeriesValue(values: (number | null)[]): number | null {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index]
+    if (value != null && Number.isFinite(value)) return value
+  }
+  return null
+}
+
+/** Drop a trailing 0 tip when the prior minute already has a real cumulative value. */
+function stripSpuriousTrailingZero(series: RawSeries): RawSeries {
+  if (series.timeline.length < 2) return series
+  const lastIndex = series.timeline.length - 1
+  const lastVal = series.values[lastIndex]
+  const prevVal = series.values[lastIndex - 1]
+  if (
+    lastVal === 0 &&
+    prevVal != null &&
+    prevVal !== 0 &&
+    Number.isFinite(prevVal)
+  ) {
+    return {
+      ...series,
+      timeline: series.timeline.slice(0, -1),
+      values: series.values.slice(0, -1),
+      price_values: series.price_values?.slice(0, -1),
+      avg_price_values: series.avg_price_values?.slice(0, -1),
+      cum_main: prevVal,
+    }
+  }
+  return series
+}
+
+function stripSpuriousTrailingGrayPoints<T extends { minute: string; dark_cumulative: number }>(
+  points: T[],
+): T[] {
+  if (points.length < 2) return points
+  const last = points[points.length - 1]!
+  const prev = points[points.length - 2]!
+  if (
+    last.dark_cumulative === 0 &&
+    prev.dark_cumulative !== 0 &&
+    Number.isFinite(prev.dark_cumulative)
+  ) {
+    return points.slice(0, -1)
+  }
+  return points
+}
+
 function extendSeriesWithLivePoint(
   series: RawSeries,
   minute: string,
   liveMain: number,
   changePct: number | null,
 ): RawSeries {
+  const prior = lastNonNullSeriesValue(series.values)
+  if (liveMain === 0 && prior != null && prior !== 0) {
+    return series
+  }
   const ratio =
     computeMainNetRatio(liveMain, series.free_float_market_cap) ?? series.main_net_ratio ?? null
   const amountRatio =
@@ -427,19 +485,25 @@ export function attachGrayToFlowSeries(
   series: FlowSeries,
   grayPoints: Array<StockGrayFlowPoint | SectorGrayFlowPoint>,
   boardTimeline: string[],
+  rankingMinute?: string,
 ): FlowSeries {
-  if (!grayPoints.length) return series
-  const map = new Map(grayPoints.map((point) => [point.minute, point.dark_cumulative]))
+  const cleaned = stripSpuriousTrailingGrayPoints(grayPoints)
+  if (!cleaned.length) return series
+  const map = new Map(cleaned.map((point) => [point.minute, point.dark_cumulative]))
   let last: number | null = null
   const gray_values = boardTimeline.map((minute) => {
     if (map.has(minute)) last = map.get(minute)!
     return last
   })
-  const lastPoint = grayPoints[grayPoints.length - 1]
+  const tipMinute = rankingMinute ?? boardTimeline[boardTimeline.length - 1] ?? ''
+  const cumGray =
+    (tipMinute ? grayCumulativeAtMinute(cleaned, tipMinute) : null) ??
+    cleaned[cleaned.length - 1]?.dark_cumulative ??
+    null
   return {
     ...series,
     gray_values,
-    cum_gray: lastPoint?.dark_cumulative ?? null,
+    cum_gray: cumGray,
   }
 }
 
@@ -494,88 +558,6 @@ async function resolveTradeDate(requested?: string | null): Promise<string> {
     /* fall through */
   }
   return todayTradeDate()
-}
-
-function hasIntradaySamples(
-  minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null | undefined,
-  overview: Awaited<ReturnType<typeof fetchMarketOverview>> | null | undefined,
-): boolean {
-  if (minutesMeta?.minutes?.length) return true
-  if (
-    minutesMeta?.latest_available_minute ||
-    minutesMeta?.latest_complete_minute ||
-    minutesMeta?.latest_sector_minute ||
-    minutesMeta?.latest_stock_minute
-  ) {
-    return true
-  }
-  if (overview?.latest_available_minute || overview?.latest_complete_minute) return true
-  return false
-}
-
-function shouldFetchCurves(
-  tradeDate: string,
-  replayDates: string[],
-  minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null | undefined,
-  overview: Awaited<ReturnType<typeof fetchMarketOverview>> | null | undefined,
-  calendarToday = todayTradeDate(),
-): boolean {
-  if (replayDates.includes(tradeDate)) return true
-  if (hasIntradaySamples(minutesMeta, overview)) return true
-  if (tradeDate === calendarToday && isWeekdayDate(tradeDate)) return true
-  return false
-}
-
-function pickLatestMinute(
-  minutesMeta?: Awaited<ReturnType<typeof fetchReplayMinutes>> | null,
-  overview?: Awaited<ReturnType<typeof fetchMarketOverview>> | null,
-  tradeDate?: string,
-): string | null {
-  const raw =
-    minutesMeta?.latest_available_minute ??
-    minutesMeta?.latest_sector_minute ??
-    minutesMeta?.latest_stock_minute ??
-    minutesMeta?.latest_complete_minute ??
-    overview?.latest_available_minute ??
-    overview?.latest_complete_minute ??
-    null
-  if (tradeDate) return capLiveReplayMinute(raw, tradeDate)
-  return raw
-}
-
-async function resolveRankingMinute(
-  tradeDate: string,
-  replayMinute?: string | null,
-  minutesMeta?: Awaited<ReturnType<typeof fetchReplayMinutes>> | null,
-  overview?: Awaited<ReturnType<typeof fetchMarketOverview>> | null,
-): Promise<string> {
-  if (!shouldFetchMarketDataForDate(tradeDate)) {
-    return replayMinute ?? '09:31'
-  }
-  if (minutesMeta?.minutes.length) {
-    const latest =
-      pickLatestMinute(minutesMeta, overview, tradeDate) ?? minutesMeta.minutes[minutesMeta.minutes.length - 1]!
-    if (replayMinute && minutesMeta.minutes.includes(replayMinute)) {
-      return replayMinute
-    }
-    return latest
-  }
-  if (replayMinute) return replayMinute
-  try {
-    const minutesMetaFallback = await fetchReplayMinutes(tradeDate)
-    const latest = pickLatestMinute(minutesMetaFallback, overview, tradeDate)
-    if (latest) return latest
-  } catch {
-    /* optional */
-  }
-  try {
-    const overviewFallback = overview ?? (await fetchMarketOverview(tradeDate))
-    const latest = pickLatestMinute(null, overviewFallback, tradeDate)
-    if (latest) return latest
-  } catch {
-    /* optional */
-  }
-  return '09:31'
 }
 
 async function migrateLegacyWatchlistToGroups(): Promise<void> {
@@ -767,9 +749,20 @@ export async function refreshWorkbenchRankingSnapshot(opts: {
       stockSeries = opts.stockSeries.map((series) => {
         const hit = memberMap.get(series.id.toUpperCase())
         if (!hit) return series
+        const nextMain =
+          hit.main_cumulative !== 0 || series.cum_main == null
+            ? hit.main_cumulative
+            : series.cum_main
+        const nextGray =
+          hit.gray_cumulative != null &&
+          Number.isFinite(hit.gray_cumulative) &&
+          hit.gray_cumulative !== 0
+            ? hit.gray_cumulative
+            : series.cum_gray ?? hit.gray_cumulative ?? null
         return {
           ...series,
-          cum_main: hit.main_cumulative,
+          cum_main: nextMain,
+          cum_gray: nextGray,
           change_pct: hit.change_pct,
           main_net_ratio: hit.main_net_ratio ?? series.main_net_ratio ?? null,
           main_amount_ratio: hit.main_amount_ratio ?? series.main_amount_ratio ?? null,
@@ -794,14 +787,18 @@ function batchCacheKey(kind: string, tradeDate: string, ids: string[]): string {
 }
 
 function grayCumulativeAtMinute(
-  points: SectorGrayFlowPoint[],
+  points: Array<StockGrayFlowPoint | SectorGrayFlowPoint>,
   minute: string,
 ): number | null {
+  if (!points.length) return null
   let last: number | null = null
   for (const point of points) {
     if (point.minute <= minute) last = point.dark_cumulative
   }
-  return last
+  if (last != null) return last
+  const tail = points[points.length - 1]!
+  if (minute >= tail.minute) return tail.dark_cumulative ?? null
+  return null
 }
 
 function applyGrayTipsToBoards(
@@ -942,6 +939,7 @@ async function loadStockTargets(
         name: item.name,
         change_pct: item.change_pct,
         cum_main: item.main_cumulative,
+        cum_gray: item.gray_cumulative ?? null,
         main_net_ratio: item.main_net_ratio ?? null,
         main_amount_ratio: item.main_amount_ratio ?? null,
         free_float_market_cap: item.free_float_market_cap ?? null,
@@ -989,7 +987,10 @@ async function loadStockPanelBundle(
     opts?.linkageSectorName,
   )
 
-  const useLiveMemberValues = stockSourceMode === 'linkage' && Boolean(linkageSectorId)
+  const useLiveMemberValues =
+    stockSourceMode === 'linkage' &&
+    Boolean(linkageSectorId) &&
+    stockDate === todayTradeDate()
 
   if (!fetchCurves || !stockTargets.length) {
     return {
@@ -1034,18 +1035,24 @@ async function loadStockPanelBundle(
         free_float_market_cap_avg: stock.free_float_market_cap_avg ?? null,
         trade_date: stockDate,
       })
+      if (raw) {
+        raw = stripSpuriousTrailingZero(raw)
+      }
       if (
         raw &&
         useLiveMemberValues &&
         stock.cum_main != null &&
         Number.isFinite(stock.cum_main) &&
+        stock.cum_main !== 0 &&
         raw.values.filter((value) => value != null).length >= 2
       ) {
-        raw = extendSeriesWithLivePoint(
-          raw,
-          rankingMinute,
-          stock.cum_main,
-          stock.change_pct ?? null,
+        raw = stripSpuriousTrailingZero(
+          extendSeriesWithLivePoint(
+            raw,
+            rankingMinute,
+            stock.cum_main,
+            stock.change_pct ?? null,
+          ),
         )
       }
       const grayPoints = grayBySymbol.get(stock.id.toUpperCase()) ?? null
@@ -1066,9 +1073,18 @@ async function loadStockPanelBundle(
     : timelineFallback
   const stockSeries = validStockResults.map((item) => {
     const aligned = alignToTimeline(item.raw, stockTimeline)
-    return item.grayPoints?.length
-      ? attachGrayToFlowSeries(aligned, item.grayPoints, stockTimeline)
+    let series = item.grayPoints?.length
+      ? attachGrayToFlowSeries(aligned, item.grayPoints, stockTimeline, rankingMinute)
       : aligned
+    const memberGray = item.stock.cum_gray
+    if (
+      memberGray != null &&
+      Number.isFinite(memberGray) &&
+      series.cum_gray == null
+    ) {
+      series = { ...series, cum_gray: memberGray }
+    }
+    return series
   })
 
   return {
@@ -1100,17 +1116,11 @@ export async function fetchWorkbenchStockPanel(opts?: WorkbenchBoardOptions): Pr
   } catch {
     replayDates = []
   }
-  let minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null = null
-  if (shouldFetchMarketDataForDate(stockDate)) {
-    try {
-      minutesMeta = await fetchReplayMinutes(stockDate)
-    } catch {
-      /* optional */
-    }
-  }
-  const rankingMinute = await resolveRankingMinute(stockDate, opts?.replayMinute, minutesMeta, null)
-  const timelineFallback = minutesMeta?.minutes.length ? [...minutesMeta.minutes] : []
-  const fetchCurves = shouldFetchCurves(stockDate, replayDates, minutesMeta, null)
+  const rankingMinute = resolveLocalRankingMinute(stockDate, {
+    replayMinute: opts?.replayMinute,
+  })
+  const timelineFallback = defaultBoardTimeline(stockDate)
+  const fetchCurves = shouldFetchCurvesForDate(stockDate, replayDates, null)
   const bundle = await loadStockPanelBundle(opts, rankingMinute, timelineFallback, fetchCurves)
 
   return {
@@ -1142,44 +1152,29 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   }
 
   let sectorError: string | null = null
-  let minutesMeta: Awaited<ReturnType<typeof fetchReplayMinutes>> | null = null
   let overview: MarketOverview | null = opts?.marketOverview ?? null
 
-  if (shouldFetchMarketDataForDate(sectorDate)) {
-    if (!overview) {
-      try {
-        overview = await fetchMarketOverview(sectorDate)
-      } catch {
-        /* optional */
-      }
-    }
-
+  if (shouldFetchMarketDataForDate(sectorDate) && !overview) {
     try {
-      minutesMeta = await fetchReplayMinutes(sectorDate)
+      overview = await fetchMarketOverview(sectorDate)
     } catch {
       /* optional */
     }
   }
 
-  const fetchCurves = shouldFetchCurves(sectorDate, replayDates, minutesMeta, overview)
+  const fetchCurves = shouldFetchCurvesForDate(sectorDate, replayDates, overview)
   if (!shouldFetchMarketDataForDate(sectorDate)) {
     sectorError = `${sectorDate} 为非交易日，请切换至工作日查看`
-  } else if (!fetchCurves && !hasIntradaySamples(minutesMeta, overview)) {
+  } else if (!fetchCurves && !hasIntradaySamplesFromOverview(overview)) {
     sectorError = `暂无 ${sectorDate} 的分钟采样，请先在设置中确认采集数据或切换交易日`
   }
 
-  const rankingMinute = await resolveRankingMinute(sectorDate, opts?.replayMinute, minutesMeta, overview)
+  const rankingMinute = resolveLocalRankingMinute(sectorDate, {
+    replayMinute: opts?.replayMinute,
+    overview,
+  })
 
-  const timelineFallback = (() => {
-    if (minutesMeta?.minutes.length) {
-      const mins = filterLiveReplayMinutes([...minutesMeta.minutes], sectorDate)
-      const first = mins[0]
-      const prev = first ? previousTradingMinute(first) : null
-      if (prev && !mins.includes(prev)) mins.unshift(prev)
-      return mins
-    }
-    return []
-  })()
+  const timelineFallback = defaultBoardTimeline(sectorDate)
   const shouldLoadStockPanel =
     fetchCurves &&
     (stockSourceMode === 'selected' ||
@@ -1272,13 +1267,18 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
           grayCumulativeAtMinute(item.points, rankingMinute),
         ]),
       )
+      const grayPointsById = new Map(batch.items.map((item) => [item.sector_id, item.points]))
       opts?.onSectorGrayReady?.({
         imported_sector_boards: applyGrayTipsToBoards(importedRaw, grayTipsById),
         selected_boards: applyGrayTipsToBoards(allSelectedBoards, grayTipsById),
-        sector_series: sectorSeriesFromBatch.map((series) => ({
-          ...series,
-          cum_gray: grayTipsById.get(series.id) ?? null,
-        })),
+        sector_series: sectorSeriesFromBatch.map((series) => {
+          const points = grayPointsById.get(series.id)
+          const withGray = points?.length
+            ? attachGrayToFlowSeries(series, points, timeline, rankingMinute)
+            : series
+          const tip = grayTipsById.get(series.id)
+          return tip != null ? { ...withGray, cum_gray: tip } : withGray
+        }),
       })
       return batch
     } catch {
@@ -1310,12 +1310,17 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   const snapshotBySectorId = new Map(
     [...enrichedImportedBoards, ...enrichedSelectedBoards].map((board) => [board.id, board.cum_main ?? null]),
   )
+  const grayPointsById = new Map(grayBatch.items.map((item) => [item.sector_id, item.points]))
   const sectorSeries = sectorSeriesFromBatch.map((aligned) => {
     const snapMain = snapshotBySectorId.get(aligned.id)
     const withMain =
       snapMain != null && Number.isFinite(snapMain) ? { ...aligned, cum_main: snapMain } : aligned
+    const points = grayPointsById.get(aligned.id)
+    const withGray = points?.length
+      ? attachGrayToFlowSeries(withMain, points, timeline, rankingMinute)
+      : withMain
     const gray = grayTipsById.get(aligned.id)
-    return gray != null ? { ...withMain, cum_gray: gray } : withMain
+    return gray != null ? { ...withGray, cum_gray: gray } : withGray
   })
 
   const seriesBySectorId = new Map(sectorSeries.map((item) => [item.id, item]))
@@ -1335,12 +1340,11 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   const stockBundle = await stockPanelPromise
   const { stockTargets, stockMode, stockSeries, stockTimeline } = stockBundle
 
-  const latestMinute = pickLatestMinute(minutesMeta, overview, sectorDate) ?? rankingMinute
+  const latestMinute =
+    resolveLocalRankingMinute(sectorDate, { overview }) ?? rankingMinute
   const hasSectorData = sectorSeries.length > 0
   const hasLiveMinute = Boolean(
-    overview?.latest_available_minute ??
-      minutesMeta?.latest_available_minute ??
-      (minutesMeta?.minutes.length ? minutesMeta.minutes[minutesMeta.minutes.length - 1] : null),
+    overview?.latest_available_minute ?? overview?.latest_complete_minute,
   )
   const calendarToday = todayTradeDate()
   const isToday = sectorDate === calendarToday

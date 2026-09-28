@@ -20,7 +20,9 @@ import {
   type SectorFundFlowPayload,
   type SectorMemberRankItem,
 } from '@/api/sectors'
-import { fetchReplayMinutes } from '@/api/replay'
+import { useMarketStore } from '@/stores/marketStore'
+import { useReplayStore } from '@/stores/replayStore'
+import { resolveLocalRankingMinute, shouldFetchCurvesForDate } from '@/utils/replayMinute'
 import type { SectorSummary } from '@/types/api'
 import { todayTradeDate } from '@/utils/tradeDate'
 
@@ -252,24 +254,29 @@ export const useSectorStore = defineStore('sector', {
     },
     async resolveSessionForDate(tradeDate: string) {
       this.tradeDate = tradeDate
+      const marketStore = useMarketStore()
+      const replayStore = useReplayStore()
       try {
-        const minutes = await fetchReplayMinutes(tradeDate)
-        this.replayMinute =
-          minutes.latest_available_minute ||
-          minutes.latest_complete_minute ||
-          minutes.minutes[minutes.minutes.length - 1] ||
-          '09:31'
-        this.hasSessionData = minutes.minutes.length > 0
+        await marketStore.ensureOverview(tradeDate)
       } catch {
-        this.clearSessionData()
-        return
+        /* optional */
+      }
+      const overview = marketStore.overviewFor(tradeDate)
+      this.replayMinute = resolveLocalRankingMinute(tradeDate, { overview })
+      this.hasSessionData = shouldFetchCurvesForDate(
+        tradeDate,
+        replayStore.availableDates,
+        overview,
+      )
+      if (!this.selectedId) return
+      try {
+        await this.loadSelectedSectorData()
+        this.hasSessionData = Boolean(this.fundFlow?.points?.length)
+      } catch {
+        this.hasSessionData = false
       }
       if (!this.hasSessionData) {
         this.clearSessionData()
-        return
-      }
-      if (this.selectedId) {
-        await this.loadSelectedSectorData()
       }
     },
     setTradeDate(tradeDate: string, minute?: string) {
