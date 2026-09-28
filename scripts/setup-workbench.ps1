@@ -1,6 +1,7 @@
 param(
     [string]$DataDir = "../data/workbench-real",
     [string]$TdxHome = "C:\new_tdx64",
+    [string]$PythonExe = "",
     [switch]$SkipCatalogSync,
     [switch]$SkipFrontend,
     [switch]$RecreateVenv,
@@ -8,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Backend = Join-Path $Root "backend"
@@ -21,15 +23,93 @@ function Write-Step {
     Write-Host ">> $Message" -ForegroundColor Cyan
 }
 
-function Resolve-PythonLauncher {
-    foreach ($candidate in @("py", "python", "python3")) {
-        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-        if (-not $cmd) { continue }
-        if ($candidate -eq "py") {
-            return @{ File = $cmd.Source; Args = @("-3") }
-        }
-        return @{ File = $cmd.Source; Args = @() }
+function Test-PythonExecutable {
+    param([string]$File)
+
+    if (-not $File -or -not (Test-Path $File)) {
+        return $false
     }
+
+    if ($File -match "WindowsApps") {
+        return $false
+    }
+
+    & $File -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+function Resolve-PythonExe {
+    param([string]$PreferredExe = "")
+
+    if ($PreferredExe) {
+        $preferred = $PreferredExe.Trim('"')
+        if (Test-PythonExecutable -File $preferred) {
+            return (Resolve-Path $preferred).Path
+        }
+        throw "Specified PythonExe is not usable: $preferred"
+    }
+
+    $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyCmd) {
+        $resolved = & $pyCmd.Source -3 -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $resolved) {
+            $exe = ($resolved | Select-Object -Last 1).Trim()
+            if (Test-PythonExecutable -File $exe) {
+                return (Resolve-Path $exe).Path
+            }
+        }
+    }
+
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+    foreach ($root in @(
+        "$env:LOCALAPPDATA\Programs\Python",
+        "$env:ProgramFiles\Python",
+        "$env:ProgramFiles"
+    )) {
+        if (-not (Test-Path $root)) { continue }
+        Get-ChildItem -Path $root -Filter python.exe -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { $candidatePaths.Add($_.FullName) }
+    }
+
+    foreach ($name in @("python3", "python")) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $candidatePaths.Add($cmd.Source)
+        }
+    }
+
+    foreach ($path in ($candidatePaths | Select-Object -Unique)) {
+        if (Test-PythonExecutable -File $path) {
+            return (Resolve-Path $path).Path
+        }
+    }
+
+    return $null
+}
+
+function Resolve-NpmExe {
+    foreach ($candidate in @("npm.cmd", "npm")) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd -and (Test-Path $cmd.Source)) {
+            return $cmd.Source
+        }
+    }
+
+    $fallbackPaths = @(
+        "$env:ProgramFiles\nodejs\npm.cmd",
+        "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
+        "$env:LOCALAPPDATA\Programs\node\npm.cmd"
+    )
+    foreach ($path in $fallbackPaths) {
+        if ($path -and (Test-Path $path)) {
+            return $path
+        }
+    }
+
+    if ($env:NVM_HOME -and (Test-Path "$env:NVM_HOME\npm.cmd")) {
+        return "$env:NVM_HOME\npm.cmd"
+    }
+
     return $null
 }
 
@@ -37,18 +117,78 @@ function Invoke-Python {
     param(
         [string[]]$Arguments,
         [string]$WorkingDirectory = $Backend,
-        [string]$PythonExe = ""
+        [string]$Exe = $script:BasePythonExe
     )
-    $exe = if ($PythonExe) { $PythonExe } else { $pythonLauncher.File }
-    $prefix = if ($PythonExe) { @() } else { $pythonLauncher.Args }
+
+    $displayCmd = "$Exe $($Arguments -join ' ')"
     Push-Location $WorkingDirectory
     try {
-        & $exe @($prefix + $Arguments)
-        if ($LASTEXITCODE -ne 0) {
-            throw "python exited with code $LASTEXITCODE"
+        & $Exe @Arguments
+        $exitCode = $LASTEXITCODE
+        if ($null -eq $exitCode) { $exitCode = 0 }
+        if ($exitCode -ne 0) {
+            throw "python exited with code ${exitCode}: $displayCmd"
         }
     } finally {
         Pop-Location
+    }
+}
+
+function Install-EasyTdx {
+    param([string]$Exe = $BackendVenv)
+
+    $bundledWheel = Join-Path $Backend "vendor\easy_tdx-1.20.7-py3-none-any.whl"
+    if (Test-Path $bundledWheel) {
+        Write-Host "  install easy-tdx from bundled wheel" -ForegroundColor DarkGray
+        Invoke-Python -Exe $Exe -Arguments @("-m", "pip", "install", $bundledWheel) -WorkingDirectory $Backend
+        return
+    }
+
+    Write-Host "  bundled wheel missing, trying PyPI mirrors..." -ForegroundColor Yellow
+    Invoke-PipInstall -Exe $Exe -Packages @("easy-tdx>=1.20.0")
+}
+
+function Invoke-PipInstall {
+    param(
+        [string]$Exe = $BackendVenv,
+        [string[]]$Packages
+    )
+
+    $mirrors = @(
+        @{ Label = "PyPI"; Url = "" },
+        @{ Label = "Tsinghua"; Url = "https://pypi.tuna.tsinghua.edu.cn/simple" },
+        @{ Label = "Aliyun"; Url = "https://mirrors.aliyun.com/pypi/simple/" }
+    )
+
+    foreach ($mirror in $mirrors) {
+        $args = @("-m", "pip", "install") + $Packages
+        if ($mirror.Url) {
+            $args += @("-i", $mirror.Url)
+        }
+        Write-Host "  pip via $($mirror.Label): $($Packages -join ' ')" -ForegroundColor DarkGray
+        try {
+            Invoke-Python -Exe $Exe -Arguments $args -WorkingDirectory $Backend
+            return
+        } catch {
+            Write-Host "  failed on $($mirror.Label)" -ForegroundColor Yellow
+        }
+    }
+
+    throw "pip install failed for: $($Packages -join ' '). Check network or install Python 3.12 LTS (not 3.14 preview)."
+}
+
+function New-BackendVenv {
+    param([string]$Exe = $script:BasePythonExe)
+
+    if (Test-Path $BackendVenv) {
+        return
+    }
+
+    Write-Host "  create venv with: $Exe -m venv .venv" -ForegroundColor DarkGray
+    Invoke-Python -Exe $Exe -Arguments @("-m", "venv", ".venv")
+
+    if (-not (Test-Path $BackendVenv)) {
+        throw "venv was not created at $BackendVenv"
     }
 }
 
@@ -100,16 +240,33 @@ Write-Host "  Data:     $DataDir"
 Write-Host "  TDX home: $TdxHome"
 Write-Host ""
 
-$pythonLauncher = Resolve-PythonLauncher
-if (-not $pythonLauncher) {
-    Write-Host "[ERROR] Python not found. Install Python 3.10+ and ensure 'py' or 'python' is on PATH." -ForegroundColor Red
+$script:BasePythonExe = Resolve-PythonExe -PreferredExe $PythonExe
+if (-not $script:BasePythonExe) {
+    Write-Host "[ERROR] Python 3.10+ not found, or only the Windows Store alias is available." -ForegroundColor Red
+    Write-Host "  1. Install Python 3.12 LTS: winget install Python.Python.3.12" -ForegroundColor Yellow
+    Write-Host "  2. Or download: https://www.python.org/downloads/ (check 'Add python.exe to PATH')" -ForegroundColor Yellow
+    Write-Host "  3. Settings -> Apps -> Advanced app settings -> App execution aliases" -ForegroundColor Yellow
+    Write-Host "     Turn OFF aliases for python.exe and python3.exe" -ForegroundColor Yellow
+    Write-Host "  4. Manual override:" -ForegroundColor Yellow
+    Write-Host "     .\scripts\setup-workbench.ps1 -PythonExe `"C:\Path\To\python.exe`"" -ForegroundColor DarkGray
     exit 1
 }
 
+$pythonVersion = (& $script:BasePythonExe -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}')" 2>$null | Select-Object -Last 1).Trim()
+Write-Host "  Python:   $script:BasePythonExe ($pythonVersion)" -ForegroundColor DarkGray
+if ($pythonVersion -match "rc|alpha|beta") {
+    Write-Host "[WARN] Pre-release Python detected. Prefer Python 3.12 LTS for fewer dependency issues." -ForegroundColor Yellow
+}
+
+$npmExe = $null
 if (-not $SkipFrontend) {
-    $npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $npmCmd) {
-        Write-Host "[ERROR] npm.cmd not found. Install Node.js 18+ and reopen PowerShell." -ForegroundColor Red
+    $npmExe = Resolve-NpmExe
+    if (-not $npmExe) {
+        Write-Host "[ERROR] npm not found." -ForegroundColor Red
+        Write-Host "  1. Install Node.js 18+ LTS: https://nodejs.org/" -ForegroundColor Yellow
+        Write-Host "  2. Or run: winget install OpenJS.NodeJS.LTS" -ForegroundColor Yellow
+        Write-Host "  3. Close this window, reopen PowerShell, then rerun setup-workbench.cmd" -ForegroundColor Yellow
+        Write-Host "  4. Backend-only for now: .\scripts\setup-workbench.ps1 -SkipFrontend" -ForegroundColor DarkGray
         exit 1
     }
 }
@@ -130,14 +287,13 @@ if ($RecreateVenv -and (Test-Path (Join-Path $Backend ".venv"))) {
 }
 
 Write-Step "Create Python venv and install backend dependencies"
-if (-not (Test-Path $BackendVenv)) {
-    Invoke-Python -Arguments @("-m", "venv", ".venv")
-}
-Invoke-Python -PythonExe $BackendVenv -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Python -PythonExe $BackendVenv -Arguments @("-m", "pip", "install", "-r", "requirements-dev.txt")
+New-BackendVenv -Exe $script:BasePythonExe
+Invoke-PipInstall -Exe $BackendVenv -Packages @("--upgrade", "pip")
+Install-EasyTdx -Exe $BackendVenv
+Invoke-PipInstall -Exe $BackendVenv -Packages @("-r", "requirements-dev.txt")
 
 Write-Step "Verify critical Python packages"
-Invoke-Python -PythonExe $BackendVenv -Arguments @(
+Invoke-Python -Exe $BackendVenv -Arguments @(
     "-c",
     "import fastapi, uvicorn, curl_cffi; print('backend imports ok')"
 )
@@ -146,7 +302,7 @@ if (-not $SkipFrontend) {
     Write-Step "Install frontend dependencies (npm install)"
     Push-Location $Frontend
     try {
-        & npm.cmd install
+        & $npmExe install
         if ($LASTEXITCODE -ne 0) {
             throw "npm install failed with exit code $LASTEXITCODE"
         }
@@ -178,7 +334,7 @@ if (-not $SkipCatalogSync) {
     if (-not (Test-Path $resolvedTdxHome)) {
         Write-Host "  skipped: TDX home does not exist" -ForegroundColor Yellow
     } else {
-        Invoke-Python -PythonExe $BackendVenv -Arguments @(
+        Invoke-Python -Exe $BackendVenv -Arguments @(
             "-m", "workbench.collector.main",
             "--real",
             "--sync-catalog",

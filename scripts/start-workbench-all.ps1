@@ -27,6 +27,32 @@ function Resolve-DataDirPath {
     }
 }
 
+function Resolve-NpmExe {
+    foreach ($candidate in @("npm.cmd", "npm")) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd -and (Test-Path $cmd.Source)) {
+            return $cmd.Source
+        }
+    }
+
+    $fallbackPaths = @(
+        "$env:ProgramFiles\nodejs\npm.cmd",
+        "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
+        "$env:LOCALAPPDATA\Programs\node\npm.cmd"
+    )
+    foreach ($path in $fallbackPaths) {
+        if ($path -and (Test-Path $path)) {
+            return $path
+        }
+    }
+
+    if ($env:NVM_HOME -and (Test-Path "$env:NVM_HOME\npm.cmd")) {
+        return "$env:NVM_HOME\npm.cmd"
+    }
+
+    return $null
+}
+
 function Test-PortListening {
     param([int]$Port)
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -143,9 +169,9 @@ if (-not (Test-Path $FrontendPkg)) {
     exit 1
 }
 
-$npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
-if (-not $npmCmd) {
-    Write-Host "[ERROR] npm.cmd not found in PATH." -ForegroundColor Red
+$npmExe = Resolve-NpmExe
+if (-not $npmExe) {
+    Write-Host "[ERROR] npm not found. Install Node.js 18+ from https://nodejs.org/ and reopen PowerShell." -ForegroundColor Red
     exit 1
 }
 
@@ -214,7 +240,7 @@ if ($Background) {
         -WorkingDirectory $Backend `
         -Environment @{ WORKBENCH_DATA_DIR = $resolvedDataDir }
 
-    $started += Start-WorkbenchHiddenProcess -Name "frontend" -FilePath $npmCmd.Source `
+    $started += Start-WorkbenchHiddenProcess -Name "frontend" -FilePath $npmExe `
         -ArgumentList @("run", "dev:workbench", "--", "--port", "$FrontendPort", "--host", "127.0.0.1") `
         -WorkingDirectory $Frontend
 
