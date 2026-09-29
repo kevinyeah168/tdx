@@ -83,7 +83,15 @@ function sectorBoardAtHover(boardItem: BoardItem): BoardItem {
   const baseGray = boardItem.cum_gray ?? series?.cum_gray ?? null
   const minute = linkedHoverMinute.value
   if (!minute) {
-    return baseGray != null ? { ...boardItem, cum_gray: baseGray } : boardItem
+    if (!series) {
+      return baseGray != null ? { ...boardItem, cum_gray: baseGray } : boardItem
+    }
+    return {
+      ...boardItem,
+      cum_main: series.cum_main ?? boardItem.cum_main,
+      change_pct: series.change_pct ?? boardItem.change_pct,
+      cum_gray: baseGray,
+    }
   }
   if (!series) return boardItem
   const timeline = board.value.timeline || []
@@ -183,7 +191,6 @@ const stockColumns = computed(() => [
     title: rankHeader('个股'),
     key: 'name',
     width: 54,
-    ellipsis: { tooltip: true },
     render(row: FlowSeries) {
       const name = cleanLabel(row.name)
       const code = cleanLabel(row.symbol || row.id)
@@ -271,7 +278,6 @@ const sectorColumns = computed(() => [
     title: rankHeader('板块'),
     key: 'name',
     width: 62,
-    ellipsis: { tooltip: true },
     render(row: BoardItem) {
       const typeLabel = sectorTypeShort(row.sector_type, row.id)
       return h(

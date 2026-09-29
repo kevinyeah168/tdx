@@ -136,7 +136,6 @@ const memberColumns = [
     title: '个股',
     key: 'name',
     width: 68,
-    ellipsis: { tooltip: true },
     render: (row: SectorMemberRankItem) =>
       h(
         'div',

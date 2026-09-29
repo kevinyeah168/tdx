@@ -197,28 +197,24 @@ export const useBoardStore = defineStore('board', () => {
     await previous
     try {
       const sectorDate = resolvedSectorViewDate()
+      const replayStore = useReplayStore()
+      const forceOverview =
+        Boolean(sectorDate) &&
+        sectorDate === todayTradeDate() &&
+        replayStore.mode === 'live' &&
+        !replayMinute.value
       if (sectorDate) {
-        await useMarketStore().ensureOverview(sectorDate)
+        await useMarketStore().ensureOverview(sectorDate, { force: forceOverview })
       }
       const data = await fetchBoard({
         ...boardFetchOptions(),
-        onSectorChartsReady: (partial) => {
+        onSectorPanelReady: (partial) => {
           if (stockLoadSeq !== stockSeqAtStart) return
           if (sectorLoadSeq !== sectorSeqAtStart) return
           board.value = {
             ...board.value,
             ...partial,
             error: null,
-          }
-        },
-        onSectorGrayReady: (partial) => {
-          if (stockLoadSeq !== stockSeqAtStart) return
-          if (sectorLoadSeq !== sectorSeqAtStart) return
-          board.value = {
-            ...board.value,
-            imported_sector_boards: partial.imported_sector_boards ?? board.value.imported_sector_boards,
-            selected_boards: partial.selected_boards ?? board.value.selected_boards,
-            sector_series: partial.sector_series ?? board.value.sector_series,
           }
         },
       })
@@ -553,6 +549,7 @@ export const useBoardStore = defineStore('board', () => {
       const refreshed = await refreshWorkbenchRankingSnapshot({
         sectorDate,
         rankingMinute: minute,
+        sectorTimeline: board.value.timeline ?? [],
         importedBoards: board.value.imported_sector_boards ?? [],
         selectedBoards: board.value.selected_boards ?? [],
         sectorSeries: board.value.sector_series ?? [],

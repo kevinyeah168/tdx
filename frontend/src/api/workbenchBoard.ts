@@ -684,10 +684,29 @@ function applySnapshotToBoards(
   })
 }
 
+function patchSeriesMainAtMinute(
+  series: FlowSeries,
+  timeline: string[],
+  minute: string,
+  mainCum: number,
+): FlowSeries {
+  const minuteIdx = timeline.indexOf(minute)
+  if (minuteIdx < 0) {
+    return { ...series, cum_main: mainCum }
+  }
+  const values = [...(series.values || [])]
+  while (values.length < timeline.length) {
+    values.push(null)
+  }
+  values[minuteIdx] = mainCum
+  return { ...series, cum_main: mainCum, values }
+}
+
 /** Lightweight minute tick: refresh ranking tables without reloading full-day curves. */
 export async function refreshWorkbenchRankingSnapshot(opts: {
   sectorDate: string
   rankingMinute: string
+  sectorTimeline?: string[]
   importedBoards: BoardItem[]
   selectedBoards: BoardItem[]
   sectorSeries: FlowSeries[]
@@ -716,14 +735,18 @@ export async function refreshWorkbenchRankingSnapshot(opts: {
   )
   const importedBoards = applySnapshotToBoards(opts.importedBoards, snapshotById)
   const selectedBoards = applySnapshotToBoards(opts.selectedBoards, snapshotById)
+  const sectorTimeline = opts.sectorTimeline ?? []
   const sectorSeries = opts.sectorSeries.map((series) => {
     const hit = snapshotById.get(series.id)
     if (!hit) return series
-    return {
+    const patched = {
       ...series,
       cum_main: hit.main_cumulative,
       change_pct: hit.change_pct ?? series.change_pct ?? null,
     }
+    return sectorTimeline.length
+      ? patchSeriesMainAtMinute(patched, sectorTimeline, opts.rankingMinute, hit.main_cumulative)
+      : patched
   })
 
   let stockSeries = opts.stockSeries
@@ -866,6 +889,17 @@ export type WorkbenchSectorGrayPartial = Pick<
   'imported_sector_boards' | 'selected_boards' | 'sector_series'
 >
 
+/** Sector chart + ranking table, merged with snapshot before UI push. */
+export type WorkbenchSectorPanelPartial = Pick<
+  BoardPayload,
+  | 'sector_series'
+  | 'timeline'
+  | 'imported_sector_boards'
+  | 'selected_boards'
+  | 'sector_view_date'
+  | 'updated_at'
+>
+
 type WorkbenchBoardOptions = {
   stockDate?: string | null
   sectorDate?: string | null
@@ -878,8 +912,11 @@ type WorkbenchBoardOptions = {
   replayMinute?: string | null
   replayDates?: string[]
   marketOverview?: MarketOverview | null
+  /** @deprecated use onSectorPanelReady */
   onSectorChartsReady?: (partial: WorkbenchSectorChartsPartial) => void
+  /** @deprecated use onSectorPanelReady */
   onSectorGrayReady?: (partial: WorkbenchSectorGrayPartial) => void
+  onSectorPanelReady?: (partial: WorkbenchSectorPanelPartial) => void
 }
 
 type StockPanelBundle = {
@@ -1246,13 +1283,6 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     .filter((item): item is typeof item & { series: RawSeries } => item.series != null)
     .map((item) => alignToTimeline(item.series, timeline))
 
-  opts?.onSectorChartsReady?.({
-    sector_series: sectorSeriesFromBatch,
-    timeline,
-    sector_view_date: sectorDate,
-    updated_at: new Date().toISOString(),
-  })
-
   const emptyGrayBatch = {
     trade_date: sectorDate,
     items: [] as Awaited<ReturnType<typeof fetchSectorGrayFlowBatch>>['items'],
@@ -1261,25 +1291,6 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
     if (!fetchCurves || !snapshotIds.length) return emptyGrayBatch
     try {
       const batch = await fetchCachedSectorGrayBatch(snapshotIds, sectorDate)
-      const grayTipsById = new Map(
-        batch.items.map((item) => [
-          item.sector_id,
-          grayCumulativeAtMinute(item.points, rankingMinute),
-        ]),
-      )
-      const grayPointsById = new Map(batch.items.map((item) => [item.sector_id, item.points]))
-      opts?.onSectorGrayReady?.({
-        imported_sector_boards: applyGrayTipsToBoards(importedRaw, grayTipsById),
-        selected_boards: applyGrayTipsToBoards(allSelectedBoards, grayTipsById),
-        sector_series: sectorSeriesFromBatch.map((series) => {
-          const points = grayPointsById.get(series.id)
-          const withGray = points?.length
-            ? attachGrayToFlowSeries(series, points, timeline, rankingMinute)
-            : series
-          const tip = grayTipsById.get(series.id)
-          return tip != null ? { ...withGray, cum_gray: tip } : withGray
-        }),
-      })
       return batch
     } catch {
       return emptyGrayBatch
@@ -1336,6 +1347,16 @@ export async function fetchWorkbenchBoard(opts?: WorkbenchBoardOptions): Promise
   }
   const finalImportedBoards = enrichedImportedBoards.map(attachSeriesMetrics)
   const finalSelectedBoards = enrichedSelectedBoards.map(attachSeriesMetrics)
+
+  const sectorPanelPartial: WorkbenchSectorPanelPartial = {
+    sector_series: sectorSeries,
+    timeline,
+    imported_sector_boards: finalImportedBoards,
+    selected_boards: finalSelectedBoards,
+    sector_view_date: sectorDate,
+    updated_at: new Date().toISOString(),
+  }
+  opts?.onSectorPanelReady?.(sectorPanelPartial)
 
   const stockBundle = await stockPanelPromise
   const { stockTargets, stockMode, stockSeries, stockTimeline } = stockBundle

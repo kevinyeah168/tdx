@@ -17,12 +17,17 @@ export const useMarketStore = defineStore('market', {
     },
   },
   actions: {
-    async ensureOverview(tradeDate: string): Promise<MarketOverview | null> {
+    async ensureOverview(
+      tradeDate: string,
+      opts?: { force?: boolean },
+    ): Promise<MarketOverview | null> {
       this.tradeDate = tradeDate
-      const cached = this.overviewByDate[tradeDate]
-      if (cached) {
-        this.overview = cached
-        return cached
+      if (!opts?.force) {
+        const cached = this.overviewByDate[tradeDate]
+        if (cached) {
+          this.overview = cached
+          return cached
+        }
       }
       await this.loadOverview()
       if (this.overview) {

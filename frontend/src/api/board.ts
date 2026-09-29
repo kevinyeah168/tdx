@@ -13,6 +13,7 @@ import type { MarketOverview } from '@/types/api'
 import type {
   WorkbenchSectorChartsPartial,
   WorkbenchSectorGrayPartial,
+  WorkbenchSectorPanelPartial,
 } from '@/api/workbenchBoard'
 
 const WORKBENCH_MODE = import.meta.env.VITE_WORKBENCH === 'true'
@@ -120,6 +121,7 @@ export async function fetchBoard(opts?: {
   marketOverview?: MarketOverview | null
   onSectorChartsReady?: (partial: WorkbenchSectorChartsPartial) => void
   onSectorGrayReady?: (partial: WorkbenchSectorGrayPartial) => void
+  onSectorPanelReady?: (partial: WorkbenchSectorPanelPartial) => void
 }): Promise<BoardPayload> {
   if (WORKBENCH_MODE) {
     const { fetchWorkbenchBoard } = await import('@/api/workbenchBoard')

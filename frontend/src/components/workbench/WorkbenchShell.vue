@@ -161,8 +161,10 @@ watch(
     const boardMinute = replayStore.mode === 'live' ? null : minute
     if (activeView.value === 'home') {
       boardStore.syncReplayDates(tradeDate, boardMinute)
-      if (replayStore.mode === 'replay') {
-        void boardStore.syncReplayMinute(boardMinute)
+      const rankingMinute =
+        replayStore.mode === 'live' ? replayStore.minute : boardMinute
+      if (rankingMinute) {
+        void boardStore.syncReplayMinute(rankingMinute)
       }
     } else {
       boardStore.syncReplayDates(tradeDate, boardMinute)

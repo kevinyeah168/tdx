@@ -67,7 +67,6 @@ const columns = computed(() => [
     title: '个股',
     key: 'name',
     width: 108,
-    ellipsis: { tooltip: true },
     render: (row: SectorMemberRankItem) =>
       h(
         'div',
