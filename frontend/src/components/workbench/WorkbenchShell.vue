@@ -97,8 +97,12 @@ watch(activeView, (view) => {
   syncViewStores(replayStore.tradeDate, replayStore.minute)
 
   if (view === 'sectors') {
-    void sectorStore.loadGroups()
-    void sectorStore.loadImportedSectors()
+    if (!sectorStore.bootstrapped) {
+      void sectorStore.bootstrap()
+    } else {
+      void sectorStore.loadGroups()
+      void sectorStore.loadImportedSectors()
+    }
   }
   if (view === 'stock') {
     void stockStore.loadGroups()
@@ -117,7 +121,11 @@ async function refreshAll() {
     } else if (activeView.value === 'stock') {
       await stockStore.reloadForDate()
     } else if (activeView.value === 'sectors') {
-      await sectorStore.reloadForDate()
+      if (!sectorStore.bootstrapped) {
+        await sectorStore.bootstrap()
+      } else {
+        await sectorStore.reloadForDate()
+      }
       replayStore.minute = sectorStore.replayMinute
     }
   } finally {

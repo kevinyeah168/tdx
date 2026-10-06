@@ -65,6 +65,7 @@ export const useSectorStore = defineStore('sector', {
     loading: false,
     fundLoading: false,
     membersLoading: false,
+    bootstrapped: false,
     error: '' as string,
     fundError: '' as string,
   }),
@@ -140,6 +141,9 @@ export const useSectorStore = defineStore('sector', {
       }
     },
     async setActiveGroup(groupId: string) {
+      if (groupId === 'all' && !this.items.length && !this.bootstrapped) {
+        await this.bootstrap()
+      }
       this.activeGroupId = await setActiveSectorGroup(groupId)
       const visible = this.visibleSidebarItems
       if (!visible.some((item) => item.sector_id === this.selectedId)) {
@@ -225,6 +229,7 @@ export const useSectorStore = defineStore('sector', {
       }
     },
     async bootstrap() {
+      if (this.bootstrapped) return
       this.loading = true
       this.error = ''
       try {
@@ -246,6 +251,7 @@ export const useSectorStore = defineStore('sector', {
           }
         }
         await this.resolveSessionForDate(this.tradeDate)
+        this.bootstrapped = true
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error)
       } finally {
