@@ -11,6 +11,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from workbench.api.routes_hot_list import create_hot_list_router
+from workbench.api.routes_limit_up import create_limit_up_router
 from workbench.api.routes_market import (
     create_market_router,
     create_sector_router,
@@ -461,6 +463,8 @@ def create_app(settings: WorkbenchSettings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     application.include_router(create_market_router())
+    application.include_router(create_hot_list_router())
+    application.include_router(create_limit_up_router())
     application.include_router(create_settings_router())
     application.include_router(create_sector_router())
     application.include_router(create_stock_router())

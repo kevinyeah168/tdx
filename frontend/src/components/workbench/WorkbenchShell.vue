@@ -3,6 +3,9 @@ import { MoonOutline, RefreshOutline, SunnyOutline } from '@vicons/ionicons5'
 import { NButton, NDropdown, NIcon, NTag, NTooltip } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 
+import HotListWorkspace from '@/components/workbench/HotListWorkspace.vue'
+import LimitUpLadderWorkspace from '@/components/workbench/LimitUpLadderWorkspace.vue'
+import MemberStockFlowModal from '@/components/workbench/MemberStockFlowModal.vue'
 import PrimaryNav from '@/components/workbench/PrimaryNav.vue'
 import PulseHomePage from '@/components/workbench/PulseHomePage.vue'
 import ReplayControls from '@/components/workbench/ReplayControls.vue'
@@ -12,6 +15,8 @@ import SettingsPage from '@/components/workbench/SettingsPage.vue'
 import CycleReplayWorkspace from '@/components/workbench/CycleReplayWorkspace.vue'
 import StockWorkspace from '@/components/workbench/StockWorkspace.vue'
 import { useBoardStore } from '@/stores/boardStore'
+import { useHotListStore } from '@/stores/hotListStore'
+import { useLimitUpLadderStore } from '@/stores/limitUpLadderStore'
 import { useMarketStore } from '@/stores/marketStore'
 import { useReplayStore } from '@/stores/replayStore'
 import { useSectorStore } from '@/stores/sectorStore'
@@ -20,6 +25,8 @@ import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { fmtPct } from '@/utils/format'
 import { todayTradeDate } from '@/utils/tradeDate'
 
+const hotListStore = useHotListStore()
+const limitUpLadderStore = useLimitUpLadderStore()
 const marketStore = useMarketStore()
 const sectorStore = useSectorStore()
 const stockStore = useStockStore()
@@ -27,8 +34,25 @@ const boardStore = useBoardStore()
 const replayStore = useReplayStore()
 const themeStore = useThemeStore()
 
-const activeView = ref<'home' | 'sectors' | 'stock' | 'cycle-replay' | 'health' | 'settings'>('home')
+const activeView = ref<
+  | 'home'
+  | 'sectors'
+  | 'stock'
+  | 'hot-list'
+  | 'limit-up-ladder'
+  | 'cycle-replay'
+  | 'health'
+  | 'settings'
+>('home')
 const selectedStock = ref('')
+const stockFlowOpen = ref(false)
+const stockFlowTarget = ref<{
+  symbol: string
+  name: string
+  changePct?: number | null
+  cumMain?: number | null
+  cumGray?: number | null
+} | null>(null)
 const refreshing = ref(false)
 const bootstrapped = ref(false)
 let boardDateLoadInFlight = false
@@ -58,6 +82,10 @@ const shellError = computed(() => {
       return boardStore.board.error || marketStore.error || ''
     case 'stock':
       return stockStore.error || ''
+    case 'hot-list':
+      return hotListStore.error || ''
+    case 'limit-up-ladder':
+      return limitUpLadderStore.error || ''
     case 'sectors':
       return sectorStore.error || sectorStore.fundError || ''
     default:
@@ -65,9 +93,23 @@ const shellError = computed(() => {
   }
 })
 
-function onOpenStock(symbol: string) {
-  selectedStock.value = symbol
-  activeView.value = 'stock'
+function onOpenStock(target: {
+  symbol: string
+  name: string
+  changePct?: number | null
+  cumMain?: number | null
+  cumGray?: number | null
+}) {
+  stockFlowTarget.value = target
+  stockFlowOpen.value = true
+}
+
+async function onOpenSector(sectorId: string) {
+  activeView.value = 'sectors'
+  if (!sectorStore.bootstrapped) {
+    await sectorStore.bootstrap()
+  }
+  await sectorStore.selectSector(sectorId)
 }
 
 function onOpenSettings() {
@@ -110,6 +152,13 @@ watch(activeView, (view) => {
       void stockStore.reloadForDate()
     }
   }
+  if (view === 'hot-list') {
+    void hotListStore.bootstrap()
+  }
+  if (view === 'limit-up-ladder') {
+    limitUpLadderStore.setTradeDate(replayStore.tradeDate)
+    void limitUpLadderStore.bootstrap()
+  }
 })
 
 async function refreshAll() {
@@ -120,6 +169,11 @@ async function refreshAll() {
       await boardStore.manualRefresh()
     } else if (activeView.value === 'stock') {
       await stockStore.reloadForDate()
+    } else if (activeView.value === 'hot-list') {
+      await hotListStore.refresh({ force: true })
+    } else if (activeView.value === 'limit-up-ladder') {
+      limitUpLadderStore.setTradeDate(replayStore.tradeDate)
+      await limitUpLadderStore.load({ force: true })
     } else if (activeView.value === 'sectors') {
       if (!sectorStore.bootstrapped) {
         await sectorStore.bootstrap()
@@ -155,6 +209,9 @@ watch(
     }
 
     syncViewStores(tradeDate, replayStore.minute)
+    if (activeView.value === 'limit-up-ladder') {
+      limitUpLadderStore.setTradeDate(tradeDate)
+    }
   },
 )
 
@@ -246,6 +303,17 @@ onMounted(async () => {
         @open-settings="onOpenSettings"
       />
 
+      <HotListWorkspace
+        v-else-if="activeView === 'hot-list'"
+        @open-stock="onOpenStock"
+        @open-sector="onOpenSector"
+      />
+
+      <LimitUpLadderWorkspace
+        v-else-if="activeView === 'limit-up-ladder'"
+        @open-stock="onOpenStock"
+      />
+
       <CycleReplayWorkspace v-else-if="activeView === 'cycle-replay'" />
 
       <HealthPage v-else-if="activeView === 'health'" />
@@ -255,6 +323,17 @@ onMounted(async () => {
     <p v-if="shellError" class="workbench-error">
       {{ shellError }}
     </p>
+
+    <MemberStockFlowModal
+      v-model:show="stockFlowOpen"
+      :symbol="stockFlowTarget?.symbol ?? ''"
+      :name="stockFlowTarget?.name ?? ''"
+      :trade-date="replayStore.tradeDate"
+      :replay-minute="replayStore.minute"
+      :change-pct="stockFlowTarget?.changePct"
+      :cum-main="stockFlowTarget?.cumMain"
+      :cum-gray="stockFlowTarget?.cumGray"
+    />
   </div>
 </template>
 

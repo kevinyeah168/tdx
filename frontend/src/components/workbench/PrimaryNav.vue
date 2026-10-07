@@ -1,12 +1,21 @@
 <script setup lang="ts">
 const model = defineModel<
-  'home' | 'sectors' | 'stock' | 'cycle-replay' | 'health' | 'settings'
+  | 'home'
+  | 'sectors'
+  | 'stock'
+  | 'hot-list'
+  | 'limit-up-ladder'
+  | 'cycle-replay'
+  | 'health'
+  | 'settings'
 >({ default: 'home' })
 
 const tabs = [
   { key: 'home' as const, label: '首页' },
   { key: 'sectors' as const, label: '板块' },
   { key: 'stock' as const, label: '个股' },
+  { key: 'hot-list' as const, label: '市场热榜' },
+  { key: 'limit-up-ladder' as const, label: '涨停梯队' },
   { key: 'cycle-replay' as const, label: '周期回放' },
   { key: 'health' as const, label: '健康' },
   { key: 'settings' as const, label: '设置' },

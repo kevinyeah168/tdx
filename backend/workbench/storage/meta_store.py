@@ -194,3 +194,15 @@ class MetaStore:
                 unique,
             ).fetchall()
         return {str(row[0]): str(row[1]) for row in rows}
+
+    def security_names_by_codes(self, codes: list[str]) -> dict[str, str]:
+        if not codes:
+            return {}
+        unique = list(dict.fromkeys(codes))
+        placeholders = ",".join("?" for _ in unique)
+        with self._session() as connection:
+            rows = connection.execute(
+                f"SELECT code, name FROM security_master WHERE code IN ({placeholders})",
+                unique,
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
