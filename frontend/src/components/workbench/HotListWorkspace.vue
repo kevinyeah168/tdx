@@ -121,9 +121,22 @@ function renderPct(value: number | null | undefined) {
   return h('span', { class: ['hot-pct', toneClass(tone)] }, fmtPct(value))
 }
 
+function renderRank(value: number) {
+  const text = String(value)
+  const compact = text.length >= 4
+  return h('span', { class: ['hot-rank', compact ? 'hot-rank--compact' : null] }, text)
+}
+
 function stockColumns(showPrice: boolean): DataTableColumns<HotStockItem> {
   const cols: DataTableColumns<HotStockItem> = [
-    { title: '排名', key: 'rank', width: 48, align: 'center' },
+    {
+      title: '排名',
+      key: 'rank',
+      width: 48,
+      align: 'center',
+      className: 'hot-rank-col',
+      render: (row) => renderRank(row.rank),
+    },
     {
       title: '名称',
       key: 'name',
@@ -183,7 +196,14 @@ function stockColumns(showPrice: boolean): DataTableColumns<HotStockItem> {
 }
 
 const boardColumns = computed<DataTableColumns<HotBoardItem>>(() => [
-  { title: '排名', key: 'rank', width: 48, align: 'center' },
+  {
+    title: '排名',
+    key: 'rank',
+    width: 48,
+    align: 'center',
+    className: 'hot-rank-col',
+    render: (row) => renderRank(row.rank),
+  },
   {
     title: '板块',
     key: 'name',
@@ -553,6 +573,26 @@ const stockBoardLabel = computed(() => (stockBoard.value === 'surge' ? '飙升' 
 
 :deep(.hot-table--ths .n-data-table-th) {
   background: color-mix(in srgb, #e11d48 8%, var(--panel)) !important;
+}
+
+:deep(.hot-table .n-data-table-td.hot-rank-col),
+:deep(.hot-table .n-data-table-th.hot-rank-col) {
+  white-space: nowrap;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+:deep(.hot-rank) {
+  display: inline-block;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+:deep(.hot-rank--compact) {
+  font-size: 9px;
+  letter-spacing: -0.03em;
 }
 
 :deep(.hot-table .n-data-table-td.hot-code-col),

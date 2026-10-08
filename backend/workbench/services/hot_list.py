@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from workbench.config import WorkbenchSettings
 from workbench.domain import DataQuality
 from workbench.providers.eastmoney.hot_rank import EastMoneyHotRankProvider
+from workbench.providers.eastmoney.security_lookup import fetch_security_names_by_codes
 from workbench.providers.tdx.quotes import TdxQuoteService, normalize_quote_batch
 from workbench.providers.tonghuashun.hot_rank import TonghuashunHotRankProvider
 from workbench.storage.meta_store import MetaStore
@@ -88,6 +89,7 @@ class HotListService:
         self._tonghuashun = tonghuashun or TonghuashunHotRankProvider()
         self._cache_ttl = cache_ttl
         self._cache: dict[str, _CacheEntry] = {}
+        self._name_cache: dict[str, tuple[float, str]] = {}
         self._lock = threading.Lock()
 
     def stock_list(
@@ -237,6 +239,7 @@ class HotListService:
             fallback.update(_name_fallback_from_items(ths_rows))
 
         quotes = self._live_quotes(symbols, settings=settings, quote_client=quote_client)
+        em_names = self._eastmoney_name_fallback(items, names_by_symbol, names_by_code, fallback)
 
         enriched: list[HotStockItem] = []
         for item in items:
@@ -246,6 +249,7 @@ class HotListService:
                 or names_by_code.get(item.code)
                 or fallback.get(item.symbol)
                 or fallback.get(item.code)
+                or em_names.get(item.code)
                 or item.name
             )
             enriched.append(
@@ -258,6 +262,49 @@ class HotListService:
                 )
             )
         return enriched
+
+    def _eastmoney_name_fallback(
+        self,
+        items: list[HotStockItem],
+        names_by_symbol: dict[str, str],
+        names_by_code: dict[str, str],
+        fallback: dict[str, str],
+    ) -> dict[str, str]:
+        missing_codes = [
+            item.code
+            for item in items
+            if _is_missing_name(
+                item,
+                names_by_symbol.get(item.symbol)
+                or names_by_code.get(item.code)
+                or fallback.get(item.symbol)
+                or fallback.get(item.code)
+                or item.name,
+            )
+        ]
+        if not missing_codes:
+            return {}
+
+        now = time.monotonic()
+        resolved: dict[str, str] = {}
+        lookup_codes: list[str] = []
+        with self._lock:
+            for code in missing_codes:
+                cached = self._name_cache.get(code)
+                if cached is not None and cached[0] > now:
+                    resolved[code] = cached[1]
+                else:
+                    lookup_codes.append(code)
+
+        if lookup_codes:
+            fetched = fetch_security_names_by_codes(lookup_codes)
+            expires_at = now + self._cache_ttl
+            with self._lock:
+                for code, name in fetched.items():
+                    self._name_cache[code] = (expires_at, name)
+                    resolved[code] = name
+
+        return resolved
 
     @staticmethod
     def _live_quotes(

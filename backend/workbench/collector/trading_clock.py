@@ -10,12 +10,49 @@ TRADING_SESSIONS = (
     (time(13, 0), time(15, 0)),
 )
 
+AUCTION_START = time(9, 15)
+AUCTION_END = time(9, 25)
+POST_AUCTION_END = time(9, 30)
+
+AUCTION_BOARD_SORT_KEYS = ("ratio", "amount", "change", "volume", "price")
+AUCTION_BOARD_DEFAULT_SORT = "ratio"
+AUCTION_BOARD_SORT_PARAMS: dict[str, str] = {
+    "ratio": "f10",
+    "amount": "f63",
+    "change": "f3",
+    "volume": "f5",
+    "price": "f2",
+}
+
 
 def is_trading_minute(value: time) -> bool:
     for start, end in TRADING_SESSIONS:
         if start <= value <= end:
             return True
     return False
+
+
+def is_pre_market_auction_minute(value: time) -> bool:
+    return AUCTION_START <= value < POST_AUCTION_END
+
+
+def is_gray_collect_minute(value: time) -> bool:
+    return is_trading_minute(value) or is_pre_market_auction_minute(value)
+
+
+def auction_phase_at(now: datetime | None = None) -> str:
+    """Return waiting | auction | post_auction | closed for Shanghai wall clock."""
+    current = now or datetime.now(SHANGHAI)
+    if not is_trading_day(current.date()):
+        return "closed"
+    clock = current.time().replace(second=0, microsecond=0)
+    if clock < AUCTION_START:
+        return "waiting"
+    if AUCTION_START <= clock < AUCTION_END:
+        return "auction"
+    if AUCTION_END <= clock < POST_AUCTION_END:
+        return "post_auction"
+    return "closed"
 
 
 def trading_minutes_for_day() -> tuple[str, ...]:

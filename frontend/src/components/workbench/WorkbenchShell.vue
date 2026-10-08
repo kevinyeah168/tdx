@@ -3,6 +3,7 @@ import { MoonOutline, RefreshOutline, SunnyOutline } from '@vicons/ionicons5'
 import { NButton, NDropdown, NIcon, NTag, NTooltip } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 
+import AuctionBoardWorkspace from '@/components/workbench/AuctionBoardWorkspace.vue'
 import HotListWorkspace from '@/components/workbench/HotListWorkspace.vue'
 import LimitUpLadderWorkspace from '@/components/workbench/LimitUpLadderWorkspace.vue'
 import MemberStockFlowModal from '@/components/workbench/MemberStockFlowModal.vue'
@@ -15,6 +16,7 @@ import SettingsPage from '@/components/workbench/SettingsPage.vue'
 import CycleReplayWorkspace from '@/components/workbench/CycleReplayWorkspace.vue'
 import StockWorkspace from '@/components/workbench/StockWorkspace.vue'
 import { useBoardStore } from '@/stores/boardStore'
+import { useAuctionBoardStore } from '@/stores/auctionBoardStore'
 import { useHotListStore } from '@/stores/hotListStore'
 import { useLimitUpLadderStore } from '@/stores/limitUpLadderStore'
 import { useMarketStore } from '@/stores/marketStore'
@@ -25,6 +27,7 @@ import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { fmtPct } from '@/utils/format'
 import { todayTradeDate } from '@/utils/tradeDate'
 
+const auctionBoardStore = useAuctionBoardStore()
 const hotListStore = useHotListStore()
 const limitUpLadderStore = useLimitUpLadderStore()
 const marketStore = useMarketStore()
@@ -40,6 +43,7 @@ const activeView = ref<
   | 'stock'
   | 'hot-list'
   | 'limit-up-ladder'
+  | 'auction-board'
   | 'cycle-replay'
   | 'health'
   | 'settings'
@@ -86,6 +90,8 @@ const shellError = computed(() => {
       return hotListStore.error || ''
     case 'limit-up-ladder':
       return limitUpLadderStore.error || ''
+    case 'auction-board':
+      return auctionBoardStore.error || ''
     case 'sectors':
       return sectorStore.error || sectorStore.fundError || ''
     default:
@@ -159,6 +165,10 @@ watch(activeView, (view) => {
     limitUpLadderStore.setTradeDate(replayStore.tradeDate)
     void limitUpLadderStore.bootstrap()
   }
+  if (view === 'auction-board') {
+    auctionBoardStore.setTradeDate(replayStore.tradeDate)
+    void auctionBoardStore.bootstrap()
+  }
 })
 
 async function refreshAll() {
@@ -174,6 +184,9 @@ async function refreshAll() {
     } else if (activeView.value === 'limit-up-ladder') {
       limitUpLadderStore.setTradeDate(replayStore.tradeDate)
       await limitUpLadderStore.load({ force: true })
+    } else if (activeView.value === 'auction-board') {
+      auctionBoardStore.setTradeDate(replayStore.tradeDate)
+      await auctionBoardStore.load({ force: true })
     } else if (activeView.value === 'sectors') {
       if (!sectorStore.bootstrapped) {
         await sectorStore.bootstrap()
@@ -211,6 +224,9 @@ watch(
     syncViewStores(tradeDate, replayStore.minute)
     if (activeView.value === 'limit-up-ladder') {
       limitUpLadderStore.setTradeDate(tradeDate)
+    }
+    if (activeView.value === 'auction-board') {
+      auctionBoardStore.setTradeDate(tradeDate)
     }
   },
 )
@@ -311,6 +327,11 @@ onMounted(async () => {
 
       <LimitUpLadderWorkspace
         v-else-if="activeView === 'limit-up-ladder'"
+        @open-stock="onOpenStock"
+      />
+
+      <AuctionBoardWorkspace
+        v-else-if="activeView === 'auction-board'"
         @open-stock="onOpenStock"
       />
 

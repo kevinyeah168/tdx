@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from workbench.providers.eastmoney.security_lookup import normalize_em_symbol
+
 StockBoard = Literal["popularity", "surge"]
 
 
@@ -45,14 +47,15 @@ class EastMoneyHotRankProvider:
             sc = str(row.get("sc") or "").strip().upper()
             if not sc:
                 continue
+            symbol, code = normalize_em_symbol(sc)
             rank = _to_int(row.get("rk")) or (index + 1)
             rank_change = _to_int(row.get("hrc")) if board == "surge" else _to_int(row.get("hisRc"))
             result.append(
                 EastMoneyHotStockRow(
                     rank=rank,
-                    symbol=sc,
-                    code=_symbol_to_code(sc),
-                    name=_symbol_to_code(sc),
+                    symbol=symbol,
+                    code=code,
+                    name=code,
                     price=None,
                     change_pct=None,
                     rank_change=rank_change,

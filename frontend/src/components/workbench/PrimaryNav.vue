@@ -5,6 +5,7 @@ const model = defineModel<
   | 'stock'
   | 'hot-list'
   | 'limit-up-ladder'
+  | 'auction-board'
   | 'cycle-replay'
   | 'health'
   | 'settings'
@@ -16,6 +17,7 @@ const tabs = [
   { key: 'stock' as const, label: '个股' },
   { key: 'hot-list' as const, label: '市场热榜' },
   { key: 'limit-up-ladder' as const, label: '涨停梯队' },
+  { key: 'auction-board' as const, label: '盘前竞价' },
   { key: 'cycle-replay' as const, label: '周期回放' },
   { key: 'health' as const, label: '健康' },
   { key: 'settings' as const, label: '设置' },

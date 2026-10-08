@@ -72,7 +72,11 @@ class MinuteScheduler:
                 continue
 
             clock = now.time().replace(second=0, microsecond=0)
-            if not is_trading_minute(clock):
+            from workbench.collector.trading_clock import is_gray_collect_minute
+
+            outside_session = not is_trading_minute(clock)
+            gray_pre_market = self._mode == "gray" and is_gray_collect_minute(clock)
+            if outside_session and not gray_pre_market:
                 if self._mode == "gray":
                     self._sleep(1.0)
                     continue

@@ -56,3 +56,14 @@ def is_a_share(market: Market | str, code: str) -> bool:
     market_enum = market if isinstance(market, Market) else market_from_label(market)
     prefixes = _A_SHARE_PREFIXES.get(market_enum, ())
     return any(normalized_code.startswith(prefix) for prefix in prefixes)
+
+
+def infer_market_label_for_code(code: str) -> str:
+    """Infer SH/SZ/BJ from a six-digit A-share code."""
+    normalized_code = normalize_code(code)
+    for market, prefixes in _A_SHARE_PREFIXES.items():
+        if any(normalized_code.startswith(prefix) for prefix in prefixes):
+            return _MARKET_LABELS[market]
+    if normalized_code.startswith("6"):
+        return "SH"
+    return "SZ"

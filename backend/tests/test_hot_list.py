@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -116,6 +116,32 @@ def test_enrich_stock_items_uses_catalog_names() -> None:
     ]
     enriched = service._enrich_stock_items(items, meta=meta, settings=None, quote_client=None)
     assert enriched[0].name == "贵州茅台"
+
+
+def test_enrich_stock_items_uses_eastmoney_name_fallback() -> None:
+    meta = MagicMock()
+    meta.security_names.return_value = {}
+    meta.security_names_by_codes.return_value = {}
+    service = HotListService(
+        eastmoney=MagicMock(),
+        tonghuashun=MagicMock(),
+        cache_ttl=60,
+    )
+    items = [
+        HotStockItem(
+            rank=433,
+            symbol="BJ920252",
+            code="920252",
+            name="920252",
+            source="eastmoney",
+        )
+    ]
+    with patch(
+        "workbench.services.hot_list.fetch_security_names_by_codes",
+        return_value={"920252": "天宏锂电"},
+    ):
+        enriched = service._enrich_stock_items(items, meta=meta, settings=None, quote_client=None)
+    assert enriched[0].name == "天宏锂电"
 
 
 def test_enrich_stock_items_uses_ths_name_fallback() -> None:
