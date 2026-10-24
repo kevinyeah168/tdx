@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import date, datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,7 +14,7 @@ from workbench.collector.trading_clock import (
 )
 from workbench.config import WorkbenchSettings
 from workbench.providers.eastmoney.auction_board import (
-    AUCTION_BOARD_RANK_LIMIT,
+    AUCTION_BOARD_TOP_LIMIT,
     EastMoneyAuctionBoardProvider,
     EastMoneyAuctionBoardRow,
     auction_fetched_at_iso,
@@ -24,6 +24,8 @@ from workbench.storage.auction_snapshot_store import AuctionSnapshotStore
 
 CACHE_TTL_SECONDS = 10
 GRAY_MERGE_TTL_SECONDS = 60
+FULL_MARKET_MIN_INTERVAL_SECONDS = 45.0
+DEFAULT_PAGE_SIZE = 100
 
 
 class AuctionBoardItem(BaseModel):
@@ -50,7 +52,11 @@ class AuctionBoardResponse(BaseModel):
     data_kind: Literal["live", "snapshot"] = "live"
     phase: Literal["waiting", "auction", "post_auction", "closed"] = "closed"
     sort: str = AUCTION_BOARD_DEFAULT_SORT
-    limit: int = AUCTION_BOARD_RANK_LIMIT
+    scope: Literal["top", "market"] = "market"
+    q: str | None = None
+    offset: int = 0
+    limit: int = DEFAULT_PAGE_SIZE
+    total: int = 0
     items: list[AuctionBoardItem] = Field(default_factory=list)
 
 
@@ -85,6 +91,7 @@ class AuctionBoardService:
         self._cache_ttl = cache_ttl
         self._cache: dict[str, _CacheEntry] = {}
         self._gray_map: dict[str, _GrayMapEntry] = {}
+        self._last_full_fetch_at: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def bind_settings(self, settings: WorkbenchSettings) -> None:
@@ -98,102 +105,224 @@ class AuctionBoardService:
         trade_date: str,
         *,
         sort: str = AUCTION_BOARD_DEFAULT_SORT,
-        limit: int = AUCTION_BOARD_RANK_LIMIT,
+        scope: Literal["top", "market"] = "market",
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_SIZE,
         force: bool = False,
     ) -> AuctionBoardResponse:
         normalized_date = _normalize_iso_date(trade_date)
         sort_key = sort if sort in AUCTION_BOARD_SORT_KEYS else AUCTION_BOARD_DEFAULT_SORT
-        lim = max(1, min(int(limit), AUCTION_BOARD_RANK_LIMIT))
+        safe_offset = max(0, int(offset))
+        safe_limit = max(1, min(int(limit), 500))
+        query_text = (q or "").strip() or None
         today = date.today().isoformat()
         is_today = normalized_date == today
         phase = auction_phase_at() if is_today else "closed"
-        cache_key = f"{normalized_date}:{sort_key}:{lim}"
+        cache_key = (
+            f"{normalized_date}:{sort_key}:{scope}:{query_text or ''}:"
+            f"{safe_offset}:{safe_limit}"
+        )
 
         if not force:
             cached = self._get_memory_cache(cache_key)
             if cached is not None:
                 return cached
 
-        if not is_today:
-            snapshot = self._read_snapshot(normalized_date, sort_key, limit=lim)
-            if snapshot is not None:
-                self._set_memory_cache(cache_key, snapshot, ttl=60.0)
-                return snapshot
-            if force:
-                payload = self._fetch_live(
-                    normalized_date,
-                    sort_key=sort_key,
-                    limit=lim,
-                    phase="closed",
-                )
-                self._save_snapshot(normalized_date, sort_key, payload)
-                snapshot = self._read_snapshot(normalized_date, sort_key, limit=lim) or payload
-                self._set_memory_cache(cache_key, snapshot, ttl=60.0)
-                return snapshot
-            payload = AuctionBoardResponse(
-                trade_date=normalized_date,
-                fetched_at=_utc_now_iso(),
-                data_kind="snapshot",
-                phase="closed",
-                sort=sort_key,
-                limit=lim,
-                items=[],
+        use_live_top = scope == "top" and is_today and phase in {"auction", "post_auction"}
+        if use_live_top:
+            payload = self._fetch_top_live(
+                normalized_date,
+                sort_key=sort_key,
+                phase=phase,
+                offset=safe_offset,
+                limit=safe_limit,
+                q=query_text,
             )
-            self._set_memory_cache(cache_key, payload, ttl=60.0)
+            cache_ttl = 3.0 if not payload.items else None
+            self._set_memory_cache(cache_key, payload, ttl=cache_ttl)
             return payload
 
-        if phase in {"auction", "post_auction"}:
-            payload = self._fetch_live(normalized_date, sort_key=sort_key, limit=lim, phase=phase)
-            self._save_snapshot(normalized_date, sort_key, payload)
-            self._set_memory_cache(cache_key, payload)
-            return payload
-
-        if phase == "waiting":
-            payload = AuctionBoardResponse(
-                trade_date=normalized_date,
-                fetched_at=_utc_now_iso(),
-                data_kind="live",
+        if scope == "top" and is_today and phase == "waiting":
+            payload = _empty_response(
+                normalized_date,
+                sort_key=sort_key,
+                scope="top",
+                q=query_text,
+                offset=safe_offset,
+                limit=safe_limit,
                 phase="waiting",
-                sort=sort_key,
-                limit=lim,
-                items=[],
             )
             self._set_memory_cache(cache_key, payload, ttl=5.0)
             return payload
 
-        snapshot = self._read_snapshot(normalized_date, sort_key, limit=lim)
-        if snapshot is not None:
-            self._set_memory_cache(cache_key, snapshot, ttl=60.0)
-            return snapshot
-
-        payload = AuctionBoardResponse(
-            trade_date=normalized_date,
-            fetched_at=_utc_now_iso(),
-            data_kind="live",
-            phase=phase,
-            sort=sort_key,
-            limit=lim,
-            items=[],
+        payload = self._board_from_snapshot(
+            normalized_date,
+            sort_key=sort_key,
+            scope=scope,
+            q=query_text,
+            offset=safe_offset,
+            limit=safe_limit,
+            phase=phase if is_today else "closed",
+            data_kind="snapshot" if not is_today or phase == "closed" else "live",
+            force=force,
         )
-        self._set_memory_cache(cache_key, payload, ttl=30.0)
+        cache_ttl = 60.0 if payload.data_kind == "snapshot" else None
+        self._set_memory_cache(cache_key, payload, ttl=cache_ttl)
         return payload
 
-    def _fetch_live(
+    def collect_full_market(self, trade_date: str, *, force: bool = True) -> AuctionBoardResponse:
+        normalized_date = _normalize_iso_date(trade_date)
+        today = date.today().isoformat()
+        phase = auction_phase_at() if normalized_date == today else "closed"
+        self._refresh_full_market(
+            normalized_date,
+            sort_key=AUCTION_BOARD_DEFAULT_SORT,
+            phase=phase,
+            force=force,
+        )
+        stored = self._read_market_rows(
+            normalized_date,
+            sort_key=AUCTION_BOARD_DEFAULT_SORT,
+            q=None,
+            offset=0,
+            limit=DEFAULT_PAGE_SIZE,
+            phase=phase,
+            data_kind="snapshot" if phase == "closed" else "live",
+        )
+        return stored or _empty_response(
+            normalized_date,
+            sort_key=AUCTION_BOARD_DEFAULT_SORT,
+            scope="market",
+            q=None,
+            offset=0,
+            limit=DEFAULT_PAGE_SIZE,
+            phase=phase,
+        )
+
+    def _board_from_snapshot(
         self,
         trade_date: str,
         *,
         sort_key: str,
+        scope: Literal["top", "market"],
+        q: str | None,
+        offset: int,
         limit: int,
         phase: str,
+        data_kind: Literal["live", "snapshot"],
+        force: bool,
     ) -> AuctionBoardResponse:
+        if phase in {"auction", "post_auction"}:
+            should_refresh = force or (
+                self._snapshot_store is not None
+                and not self._snapshot_store.has_stock_rows(trade_date)
+            )
+            if should_refresh or self._should_refresh_full_market(trade_date):
+                self._refresh_full_market(
+                    trade_date,
+                    sort_key=sort_key,
+                    phase=phase,
+                    force=force,
+                )
+
+        read_offset = offset
+        read_limit = limit
+        if scope == "top":
+            if offset >= AUCTION_BOARD_TOP_LIMIT:
+                return _empty_response(
+                    trade_date,
+                    sort_key=sort_key,
+                    scope="top",
+                    q=q,
+                    offset=offset,
+                    limit=limit,
+                    phase=phase,
+                    data_kind=data_kind,
+                )
+            read_limit = min(limit, AUCTION_BOARD_TOP_LIMIT - offset)
+
+        stored = self._read_market_rows(
+            trade_date,
+            sort_key=sort_key,
+            q=q,
+            offset=read_offset,
+            limit=read_limit,
+            phase=phase,
+            data_kind=data_kind,
+            scope=scope,
+        )
+        if stored is not None and stored.total > 0:
+            if scope == "top":
+                stored.total = min(stored.total, AUCTION_BOARD_TOP_LIMIT)
+            return stored
+
+        if force and phase == "closed":
+            self._refresh_full_market(
+                trade_date,
+                sort_key=sort_key,
+                phase="closed",
+                force=True,
+            )
+            stored = self._read_market_rows(
+                trade_date,
+                sort_key=sort_key,
+                q=q,
+                offset=read_offset,
+                limit=read_limit,
+                phase="closed",
+                data_kind="snapshot",
+                scope=scope,
+            )
+            if stored is not None and stored.total > 0:
+                if scope == "top":
+                    stored.total = min(stored.total, AUCTION_BOARD_TOP_LIMIT)
+                return stored
+
+        return _empty_response(
+            trade_date,
+            sort_key=sort_key,
+            scope=scope,
+            q=q,
+            offset=offset,
+            limit=limit,
+            phase=phase,
+            data_kind=data_kind,
+        )
+
+    def _fetch_top_live(
+        self,
+        trade_date: str,
+        *,
+        sort_key: str,
+        phase: str,
+        offset: int,
+        limit: int,
+        q: str | None,
+    ) -> AuctionBoardResponse:
+        fetch_limit = min(AUCTION_BOARD_TOP_LIMIT, offset + limit)
         rows, source = self._provider.fetch_rank(
             trade_date=trade_date,
             sort_key=sort_key,
-            limit=limit,
+            limit=fetch_limit,
             rank_side="desc",
         )
         open_map = self._open_net_inflow_map(trade_date, phase)
-        items = [_to_item(index + 1, row, open_map.get(row.code)) for index, row in enumerate(rows)]
+        items = [
+            _to_item(index + 1, row, open_map.get(row.code))
+            for index, row in enumerate(rows)
+        ]
+        if q:
+            query = q.lower()
+            items = [
+                item
+                for item in items
+                if query in item.code.lower() or query in item.name.lower()
+            ]
+        total = len(items)
+        page_items = items[offset : offset + limit]
+        for index, item in enumerate(page_items, start=offset + 1):
+            item.rank = index
         return AuctionBoardResponse(
             trade_date=trade_date,
             fetched_at=auction_fetched_at_iso(),
@@ -201,7 +330,107 @@ class AuctionBoardService:
             data_kind="live",
             phase=phase,  # type: ignore[arg-type]
             sort=sort_key,
+            scope="top",
+            q=q,
+            offset=offset,
             limit=limit,
+            total=total,
+            items=page_items,
+        )
+
+    def _refresh_full_market(
+        self,
+        trade_date: str,
+        *,
+        sort_key: str,
+        phase: str,
+        force: bool,
+    ) -> None:
+        if self._snapshot_store is None:
+            return
+        if phase in {"waiting", "closed"} and not force:
+            return
+        if phase == "auction" and not force and not self._should_refresh_full_market(trade_date):
+            return
+        try:
+            rows, source = self._provider.fetch_all_market(
+                trade_date=trade_date,
+                sort_key=sort_key,
+            )
+        except Exception:
+            return
+        if not rows:
+            return
+        open_map = self._open_net_inflow_map(trade_date, phase)
+        payload_rows = [_row_to_store_dict(row, open_map.get(row.code)) for row in rows]
+        fetched_at = auction_fetched_at_iso()
+        self._snapshot_store.replace_stock_rows(
+            trade_date,
+            payload_rows,
+            fetched_at=fetched_at,
+            source=source,
+        )
+        with self._lock:
+            self._last_full_fetch_at[trade_date] = time.monotonic()
+
+    def _should_refresh_full_market(self, trade_date: str) -> bool:
+        with self._lock:
+            last_at = self._last_full_fetch_at.get(trade_date)
+        if last_at is None:
+            return True
+        return time.monotonic() - last_at >= FULL_MARKET_MIN_INTERVAL_SECONDS
+
+    def _read_market_rows(
+        self,
+        trade_date: str,
+        *,
+        sort_key: str,
+        q: str | None,
+        offset: int,
+        limit: int,
+        phase: str,
+        data_kind: Literal["live", "snapshot"] = "snapshot",
+        scope: Literal["top", "market"] = "market",
+    ) -> AuctionBoardResponse | None:
+        if self._snapshot_store is None:
+            return None
+        if not self._snapshot_store.has_stock_rows(trade_date):
+            return None
+        meta = self._snapshot_store.get_day_meta(trade_date) or {}
+        raw_items, total = self._snapshot_store.query_stock_rows(
+            trade_date,
+            sort=sort_key,
+            q=q,
+            offset=offset,
+            limit=limit,
+        )
+        items = [
+            AuctionBoardItem(
+                rank=offset + index + 1,
+                symbol=str(row["symbol"]),
+                code=str(row["code"]),
+                name=str(row["name"]),
+                price=_optional_float(row.get("price")),
+                change_pct=_optional_float(row.get("change_pct")),
+                volume_ratio=_optional_float(row.get("volume_ratio")),
+                amount=_optional_float(row.get("amount")),
+                volume=_optional_float(row.get("volume")),
+                open_net_inflow=_optional_float(row.get("open_net_inflow")),
+            )
+            for index, row in enumerate(raw_items)
+        ]
+        return AuctionBoardResponse(
+            trade_date=trade_date,
+            fetched_at=str(meta.get("fetched_at") or _utc_now_iso()),
+            source=str(meta.get("source") or "eastmoney"),
+            data_kind=data_kind,
+            phase=phase,  # type: ignore[arg-type]
+            sort=sort_key,
+            scope=scope,
+            q=q,
+            offset=offset,
+            limit=limit,
+            total=total,
             items=items,
         )
 
@@ -220,40 +449,6 @@ class AuctionBoardService:
         with self._lock:
             self._gray_map[trade_date] = _GrayMapEntry(values, GRAY_MERGE_TTL_SECONDS)
         return values
-
-    def _read_snapshot(self, trade_date: str, sort_key: str, *, limit: int) -> AuctionBoardResponse | None:
-        if self._snapshot_store is None:
-            return None
-        raw = self._snapshot_store.get(trade_date, sort_key)
-        if raw is None:
-            return None
-        try:
-            payload = AuctionBoardResponse.model_validate(raw)
-        except Exception:
-            return None
-        payload.data_kind = "snapshot"
-        payload.phase = "closed"
-        if len(payload.items) > limit:
-            payload.items = payload.items[:limit]
-            for index, item in enumerate(payload.items, start=1):
-                item.rank = index
-        payload.limit = limit
-        return payload
-
-    def _save_snapshot(self, trade_date: str, sort_key: str, payload: AuctionBoardResponse) -> None:
-        if self._snapshot_store is None:
-            return
-        if payload.phase == "auction":
-            return
-        if not payload.items:
-            return
-        snapshot_payload = payload.model_copy(update={"data_kind": "snapshot", "phase": "closed"})
-        self._snapshot_store.save(
-            trade_date,
-            sort_key,
-            snapshot_payload.model_dump(mode="json"),
-            fetched_at=payload.fetched_at,
-        )
 
     def _get_memory_cache(self, cache_key: str) -> AuctionBoardResponse | None:
         with self._lock:
@@ -295,6 +490,56 @@ def _to_item(rank: int, row: EastMoneyAuctionBoardRow, open_net_inflow: float | 
         volume=row.volume,
         open_net_inflow=resolved_inflow,
     )
+
+
+def _row_to_store_dict(row: EastMoneyAuctionBoardRow, open_net_inflow: float | None) -> dict[str, Any]:
+    resolved_inflow = row.open_net_inflow if row.open_net_inflow is not None else open_net_inflow
+    return {
+        "symbol": row.symbol,
+        "code": row.code,
+        "name": row.name,
+        "price": row.price,
+        "change_pct": row.change_pct,
+        "volume_ratio": row.volume_ratio,
+        "amount": row.amount,
+        "volume": row.volume,
+        "open_net_inflow": resolved_inflow,
+    }
+
+
+def _empty_response(
+    trade_date: str,
+    *,
+    sort_key: str,
+    scope: Literal["top", "market"],
+    q: str | None,
+    offset: int,
+    limit: int,
+    phase: str,
+    data_kind: Literal["live", "snapshot"] = "live",
+) -> AuctionBoardResponse:
+    return AuctionBoardResponse(
+        trade_date=trade_date,
+        fetched_at=_utc_now_iso(),
+        data_kind=data_kind,
+        phase=phase,  # type: ignore[arg-type]
+        sort=sort_key,
+        scope=scope,
+        q=q,
+        offset=offset,
+        limit=limit,
+        total=0,
+        items=[],
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_iso_date(trade_date: str) -> str:

@@ -196,3 +196,37 @@ def test_scheduler_runs_session_backfill_outside_trading_minutes() -> None:
             scheduler.serve()
 
     assert len(backfill_calls) == 2
+
+
+def test_scheduler_runs_auction_snapshot_on_trading_days() -> None:
+    auction_calls: list[tuple[date, datetime]] = []
+    sleep_calls: list[float] = []
+
+    def auction_snapshot(trade_date: date, now: datetime) -> dict[str, object]:
+        auction_calls.append((trade_date, now))
+        return {"mode": "auction-snapshot", "minute": now.strftime("%H:%M")}
+
+    def sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            raise _StopLoop
+
+    fixed_now = datetime(2026, 8, 25, 9, 26, 0)
+    scheduler = MinuteScheduler(
+        collect=lambda *_args, **_kwargs: {},
+        auction_snapshot=auction_snapshot,
+        sleep=sleep,
+        mode="hot",
+    )
+
+    with (
+        patch("workbench.collector.scheduler.is_trading_day", return_value=True),
+        patch("workbench.collector.scheduler.is_trading_minute", return_value=False),
+        patch("workbench.collector.scheduler.datetime") as mock_datetime,
+    ):
+        mock_datetime.now.return_value = fixed_now
+        with pytest.raises(_StopLoop):
+            scheduler.serve()
+
+    assert len(auction_calls) >= 1
+    assert auction_calls[0] == (date(2026, 8, 25), fixed_now)

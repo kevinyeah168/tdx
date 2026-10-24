@@ -13,6 +13,7 @@ CollectFn = Callable[[date, str], dict[str, object]]
 SleepFn = Callable[[float], None]
 TickFn = Callable[[], None]
 BackfillFn = Callable[[date, datetime], dict[str, object] | None]
+AuctionSnapshotFn = Callable[[date, datetime], dict[str, object] | None]
 
 
 CollectorMode = str  # "hot" | "archive" | "combined" | "gray"
@@ -33,6 +34,7 @@ class MinuteScheduler:
         gray_interval_seconds: float = 15.0,
         yuntu_finalize: Callable[[date], dict[str, object] | None] | None = None,
         yuntu_close_reconcile: Callable[[date, datetime], dict[str, object] | None] | None = None,
+        auction_snapshot: AuctionSnapshotFn | None = None,
         on_tick: TickFn | None = None,
         mode: CollectorMode = "combined",
     ) -> None:
@@ -50,6 +52,7 @@ class MinuteScheduler:
         self._gray_collect = gray_collect
         self._yuntu_finalize = yuntu_finalize
         self._yuntu_close_reconcile = yuntu_close_reconcile
+        self._auction_snapshot = auction_snapshot
         self._sleep = sleep
         self._quote_interval_seconds = quote_interval_seconds
         self._priority_interval_seconds = priority_interval_seconds
@@ -67,6 +70,15 @@ class MinuteScheduler:
             if self._on_tick is not None:
                 self._on_tick()
             now = datetime.now()
+            if is_trading_day(now.date()) and self._auction_snapshot is not None:
+                try:
+                    auction_result = self._auction_snapshot(now.date(), now)
+                    if auction_result is not None:
+                        print(
+                            json.dumps(auction_result, ensure_ascii=False, separators=(",", ":"))
+                        )
+                except Exception as error:
+                    print(f"auction snapshot failed: {error}", file=sys.stderr)
             if not is_trading_day(now.date()):
                 self._sleep(60.0)
                 continue

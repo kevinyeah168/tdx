@@ -10,6 +10,7 @@ import sqlite3
 import sys
 from typing import Sequence
 
+from workbench.collector.auction_snapshot_collector import AuctionSnapshotCollector
 from workbench.collector.gray_stock_collector import GrayStockCollector
 from workbench.collector.yuntu_snapshot_collector import YuntuSnapshotCollector
 from workbench.collector.classic_index_backfill import ClassicIndexBackfillService
@@ -249,10 +250,17 @@ def serve(arguments: argparse.Namespace) -> int:
             gray_stocks.hot.initialize()
             return gray_stocks.collect(trade_date, minute)
 
+        auction_snapshots = AuctionSnapshotCollector(settings)
+
+        def run_auction_snapshot(trade_date: date, now: datetime) -> dict[str, object] | None:
+            write_collector_heartbeat(settings.data_dir, role=collector_role)
+            return auction_snapshots.collect_if_due(trade_date, now)
+
         scheduler = MinuteScheduler(
             collect=lambda *_args, **_kwargs: {},
             gray_collect=collect_gray,
             gray_interval_seconds=settings.gray_collect_interval_seconds,
+            auction_snapshot=run_auction_snapshot,
             on_tick=lambda: write_collector_heartbeat(settings.data_dir, role=collector_role),
             mode="gray",
         )
@@ -345,6 +353,12 @@ def serve(arguments: argparse.Namespace) -> int:
         write_collector_heartbeat(settings.data_dir, role=collector_role)
         return close_reconcile.reconcile_if_due(trade_date, now)
 
+    auction_snapshots = AuctionSnapshotCollector(settings)
+
+    def run_auction_snapshot(trade_date: date, now: datetime) -> dict[str, object] | None:
+        write_collector_heartbeat(settings.data_dir, role=collector_role)
+        return auction_snapshots.collect_if_due(trade_date, now)
+
     # gray runs in a dedicated process (--mode gray); yuntu paths never embed it.
     if collector_role == "hot":
         priority_fn: CollectFn | None = collect_yuntu
@@ -369,7 +383,7 @@ def serve(arguments: argparse.Namespace) -> int:
         gray_interval_seconds=settings.gray_collect_interval_seconds,
         yuntu_finalize=yuntu_finalize_fn,
         yuntu_close_reconcile=yuntu_close_reconcile_fn,
-        session_backfill=backfill_fn,
+        auction_snapshot=run_auction_snapshot,
         quote_interval_seconds=settings.quote_interval_seconds,
         priority_interval_seconds=settings.yuntu_collect_interval_seconds,
         full_collect_interval_seconds=settings.full_collect_interval_seconds,
